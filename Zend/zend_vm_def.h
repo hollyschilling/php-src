@@ -3607,10 +3607,16 @@ ZEND_VM_HANDLER(212, ZEND_BIND_EXTENSION, VAR, CONST)
 {
 	USE_OPLINE
 	zend_class_entry *ce;
+	zend_string *ext_name_lc = NULL;
 
 	SAVE_OPLINE();
 	ce = Z_CE_P(EX_VAR(opline->op1.var));
-	zend_extension_methods_register(Z_STR_P(RT_CONSTANT(opline, opline->op2)), ce);
+	/* extended_value flags the named form (`extension Name on Target`); the
+	 * lc extension name is then the literal following the target name. */
+	if (opline->extended_value) {
+		ext_name_lc = Z_STR_P(RT_CONSTANT(opline, opline->op2) + 1);
+	}
+	zend_extension_methods_register(Z_STR_P(RT_CONSTANT(opline, opline->op2)), ce, ext_name_lc);
 	ZEND_VM_NEXT_OPCODE_CHECK_EXCEPTION();
 }
 

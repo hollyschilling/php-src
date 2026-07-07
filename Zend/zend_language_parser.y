@@ -292,7 +292,7 @@ static YYSIZE_T zend_yytnamerr(char*, const char*);
 
 %type <num> returns_ref function fn is_reference is_variadic property_modifiers property_hook_modifiers
 %type <num> method_modifiers class_const_modifiers member_modifier optional_cpp_modifiers
-%type <num> class_modifiers class_modifier anonymous_class_modifiers anonymous_class_modifiers_optional use_type backup_fn_flags
+%type <num> class_modifiers class_modifier anonymous_class_modifiers anonymous_class_modifiers_optional use_type backup_fn_flags extension_keyword
 
 %type <ptr> backup_lex_pos
 %type <str> backup_doc_comment
@@ -423,6 +423,7 @@ top_statement:
 	|	T_USE use_type group_use_declaration ';'	{ $$ = $3; $$->attr = $2; }
 	|	T_USE use_declarations ';'					{ $$ = $2; $$->attr = ZEND_SYMBOL_CLASS; }
 	|	T_USE use_type use_declarations ';'			{ $$ = $3; $$->attr = $2; }
+	|	T_USE T_EXTENSION use_declarations ';'		{ $$ = $3; $$->attr = ZEND_SYMBOL_EXTENSION; }
 ;
 
 use_type:
@@ -661,12 +662,28 @@ extension_target:
 			$$->attr = ZEND_NAME_NOT_FQ; }
 ;
 
+extension_keyword:
+		T_EXTENSION { $$ = CG(zend_lineno); }
+;
+
 extension_declaration_statement:
-		T_EXTENSION { $<num>$ = CG(zend_lineno); }
-		extension_target T_VARIABLE backup_doc_comment '{' class_statement_list '}'
-			{ $$ = zend_ast_create(ZEND_AST_EXTENSION_DECL, $3, $4,
-			       zend_ast_create_decl(ZEND_AST_CLASS, ZEND_ACC_ANON_CLASS|ZEND_ACC_FINAL, $<num>2, $5,
-			           NULL, NULL, NULL, $7, NULL, NULL)); }
+		extension_keyword extension_target T_VARIABLE backup_doc_comment '{' class_statement_list '}'
+			{ $$ = zend_ast_create(ZEND_AST_EXTENSION_DECL, $2, $3,
+			       zend_ast_create_decl(ZEND_AST_CLASS, ZEND_ACC_ANON_CLASS|ZEND_ACC_FINAL, $1, $4,
+			           NULL, NULL, NULL, $6, NULL, NULL)); }
+	|	extension_keyword T_STRING T_STRING extension_target T_VARIABLE backup_doc_comment '{' class_statement_list '}'
+			{ if (!zend_string_equals_literal_ci(zend_ast_get_str($3), "on")) {
+			      zend_throw_exception_ex(zend_ce_compile_error, 0,
+			          "Unexpected identifier \"%s\", expected \"on\" in extension declaration",
+			          ZSTR_VAL(zend_ast_get_str($3)));
+			      YYERROR;
+			  }
+			  /* The "on" contextual word is consumed here; its node is never
+			   * attached to the tree, so release its string now. */
+			  zend_string_release(zend_ast_get_str($3));
+			  $$ = zend_ast_create(ZEND_AST_EXTENSION_DECL, $4, $5,
+			       zend_ast_create_decl(ZEND_AST_CLASS, ZEND_ACC_ANON_CLASS|ZEND_ACC_FINAL, $1, $6,
+			           zend_ast_get_str($2), NULL, NULL, $8, NULL, NULL)); }
 ;
 
 enum_backing_type:

@@ -23,6 +23,7 @@
 #include "zend_attributes.h"
 #include "zend_compile.h"
 #include "zend_constants.h"
+#include "zend_extension_methods.h"
 #include "zend_llist.h"
 #include "zend_API.h"
 #include "zend_exceptions.h"
@@ -403,6 +404,7 @@ void zend_file_context_begin(zend_file_context *prev_context) /* {{{ */
 	FC(imports) = NULL;
 	FC(imports_function) = NULL;
 	FC(imports_const) = NULL;
+	FC(extension_imports) = NULL;
 	FC(current_namespace) = NULL;
 	FC(in_namespace) = 0;
 	FC(has_bracketed_namespaces) = 0;
@@ -415,6 +417,9 @@ void zend_file_context_end(const zend_file_context *prev_context) /* {{{ */
 {
 	zend_end_namespace();
 	zend_hash_destroy(&FC(seen_symbols));
+	if (FC(extension_imports)) {
+		zend_hash_release(FC(extension_imports));
+	}
 	CG(file_context) = *prev_context;
 }
 /* }}} */
@@ -5667,6 +5672,7 @@ static void zend_compile_static_call(znode *result, zend_ast *ast, uint32_t type
 
 static zend_class_entry *zend_compile_class_decl(znode *result, const zend_ast *ast, bool toplevel);
 static void zend_compile_extension_decl(zend_ast *ast);
+static void zend_extension_imports_add(zend_string *name_lc);
 
 static void zend_compile_new(znode *result, zend_ast *ast) /* {{{ */
 {
@@ -8772,6 +8778,11 @@ static zend_op_array *zend_compile_func_decl_ex(
 	}
 
 	op_array->fn_flags |= (orig_op_array->fn_flags & ZEND_ACC_STRICT_TYPES);
+	/* Snapshot the file's `use extension` imports as of this position. */
+	if (FC(extension_imports)) {
+		op_array->extension_imports = FC(extension_imports);
+		GC_ADDREF(op_array->extension_imports);
+	}
 	op_array->fn_flags |= decl->flags;
 	op_array->line_start = decl->start_lineno;
 	op_array->line_end = decl->end_lineno;
@@ -9658,6 +9669,19 @@ static void zend_compile_extension_decl(zend_ast *ast) /* {{{ */
 		target_lc = zend_string_tolower(target_name);
 	}
 
+	zend_string *ext_name_lc = NULL;
+	if (decl->name) {
+		/* Named form (`extension Name on Target $recv`): namespaced like a
+		 * class declaration; lexically gated at resolution time
+		 * (`use extension`). The declaring position imports its own
+		 * extension, so the block's methods and all code below can call it
+		 * without a self-import. */
+		zend_string *ext_name = zend_prefix_with_ns(decl->name);
+		ext_name_lc = zend_string_tolower(ext_name);
+		zend_string_release(ext_name);
+		zend_extension_imports_add(ext_name_lc);
+	}
+
 	/* Compile the body as an anonymous, final, uninstantiable class. Its
 	 * methods have no $this: each receives the receiver in the declared
 	 * variable via ZEND_RECV_RECEIVER (see zend_compile_func_decl), so
@@ -9686,6 +9710,17 @@ static void zend_compile_extension_decl(zend_ast *ast) /* {{{ */
 	opline = zend_emit_op(NULL, ZEND_BIND_EXTENSION, &class_node, NULL);
 	opline->op2_type = IS_CONST;
 	opline->op2.constant = zend_add_literal_string(&target_lc);
+
+	if (ext_name_lc) {
+		/* The lc name is emitted as the literal following the target name
+		 * (consecutive-literal pattern; extended_value flags its presence). */
+		int ext_name_literal = zend_add_literal_string(&ext_name_lc);
+		ZEND_ASSERT(ext_name_literal == (int) opline->op2.constant + 1);
+		opline->extended_value = 1;
+	} else {
+		/* Anonymous form: globally visible once executed. */
+		opline->extended_value = 0;
+	}
 
 	zend_string_release(target_name);
 }
@@ -10041,14 +10076,69 @@ static void zend_check_already_in_use(uint32_t type, const zend_string *old_name
 }
 /* }}} */
 
+/* `use extension Vendor\Name;` is activation, not aliasing: it adds the
+ * fully-qualified extension name to this file's visibility set, consulted
+ * from the calling frame when extension methods are resolved. */
+/* Append to the file's current `use extension` import set. Copy-on-write:
+ * op_arrays snapshot the set as of their compile position by holding the
+ * table pointer, so a published table is never mutated. */
+static void zend_extension_imports_add(zend_string *name_lc) /* {{{ */
+{
+	HashTable *imports;
+	zval zv;
+
+	if (FC(extension_imports)) {
+		zval *entry;
+		ZEND_HASH_PACKED_FOREACH_VAL(FC(extension_imports), entry) {
+			if (zend_string_equals(Z_STR_P(entry), name_lc)) {
+				return; /* already imported */
+			}
+		} ZEND_HASH_FOREACH_END();
+		imports = zend_array_dup(FC(extension_imports));
+		zend_hash_release(FC(extension_imports));
+	} else {
+		imports = zend_new_array(4);
+	}
+	ZVAL_STR(&zv, zend_new_interned_string(zend_string_copy(name_lc)));
+	zend_hash_next_index_insert(imports, &zv);
+	FC(extension_imports) = imports;
+}
+/* }}} */
+
+static void zend_compile_use_extension(const zend_ast_list *list) /* {{{ */
+{
+	for (uint32_t i = 0; i < list->children; ++i) {
+		const zend_ast *use_ast = list->child[i];
+		zend_string *name = zend_ast_get_str(use_ast->child[0]);
+		zend_string *name_lc;
+
+		if (use_ast->child[1]) {
+			zend_error_noreturn(E_COMPILE_ERROR,
+				"Cannot alias extension %s: extension imports do not support \"as\"",
+				ZSTR_VAL(name));
+		}
+
+		name_lc = zend_string_tolower(name);
+		zend_extension_imports_add(name_lc);
+		zend_string_release(name_lc);
+	}
+}
+/* }}} */
+
 static void zend_compile_use(zend_ast *ast) /* {{{ */
 {
 	const zend_ast_list *list = zend_ast_get_list(ast);
 	uint32_t i;
 	zend_string *current_ns = FC(current_namespace);
 	uint32_t type = ast->attr;
-	HashTable *current_import = zend_get_import_ht(type);
+	HashTable *current_import;
 	bool case_sensitive = type == ZEND_SYMBOL_CONST;
+
+	if (type == ZEND_SYMBOL_EXTENSION) {
+		zend_compile_use_extension(list);
+		return;
+	}
+	current_import = zend_get_import_ht(type);
 
 	for (i = 0; i < list->children; ++i) {
 		const zend_ast *use_ast = list->child[i];

@@ -623,6 +623,12 @@ static zend_op_array *zend_compile(zend_function_type type)
 		zend_emit_final_return(type == ZEND_USER_FUNCTION);
 		op_array->line_start = 1;
 		op_array->line_end = last_lineno;
+		/* Top-level code is one op_array: it gets the file's final
+		 * `use extension` import set. */
+		if (CG(file_context).extension_imports) {
+			op_array->extension_imports = CG(file_context).extension_imports;
+			GC_ADDREF(op_array->extension_imports);
+		}
 		pass_two(op_array);
 		zend_oparray_context_end(&original_oparray_context);
 		zend_file_context_end(&original_file_context);
