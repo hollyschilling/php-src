@@ -10088,18 +10088,33 @@ static void zend_compile_extension_decl(zend_ast *ast) /* {{{ */
 		}
 	}
 
-	/* Built-in type names are not classes and cannot be extended: reject
-	 * them rather than registering entries no object can ever match.
-	 * (Extension methods on the scalar value types are proposed separately.) */
+	/* Scalar targets: the built-in value type names, matched on the raw
+	 * unqualified name before namespace resolution (they are not classes and
+	 * must not be namespace-prefixed). Other reserved type names cannot be
+	 * extended at all. */
+	bool is_scalar_target = false;
 	if (target_ast->kind == ZEND_AST_ZVAL
-	 && target_ast->attr == ZEND_NAME_NOT_FQ
-	 && zend_is_reserved_class_name(zend_ast_get_str(target_ast))) {
-		zend_error_noreturn(E_COMPILE_ERROR,
-			"Cannot extend reserved type %s", ZSTR_VAL(zend_ast_get_str(target_ast)));
+	 && target_ast->attr == ZEND_NAME_NOT_FQ) {
+		zend_string *raw = zend_ast_get_str(target_ast);
+		if (zend_string_equals_literal_ci(raw, "string")
+		 || zend_string_equals_literal_ci(raw, "int")
+		 || zend_string_equals_literal_ci(raw, "float")
+		 || zend_string_equals_literal_ci(raw, "bool")
+		 || zend_string_equals_literal_ci(raw, "array")) {
+			is_scalar_target = true;
+		} else if (zend_is_reserved_class_name(raw)) {
+			zend_error_noreturn(E_COMPILE_ERROR,
+				"Cannot extend reserved type %s", ZSTR_VAL(raw));
+		}
 	}
 
-	target_name = zend_resolve_class_name_ast(target_ast);
-	target_lc = zend_string_tolower(target_name);
+	if (is_scalar_target) {
+		target_name = zend_string_copy(zend_ast_get_str(target_ast));
+		target_lc = zend_string_tolower(target_name);
+	} else {
+		target_name = zend_resolve_class_name_ast(target_ast);
+		target_lc = zend_string_tolower(target_name);
+	}
 
 	zend_string *ext_name = NULL, *ext_name_lc = NULL;
 	if (decl->name) {
@@ -10138,11 +10153,22 @@ static void zend_compile_extension_decl(zend_ast *ast) /* {{{ */
 		zend_string_release(ext_name);
 	}
 
-	/* Extension methods ride the ordinary polymorphic inline cache: a call
-	 * site belongs to exactly one file, and registration is monotonic with
-	 * first-wins conflicts within a request, so a resolution cached at a
-	 * site can never go stale. (The phase-1 prototype excluded them via
-	 * ZEND_ACC_NEVER_CACHE, costing a registry walk on every call.) */
+	/* Object-target extension methods ride the ordinary polymorphic inline
+	 * cache: a call site belongs to exactly one file, and registration is
+	 * monotonic with first-wins conflicts within a request, so a resolution
+	 * cached at a site can never go stale. Scalar-target methods stay
+	 * excluded: their dispatch has no class entry to key a cache on, and
+	 * NEVER_CACHE also keeps the tracing JIT from entering bodies that
+	 * must never be compiled (the non-object receiver handoff in This).
+	 * Must happen at compile time: under opcache the CE is persisted to
+	 * (protected) shared memory and is immutable at runtime. */
+	if (is_scalar_target) {
+		zend_function *ext_fn;
+		ZEND_HASH_MAP_FOREACH_PTR(&ext_ce->function_table, ext_fn) {
+			ext_fn->common.fn_flags |= ZEND_ACC_NEVER_CACHE;
+			ext_fn->common.fn_flags2 |= ZEND_ACC2_SCALAR_RECEIVER;
+		} ZEND_HASH_FOREACH_END();
+	}
 
 	/* Runtime registration once the synthetic CE is declared. */
 	opline = zend_emit_op(NULL, ZEND_BIND_EXTENSION, &class_node, NULL);

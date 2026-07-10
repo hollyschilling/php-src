@@ -193,6 +193,50 @@ static zend_function *ext_lookup_visible(
 	return NULL; /* not imported here: keep walking */
 }
 
+/* Scalar receivers dispatch by value type. Lane keys share the registry
+ * with class targets; no collision is possible because these names are
+ * reserved and can never name a class. Named scalar extensions are
+ * lexically gated exactly like class-targeted ones. */
+ZEND_API zend_function *zend_extension_methods_get_scalar(const zval *receiver, zend_string *method_name, zend_string *lc_method_name)
+{
+	const char *lane;
+	size_t lane_len;
+	HashTable *registry = EG(extension_method_registry);
+	HashTable *methods;
+	zend_function *fn;
+	const zend_op_array *calling = NULL;
+	bool calling_known = false;
+
+	if (!registry || zend_hash_num_elements(registry) == 0) {
+		return NULL;
+	}
+
+	switch (Z_TYPE_P(receiver)) {
+		case IS_STRING: lane = "string"; lane_len = sizeof("string") - 1; break;
+		case IS_LONG:   lane = "int";    lane_len = sizeof("int") - 1;    break;
+		case IS_DOUBLE: lane = "float";  lane_len = sizeof("float") - 1;  break;
+		case IS_TRUE:
+		case IS_FALSE:  lane = "bool";   lane_len = sizeof("bool") - 1;   break;
+		case IS_ARRAY:  lane = "array";  lane_len = sizeof("array") - 1;  break;
+		default:
+			return NULL;
+	}
+
+	methods = zend_hash_str_find_ptr(registry, lane, lane_len);
+	if (!methods) {
+		return NULL;
+	}
+
+	if (lc_method_name) {
+		fn = ext_lookup_visible(methods, lc_method_name, &calling, &calling_known);
+	} else {
+		zend_string *lc = zend_string_tolower(method_name);
+		fn = ext_lookup_visible(methods, lc, &calling, &calling_known);
+		zend_string_release(lc);
+	}
+	return fn;
+}
+
 /* Miss handler shared by the object and scalar lookups: hand every
  * imported-but-unloaded extension name of the calling op_array to the class
  * autoloader. Returns true if the caller should retry its lookup. */
