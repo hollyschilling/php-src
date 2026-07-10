@@ -9326,14 +9326,27 @@ static void zend_surfaces_compile_declarations(zend_class_entry *ce, const zend_
 
 			/* The surface-bound interface becomes an ordinary implemented
 			 * interface (nominal implementation); scoped conformance is
-			 * validated at link time. */
-			ce->num_interfaces++;
-			ce->interface_names =
-				erealloc(ce->interface_names, sizeof(zend_class_name) * ce->num_interfaces);
-			ce->interface_names[ce->num_interfaces - 1].name =
-				zend_string_copy(Z_STR(iface_zv));
-			ce->interface_names[ce->num_interfaces - 1].lc_name =
-				zend_string_tolower(Z_STR(iface_zv));
+			 * validated at link time. An explicit `implements` of the same
+			 * interface (or another surface's binding to it) is fine — only
+			 * one entry goes on the interface list. */
+			zend_string *iface_lc = zend_string_tolower(Z_STR(iface_zv));
+			bool already_listed = false;
+			for (uint32_t j = 0; j < ce->num_interfaces; j++) {
+				if (zend_string_equals(ce->interface_names[j].lc_name, iface_lc)) {
+					already_listed = true;
+					break;
+				}
+			}
+			if (already_listed) {
+				zend_string_release(iface_lc);
+			} else {
+				ce->num_interfaces++;
+				ce->interface_names =
+					erealloc(ce->interface_names, sizeof(zend_class_name) * ce->num_interfaces);
+				ce->interface_names[ce->num_interfaces - 1].name =
+					zend_string_copy(Z_STR(iface_zv));
+				ce->interface_names[ce->num_interfaces - 1].lc_name = iface_lc;
+			}
 		} else {
 			ZVAL_NULL(&iface_zv);
 		}

@@ -2052,7 +2052,7 @@ exit:
 		const zval *surface_set =
 			zend_surfaces_member_set(fbc->common.scope, 'm', lc_method_name);
 		if (surface_set
-		 && !zend_surfaces_method_has_interface_face(fbc)
+		 && !zend_surfaces_method_has_interface_face(fbc, zobj->ce, lc_method_name)
 		 && !zend_surfaces_access_allowed(fbc->common.scope, zobj->ce, surface_set)) {
 			zend_throw_error(NULL,
 				"Call to surface method %s::%s() from %s scope "

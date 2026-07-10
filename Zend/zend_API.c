@@ -4034,7 +4034,7 @@ get_function_via_handler:
 				const zval *surface_set = zend_surfaces_member_set(
 					fcc->function_handler->common.scope, 'm', lmname);
 				if (surface_set
-				 && !zend_surfaces_method_has_interface_face(fcc->function_handler)
+				 && !zend_surfaces_method_has_interface_face(fcc->function_handler, receiver_ce, lmname)
 				 && !zend_surfaces_access_allowed(
 						fcc->function_handler->common.scope, receiver_ce, surface_set)) {
 					if (error) {
