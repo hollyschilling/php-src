@@ -137,31 +137,32 @@ ZEND_API bool zend_surfaces_access_allowed(
 	return false;
 }
 
-/* A surface method that implements a method of a surface-bound interface
- * has a public face: any holder of the interface type may call it freely
- * (the RFC gates the *conversion* to the interface, not downstream use).
- * A runtime check cannot see whether the call site held the interface or
- * the concrete class, so such members are exempt from the member gate; the
- * conversion gate is deferred (see RFC notes). */
-ZEND_API bool zend_surfaces_method_has_interface_face(const zend_function *fbc)
+/* An interface-reachable member is never gated: any method that some
+ * implemented interface declares has a public "interface face" — any holder
+ * of the interface type may call it freely (the RFC gates the *conversion*
+ * to a bound interface, not downstream use, and that gate is deferred). A
+ * runtime check cannot see whether the call site held the interface or the
+ * concrete class, so such members are exempt from the member gate. Link-time
+ * validation guarantees the exemption is sound: a surfaced method satisfying
+ * an interface must be on a surface bound to that interface (see
+ * surfaces_check_interface_conformance). */
+ZEND_API bool zend_surfaces_method_has_interface_face(
+	const zend_function *fbc, const zend_class_entry *receiver_ce,
+	zend_string *lc_method_name)
 {
+	/* Fast path: the method's prototype is the interface declaration. */
 	const zend_function *proto = fbc->common.prototype;
-	if (!proto || !proto->common.scope
-	 || !(proto->common.scope->ce_flags & ZEND_ACC_INTERFACE)) {
-		return false;
+	if (proto && proto->common.scope
+	 && (proto->common.scope->ce_flags & ZEND_ACC_INTERFACE)) {
+		return true;
 	}
-	const zend_class_entry *iface = proto->common.scope;
-	for (const zend_class_entry *ce = fbc->common.scope; ce; ce = ce->parent) {
-		if (!ce->surface_decls) {
-			continue;
+	/* The prototype may be a class ancestor's declaration (e.g. an abstract
+	 * base method) even when an interface also declares the method; scan the
+	 * receiver's (linked) interface list. */
+	for (uint32_t i = 0; i < receiver_ce->num_interfaces; i++) {
+		if (zend_hash_exists(&receiver_ce->interfaces[i]->function_table, lc_method_name)) {
+			return true;
 		}
-		zval *iface_zv;
-		ZEND_HASH_FOREACH_VAL(ce->surface_decls, iface_zv) {
-			if (Z_TYPE_P(iface_zv) == IS_STRING
-			 && zend_string_equals_ci(Z_STR_P(iface_zv), iface->name)) {
-				return true;
-			}
-		} ZEND_HASH_FOREACH_END();
 	}
 	return false;
 }
@@ -262,48 +263,69 @@ static void surfaces_check_member_names(zend_class_entry *ce)
 	} ZEND_HASH_FOREACH_END();
 }
 
-/* Conformance of a surface-bound interface, scoped to (that surface's
- * members ∪ the class's public members): a member on a different surface
- * does not satisfy the interface. Ordinary signature/existence conformance
- * was already checked by the normal implements machinery. */
+/* The interface-reachability guarantee: a method required by ANY implemented
+ * interface must be public or on a surface bound to that interface — so a
+ * member reachable through an interface type is never gated, and an
+ * interface cannot be spanned across surfaces. Ordinary signature/existence
+ * conformance was already checked by the normal implements machinery. */
 static void surfaces_check_interface_conformance(zend_class_entry *ce)
 {
-	zend_string *surface_name;
-	zval *iface_zv;
+	/* Cheap skip for hierarchies with no surface members at all. */
+	bool any_surface_members = false;
+	for (const zend_class_entry *c = ce; c; c = c->parent) {
+		if (c->surface_members) {
+			any_surface_members = true;
+			break;
+		}
+	}
+	if (!any_surface_members) {
+		return;
+	}
 
-	ZEND_HASH_FOREACH_STR_KEY_VAL(ce->surface_decls, surface_name, iface_zv) {
-		if (Z_TYPE_P(iface_zv) != IS_STRING) {
-			continue;
-		}
-		zend_class_entry *iface = NULL;
-		for (uint32_t i = 0; i < ce->num_interfaces; i++) {
-			if (zend_string_equals_ci(ce->interfaces[i]->name, Z_STR_P(iface_zv))) {
-				iface = ce->interfaces[i];
-				break;
-			}
-		}
-		if (!iface) {
-			continue;
-		}
-
+	for (uint32_t i = 0; i < ce->num_interfaces; i++) {
+		const zend_class_entry *iface = ce->interfaces[i];
 		zend_string *mname;
+
 		ZEND_HASH_MAP_FOREACH_STR_KEY(&iface->function_table, mname) {
+			/* An interface __construct constrains the signature but is not
+			 * reachable through instance dispatch; construction stays gated
+			 * through get_constructor regardless. */
+			if (zend_string_equals_literal(mname, "__construct")) {
+				continue;
+			}
 			const zend_function *impl = zend_hash_find_ptr(&ce->function_table, mname);
 			if (!impl || !impl->common.scope) {
 				continue;
 			}
 			const zval *mset = zend_surfaces_member_set(impl->common.scope, 'm', mname);
-			if (mset && !surfaces_set_contains(mset,
-					ZSTR_VAL(surface_name), ZSTR_LEN(surface_name))) {
+			if (!mset) {
+				continue; /* public satisfies */
+			}
+
+			bool bound_to_iface = false;
+			zval *name_zv;
+			ZEND_HASH_PACKED_FOREACH_VAL(Z_ARR_P((zval *) mset), name_zv) {
+				const zend_class_entry *owner =
+					zend_surfaces_find_owner(impl->common.scope, Z_STR_P(name_zv));
+				if (owner) {
+					const zval *binding = zend_hash_find(owner->surface_decls, Z_STR_P(name_zv));
+					if (binding && Z_TYPE_P(binding) == IS_STRING
+					 && zend_string_equals_ci(Z_STR_P(binding), iface->name)) {
+						bound_to_iface = true;
+						break;
+					}
+				}
+			} ZEND_HASH_FOREACH_END();
+
+			if (!bound_to_iface) {
 				zend_error_noreturn(E_COMPILE_ERROR,
-					"Method %s::%s() satisfies interface %s bound to surface %s "
-					"but is on a different surface (an interface cannot be "
-					"spanned across surfaces)",
-					ZSTR_VAL(ce->name), ZSTR_VAL(mname),
-					ZSTR_VAL(iface->name), ZSTR_VAL(surface_name));
+					"Method %s::%s() satisfies interface %s but is not on a "
+					"surface bound to it (an interface-reachable member must "
+					"be public or on a surface bound to that interface)",
+					ZSTR_VAL(ce->name), ZSTR_VAL(mname), ZSTR_VAL(iface->name));
 			}
 		} ZEND_HASH_FOREACH_END();
-	} ZEND_HASH_FOREACH_END();
+	}
 }
 
 void zend_surfaces_link_class(zend_class_entry *ce)
@@ -329,7 +351,7 @@ void zend_surfaces_link_class(zend_class_entry *ce)
 		surfaces_check_member_names(ce);
 	}
 
-	if (ce->surface_decls && (ce->ce_flags & ZEND_ACC_RESOLVED_INTERFACES)) {
+	if (ce->num_interfaces && (ce->ce_flags & ZEND_ACC_RESOLVED_INTERFACES)) {
 		surfaces_check_interface_conformance(ce);
 	}
 }

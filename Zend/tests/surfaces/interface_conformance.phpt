@@ -14,4 +14,4 @@ class Q {
 }
 ?>
 --EXPECTF--
-Fatal error: Method Q::b() satisfies interface I bound to surface S1 but is on a different surface (an interface cannot be spanned across surfaces) in %s on line %d
+Fatal error: Method Q::b() satisfies interface I but is not on a surface bound to it (an interface-reachable member must be public or on a surface bound to that interface) in %s on line %d

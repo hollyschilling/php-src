@@ -37,10 +37,14 @@ ZEND_API zval *zend_surfaces_member_set(
 ZEND_API zval *zend_surfaces_member_set_str(
 	const zend_class_entry *owner, char kind, const char *member_name, size_t len);
 
-/* True iff the method implements a method of an interface bound to one of
- * its class's surfaces — such methods have a public "interface face" and are
- * exempt from the runtime member gate (the conversion gate is deferred). */
-ZEND_API bool zend_surfaces_method_has_interface_face(const zend_function *fbc);
+/* True iff the method is declared by an interface the receiver implements —
+ * such methods have a public "interface face" and are exempt from the
+ * runtime member gate (an interface-reachable member is never gated; the
+ * conversion gate is deferred). Soundness is guaranteed at link time: a
+ * surfaced method satisfying an interface must be on a surface bound to it. */
+ZEND_API bool zend_surfaces_method_has_interface_face(
+	const zend_function *fbc, const zend_class_entry *receiver_ce,
+	zend_string *lc_method_name);
 
 /* The access predicate: true iff the current scope holds one of the
  * member's surfaces — by being part of the declaring hierarchy (surfaces
