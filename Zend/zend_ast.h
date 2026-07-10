@@ -69,6 +69,7 @@ enum _zend_ast_kind {
 	ZEND_AST_ATTRIBUTE_GROUP,
 	ZEND_AST_MATCH_ARM_LIST,
 	ZEND_AST_MODIFIER_LIST,
+	ZEND_AST_SURFACE_NAMES,
 
 	/* 0 child nodes */
 	ZEND_AST_MAGIC_CONST = 0 << ZEND_AST_NUM_CHILDREN_SHIFT,
@@ -153,6 +154,13 @@ enum _zend_ast_kind {
 	ZEND_AST_MATCH_ARM,
 	ZEND_AST_NAMED_ARG,
 	ZEND_AST_PIPE,
+
+	/* Surfaces (RFC prototype): a `surface Name (implements Iface)?;` class
+	 * statement; a member declaration wrapped with its surface[...] name
+	 * list; a use-declaration wrapped with its `with surface[...]` grant. */
+	ZEND_AST_SURFACE_DECL,
+	ZEND_AST_SURFACE_MEMBER,
+	ZEND_AST_USE_GRANT,
 
 	/* 3 child nodes */
 	ZEND_AST_METHOD_CALL = 3 << ZEND_AST_NUM_CHILDREN_SHIFT,

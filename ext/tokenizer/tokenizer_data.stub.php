@@ -404,6 +404,11 @@ const T_INTERFACE = UNKNOWN;
 const T_EXTENSION = UNKNOWN;
 /**
  * @var int
+ * @cvalue T_SURFACE
+ */
+const T_SURFACE = UNKNOWN;
+/**
+ * @var int
  * @cvalue T_ENUM
  */
 const T_ENUM = UNKNOWN;

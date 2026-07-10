@@ -183,6 +183,8 @@ class ReflectionMethod extends ReflectionFunctionAbstract
 
     public function __construct(object|string $objectOrMethod, ?string $method = null) {}
 
+    public function getSurfaceNames(): array {}
+
     public static function createFromMethodName(string $method): static {}
 
     public function __toString(): string {}
@@ -333,6 +335,12 @@ class ReflectionClass implements Reflector
 
     /** @tentative-return-type */
     public function getInterfaceNames(): array {}
+
+    public function getSurfaceNames(): array {}
+
+    public function hasSurface(string $name): bool {}
+
+    public function getSurfaceInterface(string $surface): ?string {}
 
     /** @tentative-return-type */
     public function isInterface(): bool {}
@@ -578,6 +586,8 @@ class ReflectionProperty implements Reflector
     public function isReadable(?string $scope, ?object $object = null): bool {}
 
     public function isWritable(?string $scope, ?object $object = null): bool {}
+
+    public function getSurfaceNames(): array {}
 }
 
 /** @not-serializable */
@@ -637,6 +647,8 @@ class ReflectionClassConstant implements Reflector
     public function hasType(): bool {}
 
     public function getType(): ?ReflectionType {}
+
+    public function getSurfaceNames(): array {}
 }
 
 /** @not-serializable */

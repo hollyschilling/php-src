@@ -30,7 +30,7 @@ Class [ <internal:Reflection> class ReflectionClass implements Stringable, Refle
     Property [ public string $name ]
   }
 
-  - Methods [64] {
+  - Methods [67] {
     Method [ <internal:Reflection> private method __clone ] {
 
       - Parameters [0] {
@@ -229,6 +229,29 @@ Class [ <internal:Reflection> class ReflectionClass implements Stringable, Refle
       - Parameters [0] {
       }
       - Tentative return [ array ]
+    }
+
+    Method [ <internal:Reflection> public method getSurfaceNames ] {
+
+      - Parameters [0] {
+      }
+      - Return [ array ]
+    }
+
+    Method [ <internal:Reflection> public method hasSurface ] {
+
+      - Parameters [1] {
+        Parameter #0 [ <required> string $name ]
+      }
+      - Return [ bool ]
+    }
+
+    Method [ <internal:Reflection> public method getSurfaceInterface ] {
+
+      - Parameters [1] {
+        Parameter #0 [ <required> string $surface ]
+      }
+      - Return [ ?string ]
     }
 
     Method [ <internal:Reflection> public method isInterface ] {
