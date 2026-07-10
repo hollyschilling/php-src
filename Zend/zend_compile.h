@@ -120,6 +120,11 @@ typedef struct _zend_file_context {
 	/* Current `use extension` import set; snapshotted (by pointer) into each
 	 * op_array created after this point (copy-on-write per import statement). */
 	HashTable *extension_imports;
+	/* Current file-level surface grant set (`use C with surface[...]`);
+	 * packed list of "lcclass:Surface" strings, snapshotted (by pointer) into
+	 * each op_array created after this point, same copy-on-write discipline
+	 * as extension_imports. */
+	HashTable *surface_grants;
 
 	HashTable seen_symbols;
 } zend_file_context;
@@ -588,6 +593,15 @@ struct _zend_op_array {
 	 * op_arrays; persisted by opcache). NULL if none. */
 	HashTable *extension_imports;
 
+	/* Surface grants lexically in scope for this op_array: file-level
+	 * `use C with surface[...]` statements as of the compile position, plus
+	 * any grants in this body (packed list of "lcclass:Surface" strings,
+	 * shared between op_arrays until a body-local grant unshares it;
+	 * persisted by opcache). Arrow functions snapshot the enclosing body's
+	 * set; long closures and named functions see only the file-level set.
+	 * NULL if none. */
+	HashTable *surface_grants;
+
 	void *reserved[ZEND_MAX_RESERVED_RESOURCES];
 };
 
@@ -948,6 +962,12 @@ uint32_t zend_add_member_modifier(uint32_t flags, uint32_t new_flag, zend_modifi
 
 uint32_t zend_modifier_token_to_flag(zend_modifier_target target, uint32_t flags);
 uint32_t zend_modifier_list_to_flags(zend_modifier_target target, zend_ast *modifiers);
+
+/* Surfaces: extract the surface[...] name list from a modifier list (NULL if
+ * none), and validate a surface member's other modifiers (throws and returns
+ * false on public/protected/private or static). Used by the parser. */
+zend_ast *zend_surface_names_from_modifiers(zend_ast *modifiers);
+bool zend_surface_member_modifiers_valid(uint32_t flags);
 
 bool zend_handle_encoding_declaration(zend_ast *ast);
 

@@ -27,6 +27,7 @@
 #include "zend_operators.h"
 #include "zend_exceptions.h"
 #include "zend_enum.h"
+#include "zend_surfaces.h"
 #include "zend_attributes.h"
 #include "zend_constants.h"
 #include "zend_observer.h"
@@ -3312,6 +3313,7 @@ static void resolve_delayed_variance_obligations(zend_class_entry *ce) {
 
 	ce->ce_flags &= ~ZEND_ACC_UNRESOLVED_VARIANCE;
 	ce->ce_flags |= ZEND_ACC_LINKED;
+	zend_surfaces_link_class(ce);
 	zend_hash_index_del(all_obligations, num_key);
 }
 
@@ -3752,6 +3754,7 @@ ZEND_API zend_class_entry *zend_do_link_class(zend_class_entry *ce, zend_string 
 	if (!(ce->ce_flags & ZEND_ACC_UNRESOLVED_VARIANCE)) {
 		zend_inheritance_check_override(ce);
 		ce->ce_flags |= ZEND_ACC_LINKED;
+		zend_surfaces_link_class(ce);
 	} else {
 		ce->ce_flags |= ZEND_ACC_NEARLY_LINKED;
 		if (CG(current_linking_class)) {
@@ -3989,6 +3992,7 @@ ZEND_API zend_class_entry *zend_try_early_bind(zend_class_entry *ce, zend_class_
 			zend_inheritance_check_override(ce);
 			ZEND_ASSERT(!(ce->ce_flags & ZEND_ACC_UNRESOLVED_VARIANCE));
 			ce->ce_flags |= ZEND_ACC_LINKED;
+			zend_surfaces_link_class(ce);
 
 			CG(current_linking_class) = orig_linking_class;
 		} zend_catch {

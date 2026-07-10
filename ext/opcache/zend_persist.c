@@ -358,6 +358,35 @@ static HashTable *zend_persist_extension_imports(HashTable *imports)
 	return ptr;
 }
 
+/* Surfaces: a class's surface_decls/surface_members tables (string keys,
+ * zval values that are strings, null, or packed string arrays). */
+static HashTable *zend_persist_surface_table(HashTable *ht)
+{
+	Bucket *p;
+
+	if (!ZCG(current_persistent_script)->corrupted && zend_accel_in_shm(ht)) {
+		return ht;
+	}
+
+	HashTable *xlat = zend_shared_alloc_get_xlat_entry(ht);
+	if (xlat) {
+		return xlat;
+	}
+
+	zend_hash_persist(ht);
+	ZEND_HASH_MAP_FOREACH_BUCKET(ht, p) {
+		ZEND_ASSERT(p->key != NULL);
+		zend_accel_store_interned_string(p->key);
+		zend_persist_zval(&p->val);
+	} ZEND_HASH_FOREACH_END();
+
+	HashTable *ptr = zend_shared_memdup_put_free(ht, sizeof(HashTable));
+	GC_SET_REFCOUNT(ptr, 2);
+	GC_TYPE_INFO(ptr) = GC_ARRAY | ((IS_ARRAY_IMMUTABLE|GC_NOT_COLLECTABLE) << GC_FLAGS_SHIFT);
+
+	return ptr;
+}
+
 uint32_t zend_accel_get_class_name_map_ptr(zend_string *type_name)
 {
 	uint32_t ret;
@@ -509,6 +538,10 @@ static void zend_persist_op_array_ex(zend_op_array *op_array, zend_persistent_sc
 			if (op_array->extension_imports) {
 				op_array->extension_imports = zend_shared_alloc_get_xlat_entry(op_array->extension_imports);
 				ZEND_ASSERT(op_array->extension_imports != NULL);
+			}
+			if (op_array->surface_grants) {
+				op_array->surface_grants = zend_shared_alloc_get_xlat_entry(op_array->surface_grants);
+				ZEND_ASSERT(op_array->surface_grants != NULL);
 			}
 
 			if (op_array->try_catch_array) {
@@ -709,6 +742,11 @@ static void zend_persist_op_array_ex(zend_op_array *op_array, zend_persistent_sc
 
 	if (op_array->extension_imports) {
 		op_array->extension_imports = zend_persist_extension_imports(op_array->extension_imports);
+	}
+
+	if (op_array->surface_grants) {
+		/* Same shape and sharing discipline as extension imports. */
+		op_array->surface_grants = zend_persist_extension_imports(op_array->surface_grants);
 	}
 
 	if (op_array->try_catch_array) {
@@ -1099,6 +1137,13 @@ zend_class_entry *zend_persist_class_entry(zend_class_entry *orig_ce)
 
 		if (ce->attributes) {
 			ce->attributes = zend_persist_attributes(ce->attributes);
+		}
+
+		if (ce->surface_decls) {
+			ce->surface_decls = zend_persist_surface_table(ce->surface_decls);
+		}
+		if (ce->surface_members) {
+			ce->surface_members = zend_persist_surface_table(ce->surface_members);
 		}
 
 		if (ce->num_interfaces && !(ce->ce_flags & ZEND_ACC_LINKED)) {

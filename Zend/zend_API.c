@@ -29,6 +29,7 @@
 #include "zend_interfaces.h"
 #include "zend_exceptions.h"
 #include "zend_closures.h"
+#include "zend_surfaces.h"
 #include "zend_inheritance.h"
 #include "zend_ini.h"
 #include "zend_enum.h"
@@ -4019,6 +4020,28 @@ get_function_via_handler:
 							efree(*error);
 						}
 						zend_spprintf(error, 0, "cannot access %s method %s::%s()", zend_visibility_string(fcc->function_handler->common.fn_flags), ZSTR_VAL(fcc->calling_scope->name), ZSTR_VAL(fcc->function_handler->common.function_name));
+					}
+					retval = false;
+				}
+			}
+			/* Surfaces: callable resolution bypasses get_method for plain
+			 * names, so the surface gate is applied here as well. */
+			if (retval
+			 && fcc->function_handler->common.scope
+			 && UNEXPECTED(fcc->function_handler->common.scope->surface_members != NULL)) {
+				const zend_class_entry *receiver_ce =
+					fcc->object ? fcc->object->ce : fcc->calling_scope;
+				const zval *surface_set = zend_surfaces_member_set(
+					fcc->function_handler->common.scope, 'm', lmname);
+				if (surface_set
+				 && !zend_surfaces_method_has_interface_face(fcc->function_handler)
+				 && !zend_surfaces_access_allowed(
+						fcc->function_handler->common.scope, receiver_ce, surface_set)) {
+					if (error) {
+						if (*error) {
+							efree(*error);
+						}
+						zend_spprintf(error, 0, "cannot access surface method %s::%s()", ZSTR_VAL(fcc->calling_scope->name), ZSTR_VAL(fcc->function_handler->common.function_name));
 					}
 					retval = false;
 				}

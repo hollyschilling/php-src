@@ -22,6 +22,7 @@
 #include "zend_API.h"
 #include "zend_constants.h"
 #include "zend_execute.h"
+#include "zend_surfaces.h"
 #include "zend_vm.h"
 #include "zend_cfg.h"
 #include "zend_func_info.h"
@@ -890,6 +891,12 @@ const zend_class_constant *zend_fetch_class_const_info(
 	}
 	if ((ZEND_CLASS_CONST_FLAGS(const_info) & ZEND_ACC_DEPRECATED)
 		|| ((ZEND_CLASS_CONST_FLAGS(const_info) & ZEND_ACC_PPP_MASK) != ZEND_ACC_PUBLIC && const_info->ce != op_array->scope)) {
+		return NULL;
+	}
+	/* Surfaces: never substitute a surface constant — its access must go
+	 * through the runtime grant check. */
+	if (const_info->ce->surface_members
+	 && zend_surfaces_member_set(const_info->ce, 'c', Z_STR_P(CRT_CONSTANT(opline->op2)))) {
 		return NULL;
 	}
 	*is_prototype = is_static_reference
