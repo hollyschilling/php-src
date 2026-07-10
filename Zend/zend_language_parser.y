@@ -285,7 +285,7 @@ static YYSIZE_T zend_yytnamerr(char*, const char*);
 %type <ast> attribute_decl attribute attributes attribute_group namespace_declaration_name
 %type <ast> match match_arm_list non_empty_match_arm_list match_arm match_arm_cond_list
 %type <ast> enum_declaration_statement enum_backing_type enum_case enum_case_expr
-%type <ast> extension_declaration_statement
+%type <ast> extension_declaration_statement extension_target
 %type <ast> function_name non_empty_member_modifiers
 %type <ast> property_hook property_hook_list optional_property_hook_list hooked_property property_hook_body
 %type <ast> optional_parameter_list clone_argument_list non_empty_clone_argument_list
@@ -654,9 +654,16 @@ enum_declaration_statement:
 			{ $$ = zend_ast_create_decl(ZEND_AST_CLASS, ZEND_ACC_ENUM|ZEND_ACC_FINAL, $<num>2, $6, zend_ast_get_str($3), NULL, $5, $8, NULL, $4); }
 ;
 
+extension_target:
+		class_name { $$ = $1; }
+	|	T_ARRAY {
+			$$ = zend_ast_create_zval_from_str(zend_string_init("array", sizeof("array") - 1, 0));
+			$$->attr = ZEND_NAME_NOT_FQ; }
+;
+
 extension_declaration_statement:
 		T_EXTENSION { $<num>$ = CG(zend_lineno); }
-		class_name T_VARIABLE backup_doc_comment '{' class_statement_list '}'
+		extension_target T_VARIABLE backup_doc_comment '{' class_statement_list '}'
 			{ $$ = zend_ast_create(ZEND_AST_EXTENSION_DECL, $3, $4,
 			       zend_ast_create_decl(ZEND_AST_CLASS, ZEND_ACC_ANON_CLASS|ZEND_ACC_FINAL, $<num>2, $5,
 			           NULL, NULL, NULL, $7, NULL, NULL)); }
