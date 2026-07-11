@@ -434,6 +434,7 @@ found:
 		const zval *surface_set =
 			zend_surfaces_member_set(property_info->ce, 'p', member);
 		if (surface_set
+		 && !zend_surfaces_property_has_interface_face(ce, member)
 		 && !zend_surfaces_access_allowed(property_info->ce, ce, surface_set)) {
 			if (!silent) {
 				zend_throw_error(NULL,
@@ -544,6 +545,7 @@ found:
 		const zval *surface_set =
 			zend_surfaces_member_set(property_info->ce, 'p', member);
 		if (surface_set
+		 && !zend_surfaces_property_has_interface_face(ce, member)
 		 && !zend_surfaces_access_allowed(property_info->ce, ce, surface_set)) {
 			if (!silent) {
 				zend_throw_error(NULL,
