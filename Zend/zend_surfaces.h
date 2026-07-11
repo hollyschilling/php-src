@@ -45,6 +45,10 @@ ZEND_API zval *zend_surfaces_member_set_str(
 ZEND_API bool zend_surfaces_method_has_interface_face(
 	const zend_function *fbc, const zend_class_entry *receiver_ce,
 	zend_string *lc_method_name);
+ZEND_API bool zend_surfaces_property_has_interface_face(
+	const zend_class_entry *receiver_ce, const zend_string *member);
+ZEND_API bool zend_surfaces_constant_has_interface_face(
+	const zend_class_entry *fetched_ce, const zend_string *name);
 
 /* The access predicate: true iff the current scope holds one of the
  * member's surfaces — by being part of the declaring hierarchy (surfaces

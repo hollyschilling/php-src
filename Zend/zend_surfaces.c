@@ -167,6 +167,39 @@ ZEND_API bool zend_surfaces_method_has_interface_face(
 	return false;
 }
 
+/* Interface faces for properties and constants: declared by any interface
+ * the (linked) class implements. Note the exemption is member-level, not
+ * per-operation: an interface declaring only `{ get; }` still exempts writes
+ * through the shared resolution path — the same coarseness as exempting
+ * direct calls on interface-declared methods. */
+ZEND_API bool zend_surfaces_property_has_interface_face(
+	const zend_class_entry *receiver_ce, const zend_string *member)
+{
+	if (!(receiver_ce->ce_flags & ZEND_ACC_RESOLVED_INTERFACES)) {
+		return false;
+	}
+	for (uint32_t i = 0; i < receiver_ce->num_interfaces; i++) {
+		if (zend_hash_exists(&receiver_ce->interfaces[i]->properties_info, (zend_string *) member)) {
+			return true;
+		}
+	}
+	return false;
+}
+
+ZEND_API bool zend_surfaces_constant_has_interface_face(
+	const zend_class_entry *fetched_ce, const zend_string *name)
+{
+	if (!(fetched_ce->ce_flags & ZEND_ACC_RESOLVED_INTERFACES)) {
+		return false;
+	}
+	for (uint32_t i = 0; i < fetched_ce->num_interfaces; i++) {
+		if (zend_hash_exists(&fetched_ce->interfaces[i]->constants_table, (zend_string *) name)) {
+			return true;
+		}
+	}
+	return false;
+}
+
 /* ---------------------------------------------------------------------- */
 /* Link-time validation                                                    */
 /* ---------------------------------------------------------------------- */
@@ -263,11 +296,31 @@ static void surfaces_check_member_names(zend_class_entry *ce)
 	} ZEND_HASH_FOREACH_END();
 }
 
-/* The interface-reachability guarantee: a method required by ANY implemented
- * interface must be public or on a surface bound to that interface — so a
- * member reachable through an interface type is never gated, and an
- * interface cannot be spanned across surfaces. Ordinary signature/existence
- * conformance was already checked by the normal implements machinery. */
+/* Does the member's surface set contain a surface bound to this interface?
+ * (The set's names resolve against the declaring class's hierarchy.) */
+static bool surfaces_set_bound_to_iface(
+	const zend_class_entry *decl_ce, const zval *mset, const zend_class_entry *iface)
+{
+	zval *name_zv;
+	ZEND_HASH_PACKED_FOREACH_VAL(Z_ARR_P((zval *) mset), name_zv) {
+		const zend_class_entry *owner = zend_surfaces_find_owner(decl_ce, Z_STR_P(name_zv));
+		if (owner) {
+			const zval *binding = zend_hash_find(owner->surface_decls, Z_STR_P(name_zv));
+			if (binding && Z_TYPE_P(binding) == IS_STRING
+			 && zend_string_equals_ci(Z_STR_P(binding), iface->name)) {
+				return true;
+			}
+		}
+	} ZEND_HASH_FOREACH_END();
+	return false;
+}
+
+/* The interface-reachability guarantee: a member (method, property, or
+ * constant) required by ANY implemented interface must be public or on a
+ * surface bound to that interface — so a member reachable through an
+ * interface type is never gated, and an interface cannot be spanned across
+ * surfaces. Ordinary signature/existence conformance was already checked by
+ * the normal implements machinery. */
 static void surfaces_check_interface_conformance(zend_class_entry *ce)
 {
 	/* Cheap skip for hierarchies with no surface members at all. */
@@ -302,27 +355,49 @@ static void surfaces_check_interface_conformance(zend_class_entry *ce)
 				continue; /* public satisfies */
 			}
 
-			bool bound_to_iface = false;
-			zval *name_zv;
-			ZEND_HASH_PACKED_FOREACH_VAL(Z_ARR_P((zval *) mset), name_zv) {
-				const zend_class_entry *owner =
-					zend_surfaces_find_owner(impl->common.scope, Z_STR_P(name_zv));
-				if (owner) {
-					const zval *binding = zend_hash_find(owner->surface_decls, Z_STR_P(name_zv));
-					if (binding && Z_TYPE_P(binding) == IS_STRING
-					 && zend_string_equals_ci(Z_STR_P(binding), iface->name)) {
-						bound_to_iface = true;
-						break;
-					}
-				}
-			} ZEND_HASH_FOREACH_END();
-
-			if (!bound_to_iface) {
+			if (!surfaces_set_bound_to_iface(impl->common.scope, mset, iface)) {
 				zend_error_noreturn(E_COMPILE_ERROR,
 					"Method %s::%s() satisfies interface %s but is not on a "
 					"surface bound to it (an interface-reachable member must "
 					"be public or on a surface bound to that interface)",
 					ZSTR_VAL(ce->name), ZSTR_VAL(mname), ZSTR_VAL(iface->name));
+			}
+		} ZEND_HASH_FOREACH_END();
+
+		/* Interface (hooked) properties: same rule. */
+		zend_string *pname;
+		zend_property_info *pimpl;
+		ZEND_HASH_MAP_FOREACH_STR_KEY(&iface->properties_info, pname) {
+			pimpl = zend_hash_find_ptr(&ce->properties_info, pname);
+			if (!pimpl || !pimpl->ce) {
+				continue;
+			}
+			const zval *pset = zend_surfaces_member_set(pimpl->ce, 'p', pname);
+			if (pset && !surfaces_set_bound_to_iface(pimpl->ce, pset, iface)) {
+				zend_error_noreturn(E_COMPILE_ERROR,
+					"Property %s::$%s satisfies interface %s but is not on a "
+					"surface bound to it (an interface-reachable member must "
+					"be public or on a surface bound to that interface)",
+					ZSTR_VAL(ce->name), ZSTR_VAL(pname), ZSTR_VAL(iface->name));
+			}
+		} ZEND_HASH_FOREACH_END();
+
+		/* Interface constants: same rule for class-declared overrides (a
+		 * constant inherited from the interface itself has no surfaces). */
+		zend_string *cname;
+		zend_class_constant *cimpl;
+		ZEND_HASH_MAP_FOREACH_STR_KEY(&iface->constants_table, cname) {
+			cimpl = zend_hash_find_ptr(&ce->constants_table, cname);
+			if (!cimpl || !cimpl->ce || (cimpl->ce->ce_flags & ZEND_ACC_INTERFACE)) {
+				continue;
+			}
+			const zval *cset = zend_surfaces_member_set(cimpl->ce, 'c', cname);
+			if (cset && !surfaces_set_bound_to_iface(cimpl->ce, cset, iface)) {
+				zend_error_noreturn(E_COMPILE_ERROR,
+					"Constant %s::%s satisfies interface %s but is not on a "
+					"surface bound to it (an interface-reachable member must "
+					"be public or on a surface bound to that interface)",
+					ZSTR_VAL(ce->name), ZSTR_VAL(cname), ZSTR_VAL(iface->name));
 			}
 		} ZEND_HASH_FOREACH_END();
 	}
