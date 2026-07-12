@@ -4,9 +4,8 @@ internal enforcement applies to dynamic access spellings (protected parity); Ref
 <?php
 require __DIR__ . '/module_fixture.inc';
 
-use Acme\Widget;
-
-$w = new Widget();
+$widgetClass = 'Acme\Widget';
+$w = new $widgetClass();
 
 $m = 'step';
 try {

@@ -18,9 +18,19 @@ enum Mode {
     internal function tag(): string { return 'tagged'; }
     public function runTag(): string { return $this->tag(); }
 }
+
+class Runner {
+    public function makeBox(int $n): Box { return new Box($n); }
+    public function mode(): Mode { return Mode::On; }
+}
 PHP);
 
-$b = new Acme\Box(3);
+// Obtain instances dynamically / via a same-module runner (bare class
+// acquisition from the null module is gated).
+$runnerClass = 'Acme\Runner';
+$runner = new $runnerClass();
+
+$b = $runner->makeBox(3);
 var_dump($b->grow());       // same class: OK
 try {
     var_dump($b->size);
@@ -28,14 +38,15 @@ try {
     echo $e->getMessage(), "\n";
 }
 
-var_dump(Acme\Mode::On->runTag());  // same class: OK
+$mode = $runner->mode();
+var_dump($mode->runTag());  // same class: OK
 try {
-    Acme\Mode::On->tag();
+    $mode->tag();
 } catch (Error $e) {
     echo $e->getMessage(), "\n";
 }
 try {
-    var_dump(Acme\Mode::HIDDEN);
+    var_dump(constant('Acme\Mode::HIDDEN'));
 } catch (Error $e) {
     echo $e->getMessage(), "\n";
 }

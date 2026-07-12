@@ -333,7 +333,8 @@ END_EXTERN_C()
 #define ZEND_TYPE_ASSERT                    211
 #define ZEND_CALLABLE_CONVERT_PARTIAL       212
 #define ZEND_SEND_PLACEHOLDER               213
+#define ZEND_REGISTER_MODULE                214
 
-#define ZEND_VM_LAST_OPCODE                 213
+#define ZEND_VM_LAST_OPCODE                 214
 
 #endif

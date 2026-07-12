@@ -20,10 +20,12 @@ class PublicWidget extends Widget {
 }
 PHP);
 
-$sw = new Acme\SpecialWidget();
+$c = 'Acme\SpecialWidget';
+$sw = new $c();
 var_dump($sw->runStep());
 
-$pw = new Acme\PublicWidget();
+$c = 'Acme\PublicWidget';
+$pw = new $c();
 var_dump($pw->step());  // widened to public: callable from outside
 ?>
 --EXPECT--
