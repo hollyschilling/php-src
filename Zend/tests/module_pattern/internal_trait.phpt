@@ -25,11 +25,13 @@ class MachineFriend {
 }
 PHP);
 
-$m = new Acme\Machine();
+$machineClass = 'Acme\Machine';
+$friendClass = 'Acme\MachineFriend';
+$m = new $machineClass();
 var_dump($m->go());
-var_dump((new Acme\MachineFriend())->poke($m));  // same module: OK
+var_dump((new $friendClass())->poke($m));  // same module: OK
 try {
-    $m->traitStep();                              // null module: denied
+    $m->traitStep();                        // null module: denied
 } catch (Error $e) {
     echo $e->getMessage(), "\n";
 }

@@ -119,9 +119,21 @@ typedef struct _zend_file_context {
 	HashTable *imports;
 	HashTable *imports_function;
 	HashTable *imports_const;
+	/* Module imports: prefix -> zend_lang_module* (from `use module`). */
+	HashTable *module_imports;
 
 	HashTable seen_symbols;
 } zend_file_context;
+
+/* A registered module definition: its FQMN and export surface. */
+typedef struct _zend_lang_module {
+	zend_string *fqmn;
+	zend_array  *exports; /* export alias -> canonical FQCN (string zvals) */
+} zend_lang_module;
+
+ZEND_API zend_result zend_lang_module_register(zend_string *fqmn, zend_array *exports);
+ZEND_API zend_lang_module *zend_lang_module_get(zend_string *fqmn);
+void zend_lang_modules_shutdown(void);
 
 typedef union _zend_parser_stack_elem {
 	zend_ast *ast;
@@ -571,6 +583,9 @@ struct _zend_op_array {
 	zend_try_catch_element *try_catch_array;
 
 	zend_string *filename;
+	/* Module membership (FQMN) of the file this op_array was compiled in;
+	 * NULL for the null module. Accessor identity for the module gate. */
+	zend_string *module_name;
 	uint32_t line_start;
 	uint32_t line_end;
 
@@ -1058,6 +1073,8 @@ ZEND_API zend_string *zend_type_to_string(zend_type type);
 #define ZEND_FETCH_CLASS_EXCEPTION   0x0200
 #define ZEND_FETCH_CLASS_ALLOW_UNLINKED 0x0400
 #define ZEND_FETCH_CLASS_ALLOW_NEARLY_LINKED 0x0800
+/* Skip the module acquisition gate (dynamic paths, inheritance does its own). */
+#define ZEND_FETCH_CLASS_NO_MODULE_GATE 0x1000
 
 /* These should not clash with ZEND_ACC_PPP_MASK and ZEND_ACC_PPP_SET_MASK */
 #define ZEND_PARAM_REF      (1<<3)
@@ -1066,6 +1083,7 @@ ZEND_API zend_string *zend_type_to_string(zend_type type);
 #define ZEND_NAME_FQ       0
 #define ZEND_NAME_NOT_FQ   1
 #define ZEND_NAME_RELATIVE 2
+#define ZEND_NAME_MODULE   3
 
 /* ZEND_FETCH_ flags in class name AST of new const expression must not clash with ZEND_NAME_ flags */
 #define ZEND_CONST_EXPR_NEW_FETCH_TYPE_SHIFT 2

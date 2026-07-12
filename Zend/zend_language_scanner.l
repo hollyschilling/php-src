@@ -1585,6 +1585,11 @@ OPTIONAL_WHITESPACE_OR_COMMENTS ({WHITESPACE}|{MULTI_LINE_COMMENT}|{SINGLE_LINE_
 	RETURN_TOKEN_WITH_IDENT(T_MODULE);
 }
 
+/* Module-qualified name: Prefix:>Member (both single labels). */
+<ST_IN_SCRIPTING>{LABEL}":>"{LABEL} {
+	RETURN_TOKEN_WITH_STR(T_NAME_MODULE, 0);
+}
+
 /*
  * The internal keyword must be followed by whitespace and something that can
  * start a member declaration it modifies: another modifier/keyword or type

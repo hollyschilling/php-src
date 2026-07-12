@@ -3541,6 +3541,16 @@ static zend_class_entry *zend_lazy_class_load(const zend_class_entry *pce)
 		} while (0)
 #endif
 
+/* Module gate for inheritance edges: true when `ce` may not extend/implement/
+ * use `target`. A reference through an export map carries a "\0" provenance
+ * marker in `ref_name` and always passes (validated at fetch). */
+ZEND_API bool zend_module_inheritance_denied(const zend_class_entry *ce, const zend_class_entry *target, const zend_string *ref_name)
+{
+	return target->module_name != NULL
+		&& ZSTR_VAL(ref_name)[0] != '\0'
+		&& (!ce->module_name || !zend_string_equals(ce->module_name, target->module_name));
+}
+
 ZEND_API zend_class_entry *zend_do_link_class(zend_class_entry *ce, zend_string *lc_parent_name, const zend_string *key) /* {{{ */
 {
 	/* Load parent/interface dependencies first, so we can still gracefully abort linking
@@ -3561,9 +3571,17 @@ ZEND_API zend_class_entry *zend_do_link_class(zend_class_entry *ce, zend_string 
 	if (ce->parent_name) {
 		parent = zend_fetch_class_by_name(
 			ce->parent_name, lc_parent_name,
-			ZEND_FETCH_CLASS_ALLOW_NEARLY_LINKED | ZEND_FETCH_CLASS_EXCEPTION);
+			ZEND_FETCH_CLASS_ALLOW_NEARLY_LINKED | ZEND_FETCH_CLASS_EXCEPTION | ZEND_FETCH_CLASS_NO_MODULE_GATE);
 		if (!parent) {
 			check_unrecoverable_load_failure(ce);
+			return NULL;
+		}
+		/* Module gate: a bare (non-imported) reference to a module member may
+		 * only be extended from inside the same module. References through an
+		 * export map carry a "\0" provenance marker and were validated. */
+		if (UNEXPECTED(zend_module_inheritance_denied(ce, parent, ce->parent_name))) {
+			zend_throw_error(NULL, "Cannot extend class %s of module %s from outside the module; import the module with 'use module'",
+				ZSTR_VAL(parent->name), ZSTR_VAL(parent->module_name));
 			return NULL;
 		}
 		UPDATE_IS_CACHEABLE(parent);
@@ -3574,8 +3592,14 @@ ZEND_API zend_class_entry *zend_do_link_class(zend_class_entry *ce, zend_string 
 
 		for (i = 0; i < ce->num_traits; i++) {
 			zend_class_entry *trait = zend_fetch_class_by_name(ce->trait_names[i].name,
-				ce->trait_names[i].lc_name, ZEND_FETCH_CLASS_TRAIT | ZEND_FETCH_CLASS_EXCEPTION);
+				ce->trait_names[i].lc_name, ZEND_FETCH_CLASS_TRAIT | ZEND_FETCH_CLASS_EXCEPTION | ZEND_FETCH_CLASS_NO_MODULE_GATE);
 			if (UNEXPECTED(trait == NULL)) {
+				free_alloca(traits_and_interfaces, use_heap);
+				return NULL;
+			}
+			if (UNEXPECTED(zend_module_inheritance_denied(ce, trait, ce->trait_names[i].name))) {
+				zend_throw_error(NULL, "Cannot use trait %s of module %s from outside the module; import the module with 'use module'",
+					ZSTR_VAL(trait->name), ZSTR_VAL(trait->module_name));
 				free_alloca(traits_and_interfaces, use_heap);
 				return NULL;
 			}
@@ -3610,9 +3634,15 @@ ZEND_API zend_class_entry *zend_do_link_class(zend_class_entry *ce, zend_string 
 			zend_class_entry *iface = zend_fetch_class_by_name(
 				ce->interface_names[i].name, ce->interface_names[i].lc_name,
 				ZEND_FETCH_CLASS_INTERFACE |
-				ZEND_FETCH_CLASS_ALLOW_NEARLY_LINKED | ZEND_FETCH_CLASS_EXCEPTION);
+				ZEND_FETCH_CLASS_ALLOW_NEARLY_LINKED | ZEND_FETCH_CLASS_EXCEPTION | ZEND_FETCH_CLASS_NO_MODULE_GATE);
 			if (!iface) {
 				check_unrecoverable_load_failure(ce);
+				free_alloca(traits_and_interfaces, use_heap);
+				return NULL;
+			}
+			if (UNEXPECTED(zend_module_inheritance_denied(ce, iface, ce->interface_names[i].name))) {
+				zend_throw_error(NULL, "Cannot implement interface %s of module %s from outside the module; import the module with 'use module'",
+					ZSTR_VAL(iface->name), ZSTR_VAL(iface->module_name));
 				free_alloca(traits_and_interfaces, use_heap);
 				return NULL;
 			}

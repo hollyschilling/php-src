@@ -4,10 +4,12 @@ internal members are inherited; accessibility stays bound to the declaring class
 <?php
 require __DIR__ . '/module_fixture.inc';
 
-// Null-module subclass: inheriting without overriding is fine
-class Sub extends Acme\Widget {}
+// Null-module subclass through the export surface: inheriting without
+// overriding is fine.
+eval('use module Acme\Kernel; class Sub extends Kernel:>Widget {}');
 
-$s = new Sub();
+$subClass = 'Sub';
+$s = new $subClass();
 // Module code can still reach the inherited internal member through the subclass
 var_dump($s->runStep());
 // Outside code cannot

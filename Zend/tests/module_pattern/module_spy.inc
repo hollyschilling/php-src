@@ -3,6 +3,7 @@ namespace Vendor;
 
 module Vendor\Toolkit;
 
+use module Acme\Kernel;
 use Acme\Widget;
 
 class Spy
@@ -11,7 +12,7 @@ class Spy
         return $w->step();
     }
     public static function snoopConst(): string {
-        return Widget::SECRET;
+        return Kernel:>Widget::SECRET;
     }
     public static function snoopProp(Widget $w): string {
         return $w->token;

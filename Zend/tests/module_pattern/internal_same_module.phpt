@@ -5,16 +5,20 @@ internal members are accessible from classes in the same module, across files an
 require __DIR__ . '/module_fixture.inc';
 require __DIR__ . '/module_friend_other_ns.inc';
 
-$w = new Acme\Widget();
+// Dynamic instantiation: the class acquisition gate applies to syntactic
+// names only, and this test targets member-level semantics.
+$widgetClass = 'Acme\Widget';
+$friendClass = 'Acme\Friend';
+$w = new $widgetClass();
 
 // Same class
 var_dump($w->runStep());
 
 // Same module, same file, different class
-var_dump((new Acme\Friend())->useWidget($w));
+var_dump((new $friendClass())->useWidget($w));
 
-// Same module, different file and namespace
-var_dump(Acme\Support\Helper::poke($w));
+// Same module, different file and namespace (dynamic call: ungated)
+var_dump(call_user_func('Acme\Support\Helper::poke', $w));
 ?>
 --EXPECT--
 string(7) "stepped"

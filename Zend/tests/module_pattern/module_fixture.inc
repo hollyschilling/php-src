@@ -3,6 +3,12 @@ namespace Acme;
 
 module Acme\Kernel;
 
+module Kernel {
+    export Acme\Widget;
+    export Acme\Friend;
+    export Acme\Support\Helper;
+}
+
 class Widget
 {
     internal const SECRET = 'k-secret';

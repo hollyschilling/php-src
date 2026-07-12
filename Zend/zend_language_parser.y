@@ -92,6 +92,7 @@ static YYSIZE_T zend_yytnamerr(char*, const char*);
 %token <ast> T_NAME_FULLY_QUALIFIED "fully qualified name"
 %token <ast> T_NAME_RELATIVE "namespace-relative name"
 %token <ast> T_NAME_QUALIFIED "namespaced name"
+%token <ast> T_NAME_MODULE   "module-qualified name"
 %token <ast> T_VARIABLE  "variable"
 %token <ast> T_INLINE_HTML
 %token <ast> T_ENCAPSED_AND_WHITESPACE  "string content"
@@ -253,6 +254,7 @@ static YYSIZE_T zend_yytnamerr(char*, const char*);
 %token T_ERROR
 
 %type <ast> top_statement namespace_name name statement function_declaration_statement
+%type <ast> module_export_list module_export
 %type <ast> class_declaration_statement trait_declaration_statement legacy_namespace_name
 %type <ast> interface_declaration_statement interface_extends_list
 %type <ast> group_use_declaration inline_use_declarations inline_use_declaration
@@ -363,6 +365,7 @@ name:
 	|	T_NAME_QUALIFIED							{ $$ = $1; $$->attr = ZEND_NAME_NOT_FQ; }
 	|	T_NAME_FULLY_QUALIFIED						{ $$ = $1; $$->attr = ZEND_NAME_FQ; }
 	|	T_NAME_RELATIVE								{ $$ = $1; $$->attr = ZEND_NAME_RELATIVE; }
+	|	T_NAME_MODULE								{ $$ = $1; $$->attr = ZEND_NAME_MODULE; }
 ;
 
 attribute_decl:
@@ -412,6 +415,13 @@ top_statement:
 	|	T_MODULE namespace_declaration_name ';'
 			{ $$ = zend_ast_create(ZEND_AST_MODULE_DECL, $2);
 			  RESET_DOC_COMMENT(); }
+	|	T_MODULE namespace_declaration_name '{' module_export_list '}'
+			{ $$ = zend_ast_create(ZEND_AST_MODULE_DEF, $2, $4);
+			  RESET_DOC_COMMENT(); }
+	|	T_USE T_MODULE namespace_declaration_name ';'
+			{ $$ = zend_ast_create(ZEND_AST_USE_MODULE, $3, NULL); }
+	|	T_USE T_MODULE namespace_declaration_name T_AS T_STRING ';'
+			{ $$ = zend_ast_create(ZEND_AST_USE_MODULE, $3, $5); }
 	|	T_NAMESPACE namespace_declaration_name ';'
 			{ $$ = zend_ast_create(ZEND_AST_NAMESPACE, $2, NULL);
 			  RESET_DOC_COMMENT(); }
@@ -430,6 +440,36 @@ top_statement:
 use_type:
 	 	T_FUNCTION 		{ $$ = ZEND_SYMBOL_FUNCTION; }
 	| 	T_CONST 		{ $$ = ZEND_SYMBOL_CONST; }
+;
+
+module_export_list:
+		%empty { $$ = zend_ast_create_list(0, ZEND_AST_STMT_LIST); }
+	|	module_export_list module_export { $$ = zend_ast_list_add($1, $2); }
+;
+
+module_export:
+		T_STRING name ';'
+			{ if (!zend_string_equals_literal(zend_ast_get_str($1), "export")) {
+			      /* YYERROR from an action skips this rule's RHS destructors. */
+			      zend_ast_destroy($1);
+			      zend_ast_destroy($2);
+			      zend_throw_exception(zend_ce_compile_error,
+			          "Unexpected statement in module definition block, expecting 'export'", 0);
+			      YYERROR;
+			  }
+			  zend_ast_destroy($1);
+			  $$ = zend_ast_create(ZEND_AST_MODULE_EXPORT, $2, NULL); }
+	|	T_STRING name T_AS T_STRING ';'
+			{ if (!zend_string_equals_literal(zend_ast_get_str($1), "export")) {
+			      zend_ast_destroy($1);
+			      zend_ast_destroy($2);
+			      zend_ast_destroy($4);
+			      zend_throw_exception(zend_ce_compile_error,
+			          "Unexpected statement in module definition block, expecting 'export'", 0);
+			      YYERROR;
+			  }
+			  zend_ast_destroy($1);
+			  $$ = zend_ast_create(ZEND_AST_MODULE_EXPORT, $2, $4); }
 ;
 
 group_use_declaration:

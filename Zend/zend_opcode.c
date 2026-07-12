@@ -63,6 +63,8 @@ void init_op_array(zend_op_array *op_array, zend_function_type type, int initial
 
 	op_array->function_name = NULL;
 	op_array->filename = zend_string_copy(zend_get_compiled_filename());
+	op_array->module_name = (CG(in_compilation) && CG(file_context).module_name)
+		? zend_string_copy(CG(file_context).module_name) : NULL;
 	op_array->doc_comment = NULL;
 	op_array->attributes = NULL;
 
@@ -619,6 +621,9 @@ ZEND_API void destroy_op_array(zend_op_array *op_array)
 	efree(op_array->opcodes);
 
 	zend_string_release_ex(op_array->filename, 0);
+	if (op_array->module_name) {
+		zend_string_release_ex(op_array->module_name, 0);
+	}
 	if (op_array->doc_comment) {
 		zend_string_release_ex(op_array->doc_comment, 0);
 	}
