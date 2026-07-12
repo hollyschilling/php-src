@@ -3614,7 +3614,33 @@ ZEND_VM_HANDLER(212, ZEND_BIND_EXTENSION, VAR, CONST)
 	/* extended_value flags the named form (`extension Name on Target`); the
 	 * lc extension name is then the literal following the target name. */
 	if (opline->extended_value) {
+		zval *existing;
+
 		ext_name_lc = Z_STR_P(RT_CONSTANT(opline, opline->op2) + 1);
+		/* A named extension is a class-table symbol under its own name: this
+		 * is what makes it visible to class_exists() and — decisively — to
+		 * the class autoloader (an imported-but-unloaded extension is
+		 * resolved through zend_lookup_class_ex at first use). Extension
+		 * names therefore share the class namespace, and collide like
+		 * classes do. */
+		existing = zend_hash_find(EG(class_table), ext_name_lc);
+		if (existing) {
+			if (UNEXPECTED(Z_CE_P(existing) != ce)) {
+				zend_error_noreturn(E_COMPILE_ERROR,
+					"Cannot declare extension %s, because the name is already in use",
+					ZSTR_VAL(ce->name));
+			}
+			/* Same CE re-bound (declaring file included again): the registry
+			 * registration below is idempotent (first-wins per method). */
+		} else {
+			zval zv;
+			/* Alias-typed entry: the anonymous-key entry made by
+			 * DECLARE_ANON_CLASS owns the CE's lifetime; destroy_zend_class
+			 * skips IS_ALIAS_PTR buckets, so no refcount juggling is needed
+			 * for mutable and immutable (opcache SHM) CEs alike. */
+			ZVAL_ALIAS_PTR(&zv, ce);
+			zend_hash_add_new(EG(class_table), ext_name_lc, &zv);
+		}
 	}
 	zend_extension_methods_register(Z_STR_P(RT_CONSTANT(opline, opline->op2)), ce, ext_name_lc);
 	ZEND_VM_NEXT_OPCODE_CHECK_EXCEPTION();
@@ -3755,6 +3781,14 @@ ZEND_VM_HOT_OBJ_HANDLER(112, ZEND_INIT_METHOD_CALL, CONST|TMP|UNUSED|THIS|CV, CO
 						}
 						FREE_OP1();
 						ZEND_VM_NEXT_OPCODE();
+					}
+					/* The scalar lookup may have run the class autoloader for
+					 * imported-but-unloaded extensions; if the autoloader
+					 * threw, propagate instead of raising on top of it. */
+					if (UNEXPECTED(EG(exception))) {
+						FREE_OP2();
+						FREE_OP1();
+						HANDLE_EXCEPTION();
 					}
 				}
 				zend_invalid_method_call(object, function_name);

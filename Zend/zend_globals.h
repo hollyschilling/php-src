@@ -231,6 +231,12 @@ struct _zend_executor_globals {
 
 	HashTable autoload_current_classnames;
 
+	/* Lazily allocated; lc extension names already handed to the class
+	 * autoloader this request. Imported-but-unloadable extensions are not an
+	 * error, so this negative cache is what bounds autoload attempts to one
+	 * per name per request. */
+	HashTable *extension_autoload_attempted;
+
 	zend_long hard_timeout;
 	void *stack_base;
 	void *stack_limit;

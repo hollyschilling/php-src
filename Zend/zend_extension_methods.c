@@ -1,6 +1,7 @@
 #include "zend.h"
 #include "zend_API.h"
 #include "zend_compile.h"
+#include "zend_execute.h"
 #include "zend_globals.h"
 #include "zend_extension_methods.h"
 
@@ -64,13 +65,59 @@ static const zend_op_array *ext_calling_op_array(void)
 
 static bool ext_imports_contain(const HashTable *imports, zend_string *ext_name_lc)
 {
-	zval *entry;
-	ZEND_HASH_PACKED_FOREACH_VAL((HashTable *) imports, entry) {
-		if (zend_string_equals(Z_STR_P(entry), ext_name_lc)) {
+	/* Import sets are consecutive [lc name, original-case name] pairs
+	 * (zend_extension_imports_add); gating compares the lc slots. */
+	uint32_t n = zend_hash_num_elements((HashTable *) imports);
+	for (uint32_t i = 0; i < n; i += 2) {
+		zval *entry = zend_hash_index_find((HashTable *) imports, i);
+		if (entry && zend_string_equals(Z_STR_P(entry), ext_name_lc)) {
 			return true;
 		}
-	} ZEND_HASH_FOREACH_END();
+	}
 	return false;
+}
+
+/* An imported extension that never loaded may be autoloadable: named
+ * extensions are class-table symbols (ZEND_BIND_EXTENSION), so the ordinary
+ * class autoloader can map their names to declaring files. Ask it for every
+ * imported name with no class-table entry, at most once per name per request
+ * — imported-but-unloadable is legal (like an unused `use` import), so the
+ * negative cache is the only thing bounding re-attempts. Returns true if at
+ * least one attempt ran, i.e. retrying the lookup could now succeed. Stops
+ * early if an autoloader throws; the caller must propagate. */
+static bool ext_autoload_missing_imports(const HashTable *imports)
+{
+	bool attempted = false;
+	uint32_t n = zend_hash_num_elements((HashTable *) imports);
+
+	if (!zend_autoload) {
+		/* No autoloader registered: do not consume the once-per-request
+		 * attempt — one registered later (e.g. a bootstrap that runs after
+		 * this call site) must still be consulted. */
+		return false;
+	}
+
+	for (uint32_t i = 0; i + 1 < n; i += 2) {
+		zend_string *lc = Z_STR_P(zend_hash_index_find((HashTable *) imports, i));
+		zend_string *orig = Z_STR_P(zend_hash_index_find((HashTable *) imports, i + 1));
+
+		if (zend_hash_exists(EG(class_table), lc)) {
+			continue; /* loaded already (as an extension or a plain class) */
+		}
+		if (!EG(extension_autoload_attempted)) {
+			ALLOC_HASHTABLE(EG(extension_autoload_attempted));
+			zend_hash_init(EG(extension_autoload_attempted), 8, NULL, NULL, 0);
+		}
+		if (zend_hash_add_empty_element(EG(extension_autoload_attempted), lc) == NULL) {
+			continue; /* negative-cached: already attempted this request */
+		}
+		attempted = true;
+		zend_lookup_class_ex(orig, lc, 0); /* runs the autoloader */
+		if (UNEXPECTED(EG(exception))) {
+			break;
+		}
+	}
+	return attempted;
 }
 
 ZEND_API void zend_extension_methods_register(
@@ -144,14 +191,26 @@ static zend_function *ext_lookup_visible(
  * with class targets; no collision is possible because these names are
  * reserved and can never name a class. Named scalar extensions are
  * lexically gated exactly like class-targeted ones. */
-ZEND_API zend_function *zend_extension_methods_get_scalar(const zval *receiver, zend_string *method_name, zend_string *lc_method_name)
+/* Miss handler shared by the object and scalar lookups: hand every
+ * imported-but-unloaded extension name of the calling op_array to the class
+ * autoloader. Returns true if the caller should retry its lookup. */
+static bool ext_miss_autoload(const zend_op_array **calling, bool *calling_known)
+{
+	if (!*calling_known) {
+		*calling = ext_calling_op_array();
+		*calling_known = true;
+	}
+	return *calling && (*calling)->extension_imports
+		&& ext_autoload_missing_imports((*calling)->extension_imports)
+		&& EXPECTED(!EG(exception));
+}
+
+static zend_function *ext_scalar_lookup(const zval *receiver, zend_string *lc_method_name,
+	const zend_op_array **calling, bool *calling_known)
 {
 	const char *lane;
 	size_t lane_len;
 	HashTable *methods;
-	zend_function *fn;
-	const zend_op_array *calling = NULL;
-	bool calling_known = false;
 
 	if (!ext_registry || zend_hash_num_elements(ext_registry) == 0) {
 		return NULL;
@@ -172,23 +231,36 @@ ZEND_API zend_function *zend_extension_methods_get_scalar(const zval *receiver, 
 	if (!methods) {
 		return NULL;
 	}
+	return ext_lookup_visible(methods, lc_method_name, calling, calling_known);
+}
 
-	if (lc_method_name) {
-		fn = ext_lookup_visible(methods, lc_method_name, &calling, &calling_known);
-	} else {
-		zend_string *lc = zend_string_tolower(method_name);
-		fn = ext_lookup_visible(methods, lc, &calling, &calling_known);
+ZEND_API zend_function *zend_extension_methods_get_scalar(const zval *receiver, zend_string *method_name, zend_string *lc_method_name)
+{
+	zend_function *fn;
+	const zend_op_array *calling = NULL;
+	bool calling_known = false;
+	zend_string *lc = lc_method_name;
+	bool lc_owned = false;
+
+	if (!lc) {
+		lc = zend_string_tolower(method_name);
+		lc_owned = true;
+	}
+
+	fn = ext_scalar_lookup(receiver, lc, &calling, &calling_known);
+	if (!fn && ext_miss_autoload(&calling, &calling_known)) {
+		fn = ext_scalar_lookup(receiver, lc, &calling, &calling_known);
+	}
+
+	if (lc_owned) {
 		zend_string_release(lc);
 	}
 	return fn;
 }
 
-
-ZEND_API zend_function *zend_extension_methods_get(const zend_class_entry *ce, zend_string *lc_method_name)
+static zend_function *ext_methods_lookup(const zend_class_entry *ce, zend_string *lc_method_name,
+	const zend_op_array **calling, bool *calling_known)
 {
-	const zend_op_array *calling = NULL;
-	bool calling_known = false;
-
 	if (!ext_registry || zend_hash_num_elements(ext_registry) == 0) {
 		return NULL;
 	}
@@ -196,7 +268,7 @@ ZEND_API zend_function *zend_extension_methods_get(const zend_class_entry *ce, z
 	for (const zend_class_entry *c = ce; c; c = c->parent) {
 		HashTable *methods = zend_hash_find_ptr_lc(ext_registry, c->name);
 		if (methods) {
-			zend_function *fn = ext_lookup_visible(methods, lc_method_name, &calling, &calling_known);
+			zend_function *fn = ext_lookup_visible(methods, lc_method_name, calling, calling_known);
 			if (fn) {
 				return fn;
 			}
@@ -205,11 +277,24 @@ ZEND_API zend_function *zend_extension_methods_get(const zend_class_entry *ce, z
 	for (uint32_t i = 0; i < ce->num_interfaces; i++) {
 		HashTable *methods = zend_hash_find_ptr_lc(ext_registry, ce->interfaces[i]->name);
 		if (methods) {
-			zend_function *fn = ext_lookup_visible(methods, lc_method_name, &calling, &calling_known);
+			zend_function *fn = ext_lookup_visible(methods, lc_method_name, calling, calling_known);
 			if (fn) {
 				return fn;
 			}
 		}
 	}
 	return NULL;
+}
+
+ZEND_API zend_function *zend_extension_methods_get(const zend_class_entry *ce, zend_string *lc_method_name)
+{
+	const zend_op_array *calling = NULL;
+	bool calling_known = false;
+	zend_function *fn;
+
+	fn = ext_methods_lookup(ce, lc_method_name, &calling, &calling_known);
+	if (!fn && ext_miss_autoload(&calling, &calling_known)) {
+		fn = ext_methods_lookup(ce, lc_method_name, &calling, &calling_known);
+	}
+	return fn;
 }

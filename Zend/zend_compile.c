@@ -5672,7 +5672,7 @@ static void zend_compile_static_call(znode *result, zend_ast *ast, uint32_t type
 
 static zend_class_entry *zend_compile_class_decl(znode *result, const zend_ast *ast, bool toplevel);
 static void zend_compile_extension_decl(zend_ast *ast);
-static void zend_extension_imports_add(zend_string *name_lc);
+static void zend_extension_imports_add(zend_string *name, zend_string *name_lc);
 
 static void zend_compile_new(znode *result, zend_ast *ast) /* {{{ */
 {
@@ -9669,17 +9669,16 @@ static void zend_compile_extension_decl(zend_ast *ast) /* {{{ */
 		target_lc = zend_string_tolower(target_name);
 	}
 
-	zend_string *ext_name_lc = NULL;
+	zend_string *ext_name = NULL, *ext_name_lc = NULL;
 	if (decl->name) {
 		/* Named form (`extension Name on Target $recv`): namespaced like a
 		 * class declaration; lexically gated at resolution time
 		 * (`use extension`). The declaring position imports its own
 		 * extension, so the block's methods and all code below can call it
 		 * without a self-import. */
-		zend_string *ext_name = zend_prefix_with_ns(decl->name);
+		ext_name = zend_prefix_with_ns(decl->name);
 		ext_name_lc = zend_string_tolower(ext_name);
-		zend_string_release(ext_name);
-		zend_extension_imports_add(ext_name_lc);
+		zend_extension_imports_add(ext_name, ext_name_lc);
 	}
 
 	/* Compile the body as an anonymous, final, uninstantiable class. Its
@@ -9691,6 +9690,21 @@ static void zend_compile_extension_decl(zend_ast *ast) /* {{{ */
 	CG(extension_receiver) = receiver_name;
 	zend_class_entry *ext_ce = zend_compile_class_decl(&class_node, class_ast, false);
 	CG(extension_receiver) = orig_extension_receiver;
+
+	if (ext_name) {
+		/* A named extension is a class-table symbol (bound at runtime by
+		 * ZEND_BIND_EXTENSION): the synthetic CE carries the extension's real
+		 * name — it is what class_exists(), reflection, and diagnostics see,
+		 * and it is the name the class autoloader is asked for. The CE stays
+		 * uninstantiable: EXPLICIT (not IMPLICIT) abstract, because linking
+		 * clears an implicit-abstract flag on classes without abstract
+		 * methods. Both must happen at compile time — under opcache the CE
+		 * is persisted to (protected) shared memory. */
+		zend_string_release(ext_ce->name);
+		ext_ce->name = zend_new_interned_string(zend_string_copy(ext_name));
+		ext_ce->ce_flags |= ZEND_ACC_EXPLICIT_ABSTRACT_CLASS;
+		zend_string_release(ext_name);
+	}
 
 	/* Keep extension methods out of the polymorphic inline cache for the
 	 * prototype (correctness over speed; the cached path + JIT support is
@@ -10082,24 +10096,31 @@ static void zend_check_already_in_use(uint32_t type, const zend_string *old_name
 /* Append to the file's current `use extension` import set. Copy-on-write:
  * op_arrays snapshot the set as of their compile position by holding the
  * table pointer, so a published table is never mutated. */
-static void zend_extension_imports_add(zend_string *name_lc) /* {{{ */
+static void zend_extension_imports_add(zend_string *name, zend_string *name_lc) /* {{{ */
 {
 	HashTable *imports;
 	zval zv;
 
+	/* Import sets are stored as consecutive pairs: [lc name, original-case
+	 * name]. Gating compares the lc slots (even indices); the original-case
+	 * slot is what a class autoloader receives when an imported extension is
+	 * not loaded at first use. */
 	if (FC(extension_imports)) {
-		zval *entry;
-		ZEND_HASH_PACKED_FOREACH_VAL(FC(extension_imports), entry) {
-			if (zend_string_equals(Z_STR_P(entry), name_lc)) {
+		uint32_t n = zend_hash_num_elements(FC(extension_imports));
+		for (uint32_t i = 0; i < n; i += 2) {
+			zval *entry = zend_hash_index_find(FC(extension_imports), i);
+			if (entry && zend_string_equals(Z_STR_P(entry), name_lc)) {
 				return; /* already imported */
 			}
-		} ZEND_HASH_FOREACH_END();
+		}
 		imports = zend_array_dup(FC(extension_imports));
 		zend_hash_release(FC(extension_imports));
 	} else {
-		imports = zend_new_array(4);
+		imports = zend_new_array(8);
 	}
 	ZVAL_STR(&zv, zend_new_interned_string(zend_string_copy(name_lc)));
+	zend_hash_next_index_insert(imports, &zv);
+	ZVAL_STR(&zv, zend_new_interned_string(zend_string_copy(name)));
 	zend_hash_next_index_insert(imports, &zv);
 	FC(extension_imports) = imports;
 }
@@ -10119,7 +10140,7 @@ static void zend_compile_use_extension(const zend_ast_list *list) /* {{{ */
 		}
 
 		name_lc = zend_string_tolower(name);
-		zend_extension_imports_add(name_lc);
+		zend_extension_imports_add(name, name_lc);
 		zend_string_release(name_lc);
 	}
 }
