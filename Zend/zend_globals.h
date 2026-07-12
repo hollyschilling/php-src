@@ -233,9 +233,15 @@ struct _zend_executor_globals {
 
 	HashTable autoload_current_classnames;
 
+	/* Lazily allocated; lc extension names already handed to the class
+	 * autoloader this request. Imported-but-unloadable extensions are not an
+	 * error, so this negative cache is what bounds autoload attempts to one
+	 * per name per request. */
+	HashTable *extension_autoload_attempted;
+
 	/* Extension-method registry: lc target name -> HashTable of lc method
-	 * name -> zend_function* (borrowed). Lazily allocated per request; one
-	 * per thread under ZTS. See zend_extension_methods.c. */
+	 * name -> entry (borrowed fn + gating name). Lazily allocated per
+	 * request; one per thread under ZTS. See zend_extension_methods.c. */
 	HashTable *extension_method_registry;
 
 	zend_long hard_timeout;
