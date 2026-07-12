@@ -3962,12 +3962,12 @@ static zend_always_inline bool zend_is_method_callable(zend_string *callable, co
 				}
 			}
 		}
-		if (!(fcc->function_handler->common.fn_flags & ZEND_ACC_PUBLIC) &&
+		if ((!(fcc->function_handler->common.fn_flags & ZEND_ACC_PUBLIC)
+		     || (fcc->function_handler->common.fn_flags & ZEND_ACC_MODULE_INTERNAL)) &&
 		    (fcc->calling_scope &&
 		     ((fcc->object && fcc->calling_scope->__call) ||
 		      (!fcc->object && fcc->calling_scope->__callstatic)))) {
 			scope = get_scope(frame);
-			ZEND_ASSERT(!(fcc->function_handler->common.fn_flags & ZEND_ACC_PUBLIC));
 			if (!zend_check_method_accessible(fcc->function_handler, scope)) {
 				retval = false;
 				fcc->function_handler = NULL;
@@ -4028,9 +4028,9 @@ get_function_via_handler:
 				}
 			}
 			if (retval
-			 && !(fcc->function_handler->common.fn_flags & ZEND_ACC_PUBLIC)) {
+			 && (!(fcc->function_handler->common.fn_flags & ZEND_ACC_PUBLIC)
+			  || (fcc->function_handler->common.fn_flags & ZEND_ACC_MODULE_INTERNAL))) {
 				scope = get_scope(frame);
-				ZEND_ASSERT(!(fcc->function_handler->common.fn_flags & ZEND_ACC_PUBLIC));
 				if (!zend_check_method_accessible(fcc->function_handler, scope)) {
 					if (error) {
 						if (*error) {
@@ -4850,7 +4850,7 @@ ZEND_API zend_class_constant *zend_declare_typed_class_constant(zend_class_entry
 	zend_class_constant *c;
 
 	if (ce->ce_flags & ZEND_ACC_INTERFACE) {
-		if (!(flags & ZEND_ACC_PUBLIC)) {
+		if (!(flags & ZEND_ACC_PUBLIC) || (flags & ZEND_ACC_MODULE_INTERNAL)) {
 			zend_error_noreturn(E_COMPILE_ERROR, "Access type for interface constant %s::%s must be public", ZSTR_VAL(ce->name), ZSTR_VAL(name));
 		}
 	}

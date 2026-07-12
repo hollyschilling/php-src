@@ -5323,9 +5323,9 @@ static ZEND_VM_COLD ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_FUNC_CCONV ZEND_
 		HANDLE_EXCEPTION();
 	}
 
-	if (clone && !(clone->common.fn_flags & ZEND_ACC_PUBLIC)) {
+	if (clone && (!(clone->common.fn_flags & ZEND_ACC_PUBLIC)
+			|| (clone->common.fn_flags & ZEND_ACC_MODULE_INTERNAL))) {
 		scope = EX(func)->op_array.scope;
-		ZEND_ASSERT(!(clone->common.fn_flags & ZEND_ACC_PUBLIC));
 		if (!zend_check_method_accessible(clone, scope)) {
 			zend_bad_method_call(clone, clone->common.function_name, scope);
 
@@ -17524,9 +17524,9 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_FUNC_CCONV ZEND_CLONE_SPEC_TM
 		HANDLE_EXCEPTION();
 	}
 
-	if (clone && !(clone->common.fn_flags & ZEND_ACC_PUBLIC)) {
+	if (clone && (!(clone->common.fn_flags & ZEND_ACC_PUBLIC)
+			|| (clone->common.fn_flags & ZEND_ACC_MODULE_INTERNAL))) {
 		scope = EX(func)->op_array.scope;
-		ZEND_ASSERT(!(clone->common.fn_flags & ZEND_ACC_PUBLIC));
 		if (!zend_check_method_accessible(clone, scope)) {
 			zend_bad_method_call(clone, clone->common.function_name, scope);
 			zval_ptr_dtor_nogc(EX_VAR(opline->op1.var));
@@ -32909,9 +32909,9 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_FUNC_CCONV ZEND_CLONE_SPEC_UN
 		HANDLE_EXCEPTION();
 	}
 
-	if (clone && !(clone->common.fn_flags & ZEND_ACC_PUBLIC)) {
+	if (clone && (!(clone->common.fn_flags & ZEND_ACC_PUBLIC)
+			|| (clone->common.fn_flags & ZEND_ACC_MODULE_INTERNAL))) {
 		scope = EX(func)->op_array.scope;
-		ZEND_ASSERT(!(clone->common.fn_flags & ZEND_ACC_PUBLIC));
 		if (!zend_check_method_accessible(clone, scope)) {
 			zend_bad_method_call(clone, clone->common.function_name, scope);
 
@@ -40302,9 +40302,9 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_FUNC_CCONV ZEND_CLONE_SPEC_CV
 		HANDLE_EXCEPTION();
 	}
 
-	if (clone && !(clone->common.fn_flags & ZEND_ACC_PUBLIC)) {
+	if (clone && (!(clone->common.fn_flags & ZEND_ACC_PUBLIC)
+			|| (clone->common.fn_flags & ZEND_ACC_MODULE_INTERNAL))) {
 		scope = EX(func)->op_array.scope;
-		ZEND_ASSERT(!(clone->common.fn_flags & ZEND_ACC_PUBLIC));
 		if (!zend_check_method_accessible(clone, scope)) {
 			zend_bad_method_call(clone, clone->common.function_name, scope);
 
@@ -58202,9 +58202,9 @@ static ZEND_VM_COLD ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_CCONV ZEND_CLONE
 		HANDLE_EXCEPTION();
 	}
 
-	if (clone && !(clone->common.fn_flags & ZEND_ACC_PUBLIC)) {
+	if (clone && (!(clone->common.fn_flags & ZEND_ACC_PUBLIC)
+			|| (clone->common.fn_flags & ZEND_ACC_MODULE_INTERNAL))) {
 		scope = EX(func)->op_array.scope;
-		ZEND_ASSERT(!(clone->common.fn_flags & ZEND_ACC_PUBLIC));
 		if (!zend_check_method_accessible(clone, scope)) {
 			zend_bad_method_call(clone, clone->common.function_name, scope);
 
@@ -70301,9 +70301,9 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_CCONV ZEND_CLONE_SPEC_TMP_TAI
 		HANDLE_EXCEPTION();
 	}
 
-	if (clone && !(clone->common.fn_flags & ZEND_ACC_PUBLIC)) {
+	if (clone && (!(clone->common.fn_flags & ZEND_ACC_PUBLIC)
+			|| (clone->common.fn_flags & ZEND_ACC_MODULE_INTERNAL))) {
 		scope = EX(func)->op_array.scope;
-		ZEND_ASSERT(!(clone->common.fn_flags & ZEND_ACC_PUBLIC));
 		if (!zend_check_method_accessible(clone, scope)) {
 			zend_bad_method_call(clone, clone->common.function_name, scope);
 			zval_ptr_dtor_nogc(EX_VAR(opline->op1.var));
@@ -85586,9 +85586,9 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_CCONV ZEND_CLONE_SPEC_UNUSED_
 		HANDLE_EXCEPTION();
 	}
 
-	if (clone && !(clone->common.fn_flags & ZEND_ACC_PUBLIC)) {
+	if (clone && (!(clone->common.fn_flags & ZEND_ACC_PUBLIC)
+			|| (clone->common.fn_flags & ZEND_ACC_MODULE_INTERNAL))) {
 		scope = EX(func)->op_array.scope;
-		ZEND_ASSERT(!(clone->common.fn_flags & ZEND_ACC_PUBLIC));
 		if (!zend_check_method_accessible(clone, scope)) {
 			zend_bad_method_call(clone, clone->common.function_name, scope);
 
@@ -92979,9 +92979,9 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_CCONV ZEND_CLONE_SPEC_CV_TAIL
 		HANDLE_EXCEPTION();
 	}
 
-	if (clone && !(clone->common.fn_flags & ZEND_ACC_PUBLIC)) {
+	if (clone && (!(clone->common.fn_flags & ZEND_ACC_PUBLIC)
+			|| (clone->common.fn_flags & ZEND_ACC_MODULE_INTERNAL))) {
 		scope = EX(func)->op_array.scope;
-		ZEND_ASSERT(!(clone->common.fn_flags & ZEND_ACC_PUBLIC));
 		if (!zend_check_method_accessible(clone, scope)) {
 			zend_bad_method_call(clone, clone->common.function_name, scope);
 
