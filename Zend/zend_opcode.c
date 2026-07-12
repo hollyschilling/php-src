@@ -358,6 +358,10 @@ ZEND_API void destroy_zend_class(zval *zv)
 					zend_string_release_ex(ce->doc_comment, 0);
 				}
 
+				if (ce->module_name) {
+					zend_string_release_ex(ce->module_name, 0);
+				}
+
 				if (ce->attributes) {
 					zend_hash_release(ce->attributes);
 				}

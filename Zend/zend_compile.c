@@ -404,6 +404,7 @@ void zend_file_context_begin(zend_file_context *prev_context) /* {{{ */
 	FC(imports_function) = NULL;
 	FC(imports_const) = NULL;
 	FC(current_namespace) = NULL;
+	FC(module_name) = NULL;
 	FC(in_namespace) = 0;
 	FC(has_bracketed_namespaces) = 0;
 	FC(declarables).ticks = 0;
@@ -414,6 +415,9 @@ void zend_file_context_begin(zend_file_context *prev_context) /* {{{ */
 void zend_file_context_end(const zend_file_context *prev_context) /* {{{ */
 {
 	zend_end_namespace();
+	if (FC(module_name)) {
+		zend_string_release_ex(FC(module_name), 0);
+	}
 	zend_hash_destroy(&FC(seen_symbols));
 	CG(file_context) = *prev_context;
 }
@@ -895,6 +899,8 @@ static const char *zend_modifier_token_to_string(uint32_t token)
 			return "protected(set)";
 		case T_PRIVATE_SET:
 			return "private(set)";
+		case T_INTERNAL:
+			return "internal";
 		default: ZEND_UNREACHABLE();
 	}
 }
@@ -947,6 +953,11 @@ uint32_t zend_modifier_token_to_flag(zend_modifier_target target, uint32_t token
 		case T_PRIVATE_SET:
 			if (target == ZEND_MODIFIER_TARGET_PROPERTY || target == ZEND_MODIFIER_TARGET_CPP) {
 				return ZEND_ACC_PRIVATE_SET;
+			}
+			break;
+		case T_INTERNAL:
+			if (target != ZEND_MODIFIER_TARGET_PROPERTY_HOOK) {
+				return ZEND_ACC_MODULE_INTERNAL;
 			}
 			break;
 	}
@@ -1048,6 +1059,12 @@ uint32_t zend_add_member_modifier(uint32_t flags, uint32_t new_flag, zend_modifi
 	if ((flags & ZEND_ACC_PPP_MASK) && (new_flag & ZEND_ACC_PPP_MASK)) {
 		zend_throw_exception(zend_ce_compile_error,
 			"Multiple access type modifiers are not allowed", 0);
+		return 0;
+	}
+	if ((new_flags & ZEND_ACC_MODULE_INTERNAL)
+	 && (new_flags & (ZEND_ACC_PPP_MASK|ZEND_ACC_PPP_SET_MASK))) {
+		zend_throw_exception(zend_ce_compile_error,
+			"Cannot combine the internal modifier with another access type modifier", 0);
 		return 0;
 	}
 	if ((new_flags & ZEND_ACC_ABSTRACT) && (new_flags & ZEND_ACC_FINAL)) {
@@ -1907,6 +1924,12 @@ static bool zend_try_ct_eval_class_const(zval *zv, zend_string *class_name, zend
 		return false;
 	}
 
+	/* Module-internal constants are never substituted at compile time; the
+	 * module check happens at runtime in zend_verify_const_access(). */
+	if (ZEND_CLASS_CONST_FLAGS(cc) & ZEND_ACC_MODULE_INTERNAL) {
+		return false;
+	}
+
 	c = &cc->value;
 
 	/* Substitute case-sensitive (or lowercase) persistent class constants */
@@ -2084,6 +2107,7 @@ ZEND_API void zend_initialize_class_data(zend_class_entry *ce, bool nullify_hand
 	zend_hash_init(&ce->function_table, 8, NULL, ZEND_FUNCTION_DTOR, persistent_hashes);
 
 	ce->doc_comment = NULL;
+	ce->module_name = NULL;
 
 	ZEND_MAP_PTR_INIT(ce->static_members_table, NULL);
 	ZEND_MAP_PTR_INIT(ce->mutable_data, NULL);
@@ -8052,7 +8076,7 @@ static void zend_compile_params(zend_ast *ast, zend_ast *return_type_ast, uint32
 		}
 	}
 
-	const uint32_t promotion_flags = ZEND_ACC_PPP_MASK | ZEND_ACC_PPP_SET_MASK | ZEND_ACC_READONLY | ZEND_ACC_FINAL;
+	const uint32_t promotion_flags = ZEND_ACC_PPP_MASK | ZEND_ACC_PPP_SET_MASK | ZEND_ACC_READONLY | ZEND_ACC_FINAL | ZEND_ACC_MODULE_INTERNAL;
 	for (i = 0; i < list->children; ++i) {
 		zend_ast *param_ast = list->child[i];
 		zend_ast *type_ast = param_ast->child[0];
@@ -8569,7 +8593,7 @@ static zend_string *zend_begin_method_decl(zend_op_array *op_array, zend_string 
 	}
 
 	if (in_interface) {
-		if (!(fn_flags & ZEND_ACC_PUBLIC)) {
+		if (!(fn_flags & ZEND_ACC_PUBLIC) || (fn_flags & ZEND_ACC_MODULE_INTERNAL)) {
 			zend_error_noreturn(E_COMPILE_ERROR, "Access type for interface method "
 				"%s::%s() must be public", ZSTR_VAL(ce->name), ZSTR_VAL(name));
 		}
@@ -9149,8 +9173,8 @@ static void zend_compile_prop_decl(zend_ast *ast, zend_ast *type_ast, uint32_t f
 		if (flags & ZEND_ACC_FINAL) {
 			zend_error_noreturn(E_COMPILE_ERROR, "Property in interface cannot be final");
 		}
-		if (flags & (ZEND_ACC_PROTECTED|ZEND_ACC_PRIVATE)) {
-			zend_error_noreturn(E_COMPILE_ERROR, "Property in interface cannot be protected or private");
+		if (flags & (ZEND_ACC_PROTECTED|ZEND_ACC_PRIVATE|ZEND_ACC_MODULE_INTERNAL)) {
+			zend_error_noreturn(E_COMPILE_ERROR, "Property in interface cannot be protected, private or internal");
 		}
 		if (flags & ZEND_ACC_ABSTRACT) {
 			zend_error_noreturn(E_COMPILE_ERROR,
@@ -9624,6 +9648,10 @@ static void zend_compile_class_decl(znode *result, const zend_ast *ast, bool top
 		ce->doc_comment = zend_string_copy(decl->doc_comment);
 	}
 
+	if (FC(module_name)) {
+		ce->module_name = zend_string_copy(FC(module_name));
+	}
+
 	if (UNEXPECTED((decl->flags & ZEND_ACC_ANON_CLASS))) {
 		/* Serialization is not supported for anonymous classes */
 		ce->ce_flags |= ZEND_ACC_NOT_SERIALIZABLE;
@@ -10061,6 +10089,19 @@ static void zend_compile_const_decl(zend_ast *ast) /* {{{ */
 	CG(active_op_array)->fn_flags |= ZEND_ACC_PTR_OPS;
 }
 /* }}}*/
+
+static void zend_compile_module_decl(const zend_ast *ast) /* {{{ */
+{
+	zend_string *name = zend_ast_get_str(ast->child[0]);
+
+	if (FC(module_name)) {
+		zend_error_noreturn(E_COMPILE_ERROR,
+			"Module membership was already declared as %s", ZSTR_VAL(FC(module_name)));
+	}
+
+	FC(module_name) = zend_new_interned_string(zend_string_copy(name));
+}
+/* }}} */
 
 static void zend_compile_namespace(const zend_ast *ast) /* {{{ */
 {
@@ -12099,6 +12140,9 @@ static void zend_compile_stmt(zend_ast *ast) /* {{{ */
 			break;
 		case ZEND_AST_NAMESPACE:
 			zend_compile_namespace(ast);
+			break;
+		case ZEND_AST_MODULE_DECL:
+			zend_compile_module_decl(ast);
 			break;
 		case ZEND_AST_HALT_COMPILER:
 			zend_compile_halt_compiler(ast);

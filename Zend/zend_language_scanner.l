@@ -1575,6 +1575,28 @@ OPTIONAL_WHITESPACE_OR_COMMENTS ({WHITESPACE}|{MULTI_LINE_COMMENT}|{SINGLE_LINE_
 	RETURN_TOKEN_WITH_IDENT(T_ENUM);
 }
 
+/*
+ * The module keyword must be followed by whitespace and an identifier (the
+ * first FQMN segment). This keeps module usable in classes, functions and
+ * constants, following the enum precedent.
+ */
+<ST_IN_SCRIPTING>"module"{WHITESPACE_OR_COMMENTS}[a-zA-Z_\x80-\xff] {
+	yyless(6);
+	RETURN_TOKEN_WITH_IDENT(T_MODULE);
+}
+
+/*
+ * The internal keyword must be followed by whitespace and something that can
+ * start a member declaration it modifies: another modifier/keyword or type
+ * name (identifier), a nullable type (?), a DNF type ((), a fully qualified
+ * type (\) or an untyped property ($). Following the enum precedent, this
+ * keeps internal usable in classes, functions and constants.
+ */
+<ST_IN_SCRIPTING>"internal"{WHITESPACE_OR_COMMENTS}[a-zA-Z_\x80-\xff$?(\\] {
+	yyless(8);
+	RETURN_TOKEN_WITH_IDENT(T_INTERNAL);
+}
+
 <ST_IN_SCRIPTING>"extends" {
 	RETURN_TOKEN_WITH_IDENT(T_EXTENDS);
 }

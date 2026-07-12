@@ -167,6 +167,8 @@ static YYSIZE_T zend_yytnamerr(char*, const char*);
 %token <ident> T_TRAIT         "'trait'"
 %token <ident> T_INTERFACE     "'interface'"
 %token <ident> T_ENUM          "'enum'"
+%token <ident> T_MODULE        "'module'"
+%token <ident> T_INTERNAL      "'internal'"
 %token <ident> T_EXTENDS       "'extends'"
 %token <ident> T_IMPLEMENTS    "'implements'"
 %token <ident> T_NAMESPACE     "'namespace'"
@@ -311,12 +313,12 @@ reserved_non_modifiers:
 	| T_FUNCTION | T_CONST | T_RETURN | T_PRINT | T_YIELD | T_LIST | T_SWITCH | T_ENDSWITCH | T_CASE | T_DEFAULT | T_BREAK
 	| T_ARRAY | T_CALLABLE | T_EXTENDS | T_IMPLEMENTS | T_NAMESPACE | T_TRAIT | T_INTERFACE | T_CLASS
 	| T_CLASS_C | T_TRAIT_C | T_FUNC_C | T_METHOD_C | T_LINE | T_FILE | T_DIR | T_NS_C | T_FN | T_MATCH | T_ENUM
-	| T_PROPERTY_C
+	| T_PROPERTY_C | T_MODULE
 ;
 
 semi_reserved:
 	  reserved_non_modifiers
-	| T_STATIC | T_ABSTRACT | T_FINAL | T_PRIVATE | T_PROTECTED | T_PUBLIC | T_READONLY
+	| T_STATIC | T_ABSTRACT | T_FINAL | T_PRIVATE | T_PROTECTED | T_PUBLIC | T_READONLY | T_INTERNAL
 ;
 
 ampersand:
@@ -407,6 +409,9 @@ top_statement:
 			{ $$ = zend_ast_create(ZEND_AST_HALT_COMPILER,
 			      zend_ast_create_zval_from_long(zend_get_scanned_file_offset()));
 			  zend_stop_lexing(); }
+	|	T_MODULE namespace_declaration_name ';'
+			{ $$ = zend_ast_create(ZEND_AST_MODULE_DECL, $2);
+			  RESET_DOC_COMMENT(); }
 	|	T_NAMESPACE namespace_declaration_name ';'
 			{ $$ = zend_ast_create(ZEND_AST_NAMESPACE, $2, NULL);
 			  RESET_DOC_COMMENT(); }
@@ -1116,6 +1121,7 @@ member_modifier:
 	|	T_ABSTRACT				{ $$ = T_ABSTRACT; }
 	|	T_FINAL					{ $$ = T_FINAL; }
 	|	T_READONLY				{ $$ = T_READONLY; }
+	|	T_INTERNAL				{ $$ = T_INTERNAL; }
 ;
 
 property_list:

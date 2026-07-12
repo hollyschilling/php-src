@@ -111,6 +111,8 @@ typedef struct _zend_file_context {
 	zend_declarables declarables;
 
 	zend_string *current_namespace;
+	/* Module membership (FQMN) declared by this file; NULL for the null module. */
+	zend_string *module_name;
 	bool in_namespace;
 	bool has_bracketed_namespaces;
 
@@ -293,6 +295,10 @@ typedef struct _zend_oparray_context {
 /* Class has magic methods __get/__set/__unset/           |     |     |     */
 /* __isset that use guards                                |     |     |     */
 #define ZEND_ACC_USE_GUARDS              (1 << 30) /*  X  |     |     |     */
+/*                                                        |     |     |     */
+/* Module-internal visibility (module pattern).           |     |     |     */
+/* Members carry ZEND_ACC_PUBLIC plus this flag.          |     |     |     */
+#define ZEND_ACC_MODULE_INTERNAL         (1 << 30) /*     |  X  |  X  |  X  */
 /*                                                        |     |     |     */
 /* Class constants updated                                |     |     |     */
 #define ZEND_ACC_CONSTANTS_UPDATED       (1 << 12) /*  X  |     |     |     */

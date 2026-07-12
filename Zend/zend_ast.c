@@ -2802,6 +2802,10 @@ simple_list:
 			}
 			zend_ast_export_name(str, ast->child[1], 0, indent);
 			break;
+		case ZEND_AST_MODULE_DECL:
+			smart_str_appends(str, "module ");
+			zend_ast_export_name(str, ast->child[0], 0, indent);
+			break;
 		case ZEND_AST_NAMESPACE:
 			smart_str_appends(str, "namespace");
 			if (ast->child[0]) {

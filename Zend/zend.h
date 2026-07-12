@@ -160,6 +160,9 @@ struct _zend_class_entry {
 	uint32_t ce_flags;
 	uint32_t ce_flags2;
 
+	/* Fully Qualified Module Name this class is a member of; NULL for the null module. */
+	zend_string *module_name;
+
 	int default_properties_count;
 	uint32_t default_static_members_count;
 	zval *default_properties_table;
@@ -240,6 +243,15 @@ struct _zend_class_entry {
 		} internal;
 	} info;
 };
+
+/* Module pattern: a scope may access module-internal members of a declaring
+ * class iff both are members of the same module (FQMN equality). */
+static zend_always_inline bool zend_check_module_internal_access(
+		const zend_class_entry *declaring_ce, const zend_class_entry *scope)
+{
+	return scope && scope->module_name && declaring_ce->module_name
+		&& zend_string_equals(scope->module_name, declaring_ce->module_name);
+}
 
 typedef union {
 	zend_max_align_t align;
