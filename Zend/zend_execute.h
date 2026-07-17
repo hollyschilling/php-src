@@ -537,6 +537,14 @@ ZEND_API void ZEND_FASTCALL zend_init_func_run_time_cache(zend_op_array *op_arra
 
 ZEND_API void zend_fetch_dimension_const(zval *result, const zval *container, zval *dim, int type);
 
+/* Value-class (struct) copy-on-write: separate the shared instance held in
+ * *container before a write. The caller must have verified the instance is a
+ * value class. Cannot throw (struct __clone is banned). */
+ZEND_API zend_object* ZEND_FASTCALL zend_value_class_separate_container(zval *container);
+/* Throws if a value-class constructor let $this escape; run at ctor return,
+ * gated on ZEND_CALL_HAS_THIS without ZEND_CALL_RELEASE_THIS. */
+ZEND_API void ZEND_FASTCALL zend_check_value_class_ctor_escape(zend_execute_data *execute_data);
+
 ZEND_API bool zend_gcc_global_regs(void);
 
 #define ZEND_USER_OPCODE_CONTINUE   0 /* execute next opcode */

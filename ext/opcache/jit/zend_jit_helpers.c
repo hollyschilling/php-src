@@ -2690,6 +2690,23 @@ static void ZEND_FASTCALL zend_jit_invalid_property_incdec(zval *container, cons
 	}
 }
 
+/* Value-class (struct) copy-on-write, from JIT-compiled object-write fast
+ * paths. Emitted before the property address is computed, so every downstream
+ * path (inline store, typed-prop helper, slow-path helper) operates on the
+ * separated instance. Cannot throw (struct __clone is banned), so call sites
+ * need no exception check. Returns the object to operate on. */
+static zend_object* ZEND_FASTCALL zend_jit_value_class_separate(zval *container)
+{
+	return zend_value_class_separate_container(container);
+}
+
+/* Leave-time check for JIT-compiled value-class constructors: mirrors the
+ * HAS_THIS-without-RELEASE_THIS branch of the VM's leave paths. */
+static void ZEND_FASTCALL zend_jit_value_class_ctor_escape(zend_execute_data *execute_data)
+{
+	zend_check_value_class_ctor_escape(execute_data);
+}
+
 static void ZEND_FASTCALL zend_jit_invalid_property_assign(zval *container, const char *property_name)
 {
 	zend_throw_error(NULL,
