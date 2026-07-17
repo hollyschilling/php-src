@@ -167,6 +167,7 @@ static YYSIZE_T zend_yytnamerr(char*, const char*);
 %token <ident> T_TRAIT         "'trait'"
 %token <ident> T_INTERFACE     "'interface'"
 %token <ident> T_ENUM          "'enum'"
+%token <ident> T_STRUCT        "'struct'"
 %token <ident> T_EXTENDS       "'extends'"
 %token <ident> T_IMPLEMENTS    "'implements'"
 %token <ident> T_NAMESPACE     "'namespace'"
@@ -284,6 +285,7 @@ static YYSIZE_T zend_yytnamerr(char*, const char*);
 %type <ast> attribute_decl attribute attributes attribute_group namespace_declaration_name
 %type <ast> match match_arm_list non_empty_match_arm_list match_arm match_arm_cond_list
 %type <ast> enum_declaration_statement enum_backing_type enum_case enum_case_expr
+%type <ast> struct_declaration_statement
 %type <ast> function_name non_empty_member_modifiers
 %type <ast> property_hook property_hook_list optional_property_hook_list hooked_property property_hook_body
 %type <ast> optional_parameter_list clone_argument_list non_empty_clone_argument_list
@@ -311,7 +313,7 @@ reserved_non_modifiers:
 	| T_FUNCTION | T_CONST | T_RETURN | T_PRINT | T_YIELD | T_LIST | T_SWITCH | T_ENDSWITCH | T_CASE | T_DEFAULT | T_BREAK
 	| T_ARRAY | T_CALLABLE | T_EXTENDS | T_IMPLEMENTS | T_NAMESPACE | T_TRAIT | T_INTERFACE | T_CLASS
 	| T_CLASS_C | T_TRAIT_C | T_FUNC_C | T_METHOD_C | T_LINE | T_FILE | T_DIR | T_NS_C | T_FN | T_MATCH | T_ENUM
-	| T_PROPERTY_C
+	| T_PROPERTY_C | T_STRUCT
 ;
 
 semi_reserved:
@@ -392,6 +394,7 @@ attributed_statement:
 	|	trait_declaration_statement			{ $$ = $1; }
 	|	interface_declaration_statement		{ $$ = $1; }
 	|	enum_declaration_statement			{ $$ = $1; }
+	|	struct_declaration_statement		{ $$ = $1; }
 ;
 
 attributed_top_statement:
@@ -637,6 +640,21 @@ trait_declaration_statement:
 		T_TRAIT { $<num>$ = CG(zend_lineno); }
 		T_STRING backup_doc_comment '{' class_statement_list '}'
 			{ $$ = zend_ast_create_decl(ZEND_AST_CLASS, ZEND_ACC_TRAIT, $<num>2, $4, zend_ast_get_str($3), NULL, NULL, $6, NULL, NULL); }
+;
+
+/* Structs are implicitly final and root: no extends_from, and no abstract/final
+ * modifier. `readonly struct` mirrors `readonly class`. The value-class marker
+ * travels in the decl's attr, not its flags, because flags is OR'd wholesale
+ * into ce_flags and the marker lives in ce_flags2. */
+struct_declaration_statement:
+		T_STRUCT { $<num>$ = CG(zend_lineno); }
+		T_STRING implements_list backup_doc_comment '{' class_statement_list '}'
+			{ $$ = zend_ast_create_decl(ZEND_AST_CLASS, ZEND_ACC_FINAL|ZEND_ACC_NO_DYNAMIC_PROPERTIES, $<num>2, $5, zend_ast_get_str($3), NULL, $4, $7, NULL, NULL);
+			  $$->attr = ZEND_CLASS_IS_VALUE_CLASS; }
+	|	T_READONLY T_STRUCT { $<num>$ = CG(zend_lineno); }
+		T_STRING implements_list backup_doc_comment '{' class_statement_list '}'
+			{ $$ = zend_ast_create_decl(ZEND_AST_CLASS, ZEND_ACC_FINAL|ZEND_ACC_NO_DYNAMIC_PROPERTIES|ZEND_ACC_READONLY_CLASS, $<num>3, $6, zend_ast_get_str($4), NULL, $5, $8, NULL, NULL);
+			  $$->attr = ZEND_CLASS_IS_VALUE_CLASS; }
 ;
 
 interface_declaration_statement:

@@ -3034,12 +3034,53 @@ static void zend_verify_abstract_class_function(const zend_function *fn, zend_ab
 }
 /* }}} */
 
+/* The struct member bans are enforced at compile time for members declared in
+ * the struct body, which gives them an exact line number. This is the second
+ * tier: it runs after linking, so it also covers members flattened in from
+ * traits. Members contributed by interfaces (prototypes, hooked properties)
+ * keep their own ce and are not the struct's to answer for. */
+static void zend_verify_value_class(const zend_class_entry *ce) /* {{{ */
+{
+	const zend_property_info *prop_info;
+	const zend_function *func;
+
+	ZEND_HASH_MAP_FOREACH_PTR(&ce->properties_info, prop_info) {
+		if (prop_info->ce != ce) {
+			continue;
+		}
+		if (prop_info->flags & ZEND_ACC_STATIC) {
+			zend_error_noreturn(E_COMPILE_ERROR, "Struct %s cannot include static properties",
+				ZSTR_VAL(ce->name));
+		}
+		if (!ZEND_TYPE_IS_SET(prop_info->type)) {
+			zend_error_noreturn(E_COMPILE_ERROR, "Struct property %s::$%s must have type",
+				ZSTR_VAL(ce->name), ZSTR_VAL(prop_info->name));
+		}
+	} ZEND_HASH_FOREACH_END();
+
+	/* The function table is keyed by lowercased name, which is what
+	 * zend_is_magic_method_name() expects; report the declared spelling. */
+	zend_string *lcname;
+	ZEND_HASH_MAP_FOREACH_STR_KEY_PTR(&ce->function_table, lcname, func) {
+		if (func->common.scope != ce || lcname == NULL) {
+			continue;
+		}
+		if (zend_is_magic_method_name(lcname)
+		 && !zend_string_equals_literal(lcname, ZEND_CONSTRUCTOR_FUNC_NAME)) {
+			zend_error_noreturn(E_COMPILE_ERROR, "Struct %s cannot include magic method %s()",
+				ZSTR_VAL(ce->name), ZSTR_VAL(func->common.function_name));
+		}
+	} ZEND_HASH_FOREACH_END();
+}
+/* }}} */
+
 void zend_verify_abstract_class(zend_class_entry *ce) /* {{{ */
 {
 	const zend_function *func;
 	zend_abstract_info ai;
 	bool is_explicit_abstract = (ce->ce_flags & ZEND_ACC_EXPLICIT_ABSTRACT_CLASS) != 0;
-	bool can_be_abstract = (ce->ce_flags & (ZEND_ACC_ENUM|ZEND_ACC_ANON_CLASS)) == 0;
+	bool can_be_abstract = (ce->ce_flags & (ZEND_ACC_ENUM|ZEND_ACC_ANON_CLASS)) == 0
+		&& !(ce->ce_flags2 & ZEND_ACC2_VALUE_CLASS);
 	memset(&ai, 0, sizeof(ai));
 
 	ZEND_HASH_MAP_FOREACH_PTR(&ce->function_table, func) {
@@ -3703,6 +3744,9 @@ ZEND_API zend_class_entry *zend_do_link_class(zend_class_entry *ce, zend_string 
 		}
 		if (ce->ce_flags & ZEND_ACC_ENUM) {
 			zend_verify_enum(ce);
+		}
+		if (ce->ce_flags2 & ZEND_ACC2_VALUE_CLASS) {
+			zend_verify_value_class(ce);
 		}
 		if (ce->num_hooked_prop_variance_checks) {
 			const zend_property_info *prop_info;

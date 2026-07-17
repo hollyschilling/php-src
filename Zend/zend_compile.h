@@ -340,10 +340,14 @@ typedef struct _zend_oparray_context {
 /* Class cannot be serialized or unserialized             |     |     |     */
 #define ZEND_ACC_NOT_SERIALIZABLE        (1 << 29) /*  X  |     |     |     */
 /*                                                        |     |     |     */
-/* Class Flags 2 (ce_flags2) (unused: 0-31)               |     |     |     */
+/* Class Flags 2 (ce_flags2) (unused: 1-31)               |     |     |     */
 /* =========================                              |     |     |     */
 /*                                                        |     |     |     */
-/* #define ZEND_ACC2_EXAMPLE             (1 << 0)      X  |     |     |     */
+/* Value class: instances have value semantics. Assignment  |     |     |   */
+/* shares, and the write-path handlers separate a shared    |     |     |   */
+/* instance before mutating it (copy-on-write, as for       |     |     |   */
+/* arrays). Declared in userland with the `struct` keyword. |     |     |   */
+#define ZEND_ACC2_VALUE_CLASS            (1 << 0) /*   X  |     |     |     */
 /*                                                        |     |     |     */
 /* Function Flags (unused: 30)                            |     |     |     */
 /* ==============                                         |     |     |     */
@@ -1218,6 +1222,11 @@ static zend_always_inline bool zend_check_arg_send_type(const zend_function *zf,
 
 /* Used to disallow pipes with arrow functions that lead to confusing parse trees. */
 #define ZEND_PARENTHESIZED_ARROW_FUNC 1
+
+/* Marks a ZEND_AST_CLASS decl declared with the `struct` keyword. The marker
+ * cannot travel in zend_ast_decl.flags, which is OR'd wholesale into ce_flags;
+ * it becomes ZEND_ACC2_VALUE_CLASS in ce_flags2 at compile time. */
+#define ZEND_CLASS_IS_VALUE_CLASS 1
 
 /* For "use" AST nodes and the seen symbol table */
 #define ZEND_SYMBOL_CLASS    (1<<0)

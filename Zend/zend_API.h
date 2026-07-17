@@ -388,6 +388,7 @@ ZEND_API void zend_collect_module_handlers(void);
 ZEND_API void zend_destroy_modules(void);
 ZEND_API void zend_check_magic_method_implementation(
 		const zend_class_entry *ce, const zend_function *fptr, const zend_string *lcname, int error_type);
+ZEND_API bool zend_is_magic_method_name(const zend_string *lcname);
 ZEND_API void zend_add_magic_method(zend_class_entry *ce, zend_function *fptr, const zend_string *lcname);
 
 ZEND_API zend_class_entry *zend_register_internal_class(const zend_class_entry *class_entry);

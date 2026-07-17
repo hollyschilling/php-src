@@ -8228,6 +8228,10 @@ static void zend_compile_params(zend_ast *ast, zend_ast *return_type_ast, uint32
 					"Property %s::$%s cannot have type %s",
 					ZSTR_VAL(scope->name), ZSTR_VAL(name), ZSTR_VAL(str));
 			}
+			if (!type_ast && (scope->ce_flags2 & ZEND_ACC2_VALUE_CLASS)) {
+				zend_error_noreturn(E_COMPILE_ERROR, "Struct property %s::$%s must have type",
+					ZSTR_VAL(scope->name), ZSTR_VAL(name));
+			}
 
 			if (!(property_flags & ZEND_ACC_READONLY) && (scope->ce_flags & ZEND_ACC_READONLY_CLASS)) {
 				property_flags |= ZEND_ACC_READONLY;
@@ -8559,7 +8563,8 @@ static zend_string *zend_begin_method_decl(zend_op_array *op_array, zend_string 
 		if (ce->ce_flags & ZEND_ACC_ANON_CLASS) {
 			zend_error_noreturn(E_COMPILE_ERROR, "Anonymous class method %s() must not be abstract",
 				ZSTR_VAL(name));
-		} else if (ce->ce_flags & (ZEND_ACC_ENUM|ZEND_ACC_INTERFACE)) {
+		} else if ((ce->ce_flags & (ZEND_ACC_ENUM|ZEND_ACC_INTERFACE))
+				|| (ce->ce_flags2 & ZEND_ACC2_VALUE_CLASS)) {
 			zend_error_noreturn(E_COMPILE_ERROR, "%s method %s::%s() must not be abstract",
 				zend_get_object_type_case(ce, true), ZSTR_VAL(ce->name), ZSTR_VAL(name));
 		} else {
@@ -8605,6 +8610,16 @@ static zend_string *zend_begin_method_decl(zend_op_array *op_array, zend_string 
 
 	if (zend_hash_add_ptr(&ce->function_table, lcname, op_array) == NULL) {
 		zend_error_noreturn(E_COMPILE_ERROR, "Cannot redeclare %s::%s()",
+			ZSTR_VAL(ce->name), ZSTR_VAL(name));
+	}
+
+	/* A struct has a total, declared shape, so there is nothing for __get/__set
+	 * to simulate, and a copy hook would observe copy-on-write separation.
+	 * __construct is the one magic method a struct may declare. */
+	if ((ce->ce_flags2 & ZEND_ACC2_VALUE_CLASS)
+	 && !zend_string_equals_literal(lcname, ZEND_CONSTRUCTOR_FUNC_NAME)
+	 && zend_is_magic_method_name(lcname)) {
+		zend_error_noreturn(E_COMPILE_ERROR, "Struct %s cannot include magic method %s()",
 			ZSTR_VAL(ce->name), ZSTR_VAL(name));
 	}
 
@@ -9141,6 +9156,12 @@ static void zend_compile_prop_decl(zend_ast *ast, zend_ast *type_ast, uint32_t f
 		zend_error_noreturn(E_COMPILE_ERROR, "Enum %s cannot include properties", ZSTR_VAL(ce->name));
 	}
 
+	if ((ce->ce_flags2 & ZEND_ACC2_VALUE_CLASS) && (flags & ZEND_ACC_STATIC)) {
+		/* A static property is per-class state, not part of an instance's shape. */
+		zend_error_noreturn(E_COMPILE_ERROR, "Struct %s cannot include static properties",
+			ZSTR_VAL(ce->name));
+	}
+
 	if ((flags & ZEND_ACC_FINAL) && (flags & ZEND_ACC_PRIVATE)) {
 		zend_error_noreturn(E_COMPILE_ERROR, "Property cannot be both final and private");
 	}
@@ -9199,6 +9220,10 @@ static void zend_compile_prop_decl(zend_ast *ast, zend_ast *type_ast, uint32_t f
 					"Property %s::$%s cannot have type %s",
 					ZSTR_VAL(ce->name), ZSTR_VAL(name), ZSTR_VAL(str));
 			}
+		} else if (ce->ce_flags2 & ZEND_ACC2_VALUE_CLASS) {
+			/* A struct is a shape: every slot is declared and typed. */
+			zend_error_noreturn(E_COMPILE_ERROR, "Struct property %s::$%s must have type",
+				ZSTR_VAL(ce->name), ZSTR_VAL(name));
 		}
 
 		/* Doc comment has been appended as last element in ZEND_AST_PROP_ELEM ast */
@@ -9569,6 +9594,8 @@ static void zend_compile_class_decl(znode *result, const zend_ast *ast, bool top
 		const char *type = "a class name";
 		if (decl->flags & ZEND_ACC_ENUM) {
 			type = "an enum name";
+		} else if (decl->attr & ZEND_CLASS_IS_VALUE_CLASS) {
+			type = "a struct name";
 		} else if (decl->flags & ZEND_ACC_INTERFACE) {
 			type = "an interface name";
 		} else if (decl->flags & ZEND_ACC_TRAIT) {
@@ -9616,6 +9643,9 @@ static void zend_compile_class_decl(znode *result, const zend_ast *ast, bool top
 	}
 
 	ce->ce_flags |= decl->flags;
+	if (decl->attr & ZEND_CLASS_IS_VALUE_CLASS) {
+		ce->ce_flags2 |= ZEND_ACC2_VALUE_CLASS;
+	}
 	ce->info.user.filename = zend_string_copy(zend_get_compiled_filename());
 	ce->info.user.line_start = decl->start_lineno;
 	ce->info.user.line_end = decl->end_lineno;
