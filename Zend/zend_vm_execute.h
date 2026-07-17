@@ -1167,7 +1167,14 @@ static zend_never_inline ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_FUNC_CCONV 
 #endif
 		if (UNEXPECTED(call_info & ZEND_CALL_RELEASE_THIS)) {
 			OBJ_RELEASE(Z_OBJ(execute_data->This));
-		} else if (UNEXPECTED(call_info & ZEND_CALL_CLOSURE)) {
+		} else if (UNEXPECTED(call_info & ZEND_CALL_HAS_THIS)) {
+			zend_check_value_class_ctor_escape(execute_data);
+		}
+		/* Independent of RELEASE_THIS: a value-class receiver reached through a
+		 * closure owns its (possibly separated) $this via RELEASE_THIS while the
+		 * closure object is still released here. For every pre-existing frame the
+		 * two flags remain mutually exclusive, so behaviour is unchanged. */
+		if (UNEXPECTED(call_info & ZEND_CALL_CLOSURE)) {
 			OBJ_RELEASE(ZEND_CLOSURE_OBJECT(EX(func)));
 		}
 		EG(vm_stack_top) = (zval*)execute_data;
@@ -1201,7 +1208,14 @@ static zend_never_inline ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_FUNC_CCONV 
 
 		if (UNEXPECTED(call_info & ZEND_CALL_RELEASE_THIS)) {
 			OBJ_RELEASE(Z_OBJ(execute_data->This));
-		} else if (UNEXPECTED(call_info & ZEND_CALL_CLOSURE)) {
+		} else if (UNEXPECTED(call_info & ZEND_CALL_HAS_THIS)) {
+			zend_check_value_class_ctor_escape(execute_data);
+		}
+		/* Independent of RELEASE_THIS: a value-class receiver reached through a
+		 * closure owns its (possibly separated) $this via RELEASE_THIS while the
+		 * closure object is still released here. For every pre-existing frame the
+		 * two flags remain mutually exclusive, so behaviour is unchanged. */
+		if (UNEXPECTED(call_info & ZEND_CALL_CLOSURE)) {
 			OBJ_RELEASE(ZEND_CLOSURE_OBJECT(EX(func)));
 		}
 
@@ -11465,12 +11479,26 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_FUNC_CCONV ZEND_NEW_SPEC_CONS
 			init_func_run_time_cache(&constructor->op_array);
 		}
 		/* We are not handling overloaded classes right now */
-		call = zend_vm_stack_push_call_frame(
-			ZEND_CALL_FUNCTION | ZEND_CALL_RELEASE_THIS | ZEND_CALL_HAS_THIS,
-			constructor,
-			opline->extended_value,
-			Z_OBJ_P(result));
-		Z_ADDREF_P(result);
+		if (UNEXPECTED(ce->ce_flags2 & ZEND_ACC2_VALUE_CLASS)) {
+			/* Value classes bind $this borrowed and exclusive: the constructor
+			 * shares the result slot's single reference (no addref, no
+			 * RELEASE_THIS), so promoted and body writes through $this land in
+			 * place instead of separating. The result slot owns the instance
+			 * across the call; the escape check verifies nothing else grabbed a
+			 * reference by the time the constructor returns. */
+			call = zend_vm_stack_push_call_frame(
+				ZEND_CALL_FUNCTION | ZEND_CALL_HAS_THIS,
+				constructor,
+				opline->extended_value,
+				Z_OBJ_P(result));
+		} else {
+			call = zend_vm_stack_push_call_frame(
+				ZEND_CALL_FUNCTION | ZEND_CALL_RELEASE_THIS | ZEND_CALL_HAS_THIS,
+				constructor,
+				opline->extended_value,
+				Z_OBJ_P(result));
+			Z_ADDREF_P(result);
+		}
 	}
 
 	call->prev_execute_data = EX(call);
@@ -24039,6 +24067,7 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_FUNC_CCONV ZEND_ASSIGN_OBJ_OP
 assign_op_object:
 		/* here we are sure we are dealing with an object */
 		zobj = Z_OBJ_P(object);
+		zobj = zend_value_class_separate(object, zobj);
 		if (IS_CONST == IS_CONST) {
 			name = Z_STR_P(property);
 		} else {
@@ -24262,6 +24291,7 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_FUNC_CCONV ZEND_PRE_INC_OBJ_S
 pre_incdec_object:
 		/* here we are sure we are dealing with an object */
 		zobj = Z_OBJ_P(object);
+		zobj = zend_value_class_separate(object, zobj);
 		if (IS_CONST == IS_CONST) {
 			name = Z_STR_P(property);
 		} else {
@@ -24328,6 +24358,7 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_FUNC_CCONV ZEND_POST_INC_OBJ_
 post_incdec_object:
 		/* here we are sure we are dealing with an object */
 		zobj = Z_OBJ_P(object);
+		zobj = zend_value_class_separate(object, zobj);
 		if (IS_CONST == IS_CONST) {
 			name = Z_STR_P(property);
 		} else {
@@ -24560,6 +24591,7 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_FUNC_CCONV ZEND_ASSIGN_OBJ_SP
 
 assign_object:
 	zobj = Z_OBJ_P(object);
+	zobj = zend_value_class_separate(object, zobj);
 	if (IS_CONST == IS_CONST) {
 		if (EXPECTED(zobj->ce == CACHED_PTR(opline->extended_value))) {
 			void **cache_slot = CACHE_ADDR(opline->extended_value);
@@ -24717,6 +24749,7 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_FUNC_CCONV ZEND_ASSIGN_OBJ_SP
 
 assign_object:
 	zobj = Z_OBJ_P(object);
+	zobj = zend_value_class_separate(object, zobj);
 	if (IS_CONST == IS_CONST) {
 		if (EXPECTED(zobj->ce == CACHED_PTR(opline->extended_value))) {
 			void **cache_slot = CACHE_ADDR(opline->extended_value);
@@ -24872,6 +24905,7 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_FUNC_CCONV ZEND_ASSIGN_OBJ_SP
 
 assign_object:
 	zobj = Z_OBJ_P(object);
+	zobj = zend_value_class_separate(object, zobj);
 	if (IS_CONST == IS_CONST) {
 		if (EXPECTED(zobj->ce == CACHED_PTR(opline->extended_value))) {
 			void **cache_slot = CACHE_ADDR(opline->extended_value);
@@ -26754,6 +26788,7 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_FUNC_CCONV ZEND_ASSIGN_OBJ_OP
 assign_op_object:
 		/* here we are sure we are dealing with an object */
 		zobj = Z_OBJ_P(object);
+		zobj = zend_value_class_separate(object, zobj);
 		if (IS_TMP_VAR == IS_CONST) {
 			name = Z_STR_P(property);
 		} else {
@@ -26976,6 +27011,7 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_FUNC_CCONV ZEND_PRE_INC_OBJ_S
 pre_incdec_object:
 		/* here we are sure we are dealing with an object */
 		zobj = Z_OBJ_P(object);
+		zobj = zend_value_class_separate(object, zobj);
 		if (IS_TMP_VAR == IS_CONST) {
 			name = Z_STR_P(property);
 		} else {
@@ -27042,6 +27078,7 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_FUNC_CCONV ZEND_POST_INC_OBJ_
 post_incdec_object:
 		/* here we are sure we are dealing with an object */
 		zobj = Z_OBJ_P(object);
+		zobj = zend_value_class_separate(object, zobj);
 		if (IS_TMP_VAR == IS_CONST) {
 			name = Z_STR_P(property);
 		} else {
@@ -27268,6 +27305,7 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_FUNC_CCONV ZEND_ASSIGN_OBJ_SP
 
 assign_object:
 	zobj = Z_OBJ_P(object);
+	zobj = zend_value_class_separate(object, zobj);
 	if (IS_TMP_VAR == IS_CONST) {
 		if (EXPECTED(zobj->ce == CACHED_PTR(opline->extended_value))) {
 			void **cache_slot = CACHE_ADDR(opline->extended_value);
@@ -27424,6 +27462,7 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_FUNC_CCONV ZEND_ASSIGN_OBJ_SP
 
 assign_object:
 	zobj = Z_OBJ_P(object);
+	zobj = zend_value_class_separate(object, zobj);
 	if (IS_TMP_VAR == IS_CONST) {
 		if (EXPECTED(zobj->ce == CACHED_PTR(opline->extended_value))) {
 			void **cache_slot = CACHE_ADDR(opline->extended_value);
@@ -27578,6 +27617,7 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_FUNC_CCONV ZEND_ASSIGN_OBJ_SP
 
 assign_object:
 	zobj = Z_OBJ_P(object);
+	zobj = zend_value_class_separate(object, zobj);
 	if (IS_TMP_VAR == IS_CONST) {
 		if (EXPECTED(zobj->ce == CACHED_PTR(opline->extended_value))) {
 			void **cache_slot = CACHE_ADDR(opline->extended_value);
@@ -30201,12 +30241,26 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_FUNC_CCONV ZEND_NEW_SPEC_VAR_
 			init_func_run_time_cache(&constructor->op_array);
 		}
 		/* We are not handling overloaded classes right now */
-		call = zend_vm_stack_push_call_frame(
-			ZEND_CALL_FUNCTION | ZEND_CALL_RELEASE_THIS | ZEND_CALL_HAS_THIS,
-			constructor,
-			opline->extended_value,
-			Z_OBJ_P(result));
-		Z_ADDREF_P(result);
+		if (UNEXPECTED(ce->ce_flags2 & ZEND_ACC2_VALUE_CLASS)) {
+			/* Value classes bind $this borrowed and exclusive: the constructor
+			 * shares the result slot's single reference (no addref, no
+			 * RELEASE_THIS), so promoted and body writes through $this land in
+			 * place instead of separating. The result slot owns the instance
+			 * across the call; the escape check verifies nothing else grabbed a
+			 * reference by the time the constructor returns. */
+			call = zend_vm_stack_push_call_frame(
+				ZEND_CALL_FUNCTION | ZEND_CALL_HAS_THIS,
+				constructor,
+				opline->extended_value,
+				Z_OBJ_P(result));
+		} else {
+			call = zend_vm_stack_push_call_frame(
+				ZEND_CALL_FUNCTION | ZEND_CALL_RELEASE_THIS | ZEND_CALL_HAS_THIS,
+				constructor,
+				opline->extended_value,
+				Z_OBJ_P(result));
+			Z_ADDREF_P(result);
+		}
 	}
 
 	call->prev_execute_data = EX(call);
@@ -30574,6 +30628,7 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_FUNC_CCONV ZEND_ASSIGN_OBJ_OP
 assign_op_object:
 		/* here we are sure we are dealing with an object */
 		zobj = Z_OBJ_P(object);
+		zobj = zend_value_class_separate(object, zobj);
 		if (IS_CV == IS_CONST) {
 			name = Z_STR_P(property);
 		} else {
@@ -30797,6 +30852,7 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_FUNC_CCONV ZEND_PRE_INC_OBJ_S
 pre_incdec_object:
 		/* here we are sure we are dealing with an object */
 		zobj = Z_OBJ_P(object);
+		zobj = zend_value_class_separate(object, zobj);
 		if (IS_CV == IS_CONST) {
 			name = Z_STR_P(property);
 		} else {
@@ -30863,6 +30919,7 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_FUNC_CCONV ZEND_POST_INC_OBJ_
 post_incdec_object:
 		/* here we are sure we are dealing with an object */
 		zobj = Z_OBJ_P(object);
+		zobj = zend_value_class_separate(object, zobj);
 		if (IS_CV == IS_CONST) {
 			name = Z_STR_P(property);
 		} else {
@@ -31095,6 +31152,7 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_FUNC_CCONV ZEND_ASSIGN_OBJ_SP
 
 assign_object:
 	zobj = Z_OBJ_P(object);
+	zobj = zend_value_class_separate(object, zobj);
 	if (IS_CV == IS_CONST) {
 		if (EXPECTED(zobj->ce == CACHED_PTR(opline->extended_value))) {
 			void **cache_slot = CACHE_ADDR(opline->extended_value);
@@ -31252,6 +31310,7 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_FUNC_CCONV ZEND_ASSIGN_OBJ_SP
 
 assign_object:
 	zobj = Z_OBJ_P(object);
+	zobj = zend_value_class_separate(object, zobj);
 	if (IS_CV == IS_CONST) {
 		if (EXPECTED(zobj->ce == CACHED_PTR(opline->extended_value))) {
 			void **cache_slot = CACHE_ADDR(opline->extended_value);
@@ -31407,6 +31466,7 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_FUNC_CCONV ZEND_ASSIGN_OBJ_SP
 
 assign_object:
 	zobj = Z_OBJ_P(object);
+	zobj = zend_value_class_separate(object, zobj);
 	if (IS_CV == IS_CONST) {
 		if (EXPECTED(zobj->ce == CACHED_PTR(opline->extended_value))) {
 			void **cache_slot = CACHE_ADDR(opline->extended_value);
@@ -33067,6 +33127,7 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_FUNC_CCONV ZEND_ASSIGN_OBJ_OP
 assign_op_object:
 		/* here we are sure we are dealing with an object */
 		zobj = Z_OBJ_P(object);
+		zobj = zend_value_class_separate(object, zobj);
 		if (IS_CONST == IS_CONST) {
 			name = Z_STR_P(property);
 		} else {
@@ -33159,6 +33220,7 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_FUNC_CCONV ZEND_PRE_INC_OBJ_S
 pre_incdec_object:
 		/* here we are sure we are dealing with an object */
 		zobj = Z_OBJ_P(object);
+		zobj = zend_value_class_separate(object, zobj);
 		if (IS_CONST == IS_CONST) {
 			name = Z_STR_P(property);
 		} else {
@@ -33226,6 +33288,7 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_FUNC_CCONV ZEND_POST_INC_OBJ_
 post_incdec_object:
 		/* here we are sure we are dealing with an object */
 		zobj = Z_OBJ_P(object);
+		zobj = zend_value_class_separate(object, zobj);
 		if (IS_CONST == IS_CONST) {
 			name = Z_STR_P(property);
 		} else {
@@ -33669,6 +33732,7 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_FUNC_CCONV ZEND_ASSIGN_OBJ_SP
 
 assign_object:
 	zobj = Z_OBJ_P(object);
+	zobj = zend_value_class_separate(object, zobj);
 	if (IS_CONST == IS_CONST) {
 		if (EXPECTED(zobj->ce == CACHED_PTR(opline->extended_value))) {
 			void **cache_slot = CACHE_ADDR(opline->extended_value);
@@ -33827,6 +33891,7 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_FUNC_CCONV ZEND_ASSIGN_OBJ_SP
 
 assign_object:
 	zobj = Z_OBJ_P(object);
+	zobj = zend_value_class_separate(object, zobj);
 	if (IS_CONST == IS_CONST) {
 		if (EXPECTED(zobj->ce == CACHED_PTR(opline->extended_value))) {
 			void **cache_slot = CACHE_ADDR(opline->extended_value);
@@ -33983,6 +34048,7 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_FUNC_CCONV ZEND_ASSIGN_OBJ_SP
 
 assign_object:
 	zobj = Z_OBJ_P(object);
+	zobj = zend_value_class_separate(object, zobj);
 	if (IS_CONST == IS_CONST) {
 		if (EXPECTED(zobj->ce == CACHED_PTR(opline->extended_value))) {
 			void **cache_slot = CACHE_ADDR(opline->extended_value);
@@ -35200,6 +35266,7 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_FUNC_CCONV ZEND_ASSIGN_OBJ_OP
 assign_op_object:
 		/* here we are sure we are dealing with an object */
 		zobj = Z_OBJ_P(object);
+		zobj = zend_value_class_separate(object, zobj);
 		if (IS_TMP_VAR == IS_CONST) {
 			name = Z_STR_P(property);
 		} else {
@@ -35291,6 +35358,7 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_FUNC_CCONV ZEND_PRE_INC_OBJ_S
 pre_incdec_object:
 		/* here we are sure we are dealing with an object */
 		zobj = Z_OBJ_P(object);
+		zobj = zend_value_class_separate(object, zobj);
 		if (IS_TMP_VAR == IS_CONST) {
 			name = Z_STR_P(property);
 		} else {
@@ -35358,6 +35426,7 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_FUNC_CCONV ZEND_POST_INC_OBJ_
 post_incdec_object:
 		/* here we are sure we are dealing with an object */
 		zobj = Z_OBJ_P(object);
+		zobj = zend_value_class_separate(object, zobj);
 		if (IS_TMP_VAR == IS_CONST) {
 			name = Z_STR_P(property);
 		} else {
@@ -35791,6 +35860,7 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_FUNC_CCONV ZEND_ASSIGN_OBJ_SP
 
 assign_object:
 	zobj = Z_OBJ_P(object);
+	zobj = zend_value_class_separate(object, zobj);
 	if (IS_TMP_VAR == IS_CONST) {
 		if (EXPECTED(zobj->ce == CACHED_PTR(opline->extended_value))) {
 			void **cache_slot = CACHE_ADDR(opline->extended_value);
@@ -35948,6 +36018,7 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_FUNC_CCONV ZEND_ASSIGN_OBJ_SP
 
 assign_object:
 	zobj = Z_OBJ_P(object);
+	zobj = zend_value_class_separate(object, zobj);
 	if (IS_TMP_VAR == IS_CONST) {
 		if (EXPECTED(zobj->ce == CACHED_PTR(opline->extended_value))) {
 			void **cache_slot = CACHE_ADDR(opline->extended_value);
@@ -36103,6 +36174,7 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_FUNC_CCONV ZEND_ASSIGN_OBJ_SP
 
 assign_object:
 	zobj = Z_OBJ_P(object);
+	zobj = zend_value_class_separate(object, zobj);
 	if (IS_TMP_VAR == IS_CONST) {
 		if (EXPECTED(zobj->ce == CACHED_PTR(opline->extended_value))) {
 			void **cache_slot = CACHE_ADDR(opline->extended_value);
@@ -37337,12 +37409,26 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_FUNC_CCONV ZEND_NEW_SPEC_UNUS
 			init_func_run_time_cache(&constructor->op_array);
 		}
 		/* We are not handling overloaded classes right now */
-		call = zend_vm_stack_push_call_frame(
-			ZEND_CALL_FUNCTION | ZEND_CALL_RELEASE_THIS | ZEND_CALL_HAS_THIS,
-			constructor,
-			opline->extended_value,
-			Z_OBJ_P(result));
-		Z_ADDREF_P(result);
+		if (UNEXPECTED(ce->ce_flags2 & ZEND_ACC2_VALUE_CLASS)) {
+			/* Value classes bind $this borrowed and exclusive: the constructor
+			 * shares the result slot's single reference (no addref, no
+			 * RELEASE_THIS), so promoted and body writes through $this land in
+			 * place instead of separating. The result slot owns the instance
+			 * across the call; the escape check verifies nothing else grabbed a
+			 * reference by the time the constructor returns. */
+			call = zend_vm_stack_push_call_frame(
+				ZEND_CALL_FUNCTION | ZEND_CALL_HAS_THIS,
+				constructor,
+				opline->extended_value,
+				Z_OBJ_P(result));
+		} else {
+			call = zend_vm_stack_push_call_frame(
+				ZEND_CALL_FUNCTION | ZEND_CALL_RELEASE_THIS | ZEND_CALL_HAS_THIS,
+				constructor,
+				opline->extended_value,
+				Z_OBJ_P(result));
+			Z_ADDREF_P(result);
+		}
 	}
 
 	call->prev_execute_data = EX(call);
@@ -37792,6 +37878,7 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_FUNC_CCONV ZEND_ASSIGN_OBJ_OP
 assign_op_object:
 		/* here we are sure we are dealing with an object */
 		zobj = Z_OBJ_P(object);
+		zobj = zend_value_class_separate(object, zobj);
 		if (IS_CV == IS_CONST) {
 			name = Z_STR_P(property);
 		} else {
@@ -37884,6 +37971,7 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_FUNC_CCONV ZEND_PRE_INC_OBJ_S
 pre_incdec_object:
 		/* here we are sure we are dealing with an object */
 		zobj = Z_OBJ_P(object);
+		zobj = zend_value_class_separate(object, zobj);
 		if (IS_CV == IS_CONST) {
 			name = Z_STR_P(property);
 		} else {
@@ -37951,6 +38039,7 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_FUNC_CCONV ZEND_POST_INC_OBJ_
 post_incdec_object:
 		/* here we are sure we are dealing with an object */
 		zobj = Z_OBJ_P(object);
+		zobj = zend_value_class_separate(object, zobj);
 		if (IS_CV == IS_CONST) {
 			name = Z_STR_P(property);
 		} else {
@@ -38389,6 +38478,7 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_FUNC_CCONV ZEND_ASSIGN_OBJ_SP
 
 assign_object:
 	zobj = Z_OBJ_P(object);
+	zobj = zend_value_class_separate(object, zobj);
 	if (IS_CV == IS_CONST) {
 		if (EXPECTED(zobj->ce == CACHED_PTR(opline->extended_value))) {
 			void **cache_slot = CACHE_ADDR(opline->extended_value);
@@ -38547,6 +38637,7 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_FUNC_CCONV ZEND_ASSIGN_OBJ_SP
 
 assign_object:
 	zobj = Z_OBJ_P(object);
+	zobj = zend_value_class_separate(object, zobj);
 	if (IS_CV == IS_CONST) {
 		if (EXPECTED(zobj->ce == CACHED_PTR(opline->extended_value))) {
 			void **cache_slot = CACHE_ADDR(opline->extended_value);
@@ -38703,6 +38794,7 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_FUNC_CCONV ZEND_ASSIGN_OBJ_SP
 
 assign_object:
 	zobj = Z_OBJ_P(object);
+	zobj = zend_value_class_separate(object, zobj);
 	if (IS_CV == IS_CONST) {
 		if (EXPECTED(zobj->ce == CACHED_PTR(opline->extended_value))) {
 			void **cache_slot = CACHE_ADDR(opline->extended_value);
@@ -41895,6 +41987,7 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_FUNC_CCONV ZEND_ASSIGN_OBJ_OP
 assign_op_object:
 		/* here we are sure we are dealing with an object */
 		zobj = Z_OBJ_P(object);
+		zobj = zend_value_class_separate(object, zobj);
 		if (IS_CONST == IS_CONST) {
 			name = Z_STR_P(property);
 		} else {
@@ -42121,6 +42214,7 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_FUNC_CCONV ZEND_PRE_INC_OBJ_S
 pre_incdec_object:
 		/* here we are sure we are dealing with an object */
 		zobj = Z_OBJ_P(object);
+		zobj = zend_value_class_separate(object, zobj);
 		if (IS_CONST == IS_CONST) {
 			name = Z_STR_P(property);
 		} else {
@@ -42188,6 +42282,7 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_FUNC_CCONV ZEND_POST_INC_OBJ_
 post_incdec_object:
 		/* here we are sure we are dealing with an object */
 		zobj = Z_OBJ_P(object);
+		zobj = zend_value_class_separate(object, zobj);
 		if (IS_CONST == IS_CONST) {
 			name = Z_STR_P(property);
 		} else {
@@ -42762,6 +42857,7 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_FUNC_CCONV ZEND_ASSIGN_OBJ_SP
 
 assign_object:
 	zobj = Z_OBJ_P(object);
+	zobj = zend_value_class_separate(object, zobj);
 	if (IS_CONST == IS_CONST) {
 		if (EXPECTED(zobj->ce == CACHED_PTR(opline->extended_value))) {
 			void **cache_slot = CACHE_ADDR(opline->extended_value);
@@ -42920,6 +43016,7 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_FUNC_CCONV ZEND_ASSIGN_OBJ_SP
 
 assign_object:
 	zobj = Z_OBJ_P(object);
+	zobj = zend_value_class_separate(object, zobj);
 	if (IS_CONST == IS_CONST) {
 		if (EXPECTED(zobj->ce == CACHED_PTR(opline->extended_value))) {
 			void **cache_slot = CACHE_ADDR(opline->extended_value);
@@ -43076,6 +43173,7 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_FUNC_CCONV ZEND_ASSIGN_OBJ_SP
 
 assign_object:
 	zobj = Z_OBJ_P(object);
+	zobj = zend_value_class_separate(object, zobj);
 	if (IS_CONST == IS_CONST) {
 		if (EXPECTED(zobj->ce == CACHED_PTR(opline->extended_value))) {
 			void **cache_slot = CACHE_ADDR(opline->extended_value);
@@ -45734,6 +45832,7 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_FUNC_CCONV ZEND_ASSIGN_OBJ_OP
 assign_op_object:
 		/* here we are sure we are dealing with an object */
 		zobj = Z_OBJ_P(object);
+		zobj = zend_value_class_separate(object, zobj);
 		if (IS_TMP_VAR == IS_CONST) {
 			name = Z_STR_P(property);
 		} else {
@@ -45959,6 +46058,7 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_FUNC_CCONV ZEND_PRE_INC_OBJ_S
 pre_incdec_object:
 		/* here we are sure we are dealing with an object */
 		zobj = Z_OBJ_P(object);
+		zobj = zend_value_class_separate(object, zobj);
 		if (IS_TMP_VAR == IS_CONST) {
 			name = Z_STR_P(property);
 		} else {
@@ -46026,6 +46126,7 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_FUNC_CCONV ZEND_POST_INC_OBJ_
 post_incdec_object:
 		/* here we are sure we are dealing with an object */
 		zobj = Z_OBJ_P(object);
+		zobj = zend_value_class_separate(object, zobj);
 		if (IS_TMP_VAR == IS_CONST) {
 			name = Z_STR_P(property);
 		} else {
@@ -46585,6 +46686,7 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_FUNC_CCONV ZEND_ASSIGN_OBJ_SP
 
 assign_object:
 	zobj = Z_OBJ_P(object);
+	zobj = zend_value_class_separate(object, zobj);
 	if (IS_TMP_VAR == IS_CONST) {
 		if (EXPECTED(zobj->ce == CACHED_PTR(opline->extended_value))) {
 			void **cache_slot = CACHE_ADDR(opline->extended_value);
@@ -46742,6 +46844,7 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_FUNC_CCONV ZEND_ASSIGN_OBJ_SP
 
 assign_object:
 	zobj = Z_OBJ_P(object);
+	zobj = zend_value_class_separate(object, zobj);
 	if (IS_TMP_VAR == IS_CONST) {
 		if (EXPECTED(zobj->ce == CACHED_PTR(opline->extended_value))) {
 			void **cache_slot = CACHE_ADDR(opline->extended_value);
@@ -46897,6 +47000,7 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_FUNC_CCONV ZEND_ASSIGN_OBJ_SP
 
 assign_object:
 	zobj = Z_OBJ_P(object);
+	zobj = zend_value_class_separate(object, zobj);
 	if (IS_TMP_VAR == IS_CONST) {
 		if (EXPECTED(zobj->ce == CACHED_PTR(opline->extended_value))) {
 			void **cache_slot = CACHE_ADDR(opline->extended_value);
@@ -50842,6 +50946,7 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_FUNC_CCONV ZEND_ASSIGN_OBJ_OP
 assign_op_object:
 		/* here we are sure we are dealing with an object */
 		zobj = Z_OBJ_P(object);
+		zobj = zend_value_class_separate(object, zobj);
 		if (IS_CV == IS_CONST) {
 			name = Z_STR_P(property);
 		} else {
@@ -51068,6 +51173,7 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_FUNC_CCONV ZEND_PRE_INC_OBJ_S
 pre_incdec_object:
 		/* here we are sure we are dealing with an object */
 		zobj = Z_OBJ_P(object);
+		zobj = zend_value_class_separate(object, zobj);
 		if (IS_CV == IS_CONST) {
 			name = Z_STR_P(property);
 		} else {
@@ -51135,6 +51241,7 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_FUNC_CCONV ZEND_POST_INC_OBJ_
 post_incdec_object:
 		/* here we are sure we are dealing with an object */
 		zobj = Z_OBJ_P(object);
+		zobj = zend_value_class_separate(object, zobj);
 		if (IS_CV == IS_CONST) {
 			name = Z_STR_P(property);
 		} else {
@@ -51704,6 +51811,7 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_FUNC_CCONV ZEND_ASSIGN_OBJ_SP
 
 assign_object:
 	zobj = Z_OBJ_P(object);
+	zobj = zend_value_class_separate(object, zobj);
 	if (IS_CV == IS_CONST) {
 		if (EXPECTED(zobj->ce == CACHED_PTR(opline->extended_value))) {
 			void **cache_slot = CACHE_ADDR(opline->extended_value);
@@ -51862,6 +51970,7 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_FUNC_CCONV ZEND_ASSIGN_OBJ_SP
 
 assign_object:
 	zobj = Z_OBJ_P(object);
+	zobj = zend_value_class_separate(object, zobj);
 	if (IS_CV == IS_CONST) {
 		if (EXPECTED(zobj->ce == CACHED_PTR(opline->extended_value))) {
 			void **cache_slot = CACHE_ADDR(opline->extended_value);
@@ -52018,6 +52127,7 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_FUNC_CCONV ZEND_ASSIGN_OBJ_SP
 
 assign_object:
 	zobj = Z_OBJ_P(object);
+	zobj = zend_value_class_separate(object, zobj);
 	if (IS_CV == IS_CONST) {
 		if (EXPECTED(zobj->ce == CACHED_PTR(opline->extended_value))) {
 			void **cache_slot = CACHE_ADDR(opline->extended_value);
@@ -54162,7 +54272,14 @@ static zend_never_inline ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_CCONV  zend
 #endif
 		if (UNEXPECTED(call_info & ZEND_CALL_RELEASE_THIS)) {
 			OBJ_RELEASE(Z_OBJ(execute_data->This));
-		} else if (UNEXPECTED(call_info & ZEND_CALL_CLOSURE)) {
+		} else if (UNEXPECTED(call_info & ZEND_CALL_HAS_THIS)) {
+			zend_check_value_class_ctor_escape(execute_data);
+		}
+		/* Independent of RELEASE_THIS: a value-class receiver reached through a
+		 * closure owns its (possibly separated) $this via RELEASE_THIS while the
+		 * closure object is still released here. For every pre-existing frame the
+		 * two flags remain mutually exclusive, so behaviour is unchanged. */
+		if (UNEXPECTED(call_info & ZEND_CALL_CLOSURE)) {
 			OBJ_RELEASE(ZEND_CLOSURE_OBJECT(EX(func)));
 		}
 		EG(vm_stack_top) = (zval*)execute_data;
@@ -54196,7 +54313,14 @@ static zend_never_inline ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_CCONV  zend
 
 		if (UNEXPECTED(call_info & ZEND_CALL_RELEASE_THIS)) {
 			OBJ_RELEASE(Z_OBJ(execute_data->This));
-		} else if (UNEXPECTED(call_info & ZEND_CALL_CLOSURE)) {
+		} else if (UNEXPECTED(call_info & ZEND_CALL_HAS_THIS)) {
+			zend_check_value_class_ctor_escape(execute_data);
+		}
+		/* Independent of RELEASE_THIS: a value-class receiver reached through a
+		 * closure owns its (possibly separated) $this via RELEASE_THIS while the
+		 * closure object is still released here. For every pre-existing frame the
+		 * two flags remain mutually exclusive, so behaviour is unchanged. */
+		if (UNEXPECTED(call_info & ZEND_CALL_CLOSURE)) {
 			OBJ_RELEASE(ZEND_CLOSURE_OBJECT(EX(func)));
 		}
 
@@ -64242,12 +64366,26 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_CCONV ZEND_NEW_SPEC_CONST_UNU
 			init_func_run_time_cache(&constructor->op_array);
 		}
 		/* We are not handling overloaded classes right now */
-		call = zend_vm_stack_push_call_frame(
-			ZEND_CALL_FUNCTION | ZEND_CALL_RELEASE_THIS | ZEND_CALL_HAS_THIS,
-			constructor,
-			opline->extended_value,
-			Z_OBJ_P(result));
-		Z_ADDREF_P(result);
+		if (UNEXPECTED(ce->ce_flags2 & ZEND_ACC2_VALUE_CLASS)) {
+			/* Value classes bind $this borrowed and exclusive: the constructor
+			 * shares the result slot's single reference (no addref, no
+			 * RELEASE_THIS), so promoted and body writes through $this land in
+			 * place instead of separating. The result slot owns the instance
+			 * across the call; the escape check verifies nothing else grabbed a
+			 * reference by the time the constructor returns. */
+			call = zend_vm_stack_push_call_frame(
+				ZEND_CALL_FUNCTION | ZEND_CALL_HAS_THIS,
+				constructor,
+				opline->extended_value,
+				Z_OBJ_P(result));
+		} else {
+			call = zend_vm_stack_push_call_frame(
+				ZEND_CALL_FUNCTION | ZEND_CALL_RELEASE_THIS | ZEND_CALL_HAS_THIS,
+				constructor,
+				opline->extended_value,
+				Z_OBJ_P(result));
+			Z_ADDREF_P(result);
+		}
 	}
 
 	call->prev_execute_data = EX(call);
@@ -76716,6 +76854,7 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_CCONV ZEND_ASSIGN_OBJ_OP_SPEC
 assign_op_object:
 		/* here we are sure we are dealing with an object */
 		zobj = Z_OBJ_P(object);
+		zobj = zend_value_class_separate(object, zobj);
 		if (IS_CONST == IS_CONST) {
 			name = Z_STR_P(property);
 		} else {
@@ -76939,6 +77078,7 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_CCONV ZEND_PRE_INC_OBJ_SPEC_V
 pre_incdec_object:
 		/* here we are sure we are dealing with an object */
 		zobj = Z_OBJ_P(object);
+		zobj = zend_value_class_separate(object, zobj);
 		if (IS_CONST == IS_CONST) {
 			name = Z_STR_P(property);
 		} else {
@@ -77005,6 +77145,7 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_CCONV ZEND_POST_INC_OBJ_SPEC_
 post_incdec_object:
 		/* here we are sure we are dealing with an object */
 		zobj = Z_OBJ_P(object);
+		zobj = zend_value_class_separate(object, zobj);
 		if (IS_CONST == IS_CONST) {
 			name = Z_STR_P(property);
 		} else {
@@ -77237,6 +77378,7 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_CCONV ZEND_ASSIGN_OBJ_SPEC_VA
 
 assign_object:
 	zobj = Z_OBJ_P(object);
+	zobj = zend_value_class_separate(object, zobj);
 	if (IS_CONST == IS_CONST) {
 		if (EXPECTED(zobj->ce == CACHED_PTR(opline->extended_value))) {
 			void **cache_slot = CACHE_ADDR(opline->extended_value);
@@ -77394,6 +77536,7 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_CCONV ZEND_ASSIGN_OBJ_SPEC_VA
 
 assign_object:
 	zobj = Z_OBJ_P(object);
+	zobj = zend_value_class_separate(object, zobj);
 	if (IS_CONST == IS_CONST) {
 		if (EXPECTED(zobj->ce == CACHED_PTR(opline->extended_value))) {
 			void **cache_slot = CACHE_ADDR(opline->extended_value);
@@ -77549,6 +77692,7 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_CCONV ZEND_ASSIGN_OBJ_SPEC_VA
 
 assign_object:
 	zobj = Z_OBJ_P(object);
+	zobj = zend_value_class_separate(object, zobj);
 	if (IS_CONST == IS_CONST) {
 		if (EXPECTED(zobj->ce == CACHED_PTR(opline->extended_value))) {
 			void **cache_slot = CACHE_ADDR(opline->extended_value);
@@ -79431,6 +79575,7 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_CCONV ZEND_ASSIGN_OBJ_OP_SPEC
 assign_op_object:
 		/* here we are sure we are dealing with an object */
 		zobj = Z_OBJ_P(object);
+		zobj = zend_value_class_separate(object, zobj);
 		if (IS_TMP_VAR == IS_CONST) {
 			name = Z_STR_P(property);
 		} else {
@@ -79653,6 +79798,7 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_CCONV ZEND_PRE_INC_OBJ_SPEC_V
 pre_incdec_object:
 		/* here we are sure we are dealing with an object */
 		zobj = Z_OBJ_P(object);
+		zobj = zend_value_class_separate(object, zobj);
 		if (IS_TMP_VAR == IS_CONST) {
 			name = Z_STR_P(property);
 		} else {
@@ -79719,6 +79865,7 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_CCONV ZEND_POST_INC_OBJ_SPEC_
 post_incdec_object:
 		/* here we are sure we are dealing with an object */
 		zobj = Z_OBJ_P(object);
+		zobj = zend_value_class_separate(object, zobj);
 		if (IS_TMP_VAR == IS_CONST) {
 			name = Z_STR_P(property);
 		} else {
@@ -79945,6 +80092,7 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_CCONV ZEND_ASSIGN_OBJ_SPEC_VA
 
 assign_object:
 	zobj = Z_OBJ_P(object);
+	zobj = zend_value_class_separate(object, zobj);
 	if (IS_TMP_VAR == IS_CONST) {
 		if (EXPECTED(zobj->ce == CACHED_PTR(opline->extended_value))) {
 			void **cache_slot = CACHE_ADDR(opline->extended_value);
@@ -80101,6 +80249,7 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_CCONV ZEND_ASSIGN_OBJ_SPEC_VA
 
 assign_object:
 	zobj = Z_OBJ_P(object);
+	zobj = zend_value_class_separate(object, zobj);
 	if (IS_TMP_VAR == IS_CONST) {
 		if (EXPECTED(zobj->ce == CACHED_PTR(opline->extended_value))) {
 			void **cache_slot = CACHE_ADDR(opline->extended_value);
@@ -80255,6 +80404,7 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_CCONV ZEND_ASSIGN_OBJ_SPEC_VA
 
 assign_object:
 	zobj = Z_OBJ_P(object);
+	zobj = zend_value_class_separate(object, zobj);
 	if (IS_TMP_VAR == IS_CONST) {
 		if (EXPECTED(zobj->ce == CACHED_PTR(opline->extended_value))) {
 			void **cache_slot = CACHE_ADDR(opline->extended_value);
@@ -82878,12 +83028,26 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_CCONV ZEND_NEW_SPEC_VAR_UNUSE
 			init_func_run_time_cache(&constructor->op_array);
 		}
 		/* We are not handling overloaded classes right now */
-		call = zend_vm_stack_push_call_frame(
-			ZEND_CALL_FUNCTION | ZEND_CALL_RELEASE_THIS | ZEND_CALL_HAS_THIS,
-			constructor,
-			opline->extended_value,
-			Z_OBJ_P(result));
-		Z_ADDREF_P(result);
+		if (UNEXPECTED(ce->ce_flags2 & ZEND_ACC2_VALUE_CLASS)) {
+			/* Value classes bind $this borrowed and exclusive: the constructor
+			 * shares the result slot's single reference (no addref, no
+			 * RELEASE_THIS), so promoted and body writes through $this land in
+			 * place instead of separating. The result slot owns the instance
+			 * across the call; the escape check verifies nothing else grabbed a
+			 * reference by the time the constructor returns. */
+			call = zend_vm_stack_push_call_frame(
+				ZEND_CALL_FUNCTION | ZEND_CALL_HAS_THIS,
+				constructor,
+				opline->extended_value,
+				Z_OBJ_P(result));
+		} else {
+			call = zend_vm_stack_push_call_frame(
+				ZEND_CALL_FUNCTION | ZEND_CALL_RELEASE_THIS | ZEND_CALL_HAS_THIS,
+				constructor,
+				opline->extended_value,
+				Z_OBJ_P(result));
+			Z_ADDREF_P(result);
+		}
 	}
 
 	call->prev_execute_data = EX(call);
@@ -83251,6 +83415,7 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_CCONV ZEND_ASSIGN_OBJ_OP_SPEC
 assign_op_object:
 		/* here we are sure we are dealing with an object */
 		zobj = Z_OBJ_P(object);
+		zobj = zend_value_class_separate(object, zobj);
 		if (IS_CV == IS_CONST) {
 			name = Z_STR_P(property);
 		} else {
@@ -83474,6 +83639,7 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_CCONV ZEND_PRE_INC_OBJ_SPEC_V
 pre_incdec_object:
 		/* here we are sure we are dealing with an object */
 		zobj = Z_OBJ_P(object);
+		zobj = zend_value_class_separate(object, zobj);
 		if (IS_CV == IS_CONST) {
 			name = Z_STR_P(property);
 		} else {
@@ -83540,6 +83706,7 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_CCONV ZEND_POST_INC_OBJ_SPEC_
 post_incdec_object:
 		/* here we are sure we are dealing with an object */
 		zobj = Z_OBJ_P(object);
+		zobj = zend_value_class_separate(object, zobj);
 		if (IS_CV == IS_CONST) {
 			name = Z_STR_P(property);
 		} else {
@@ -83772,6 +83939,7 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_CCONV ZEND_ASSIGN_OBJ_SPEC_VA
 
 assign_object:
 	zobj = Z_OBJ_P(object);
+	zobj = zend_value_class_separate(object, zobj);
 	if (IS_CV == IS_CONST) {
 		if (EXPECTED(zobj->ce == CACHED_PTR(opline->extended_value))) {
 			void **cache_slot = CACHE_ADDR(opline->extended_value);
@@ -83929,6 +84097,7 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_CCONV ZEND_ASSIGN_OBJ_SPEC_VA
 
 assign_object:
 	zobj = Z_OBJ_P(object);
+	zobj = zend_value_class_separate(object, zobj);
 	if (IS_CV == IS_CONST) {
 		if (EXPECTED(zobj->ce == CACHED_PTR(opline->extended_value))) {
 			void **cache_slot = CACHE_ADDR(opline->extended_value);
@@ -84084,6 +84253,7 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_CCONV ZEND_ASSIGN_OBJ_SPEC_VA
 
 assign_object:
 	zobj = Z_OBJ_P(object);
+	zobj = zend_value_class_separate(object, zobj);
 	if (IS_CV == IS_CONST) {
 		if (EXPECTED(zobj->ce == CACHED_PTR(opline->extended_value))) {
 			void **cache_slot = CACHE_ADDR(opline->extended_value);
@@ -85744,6 +85914,7 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_CCONV ZEND_ASSIGN_OBJ_OP_SPEC
 assign_op_object:
 		/* here we are sure we are dealing with an object */
 		zobj = Z_OBJ_P(object);
+		zobj = zend_value_class_separate(object, zobj);
 		if (IS_CONST == IS_CONST) {
 			name = Z_STR_P(property);
 		} else {
@@ -85836,6 +86007,7 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_CCONV ZEND_PRE_INC_OBJ_SPEC_U
 pre_incdec_object:
 		/* here we are sure we are dealing with an object */
 		zobj = Z_OBJ_P(object);
+		zobj = zend_value_class_separate(object, zobj);
 		if (IS_CONST == IS_CONST) {
 			name = Z_STR_P(property);
 		} else {
@@ -85903,6 +86075,7 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_CCONV ZEND_POST_INC_OBJ_SPEC_
 post_incdec_object:
 		/* here we are sure we are dealing with an object */
 		zobj = Z_OBJ_P(object);
+		zobj = zend_value_class_separate(object, zobj);
 		if (IS_CONST == IS_CONST) {
 			name = Z_STR_P(property);
 		} else {
@@ -86346,6 +86519,7 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_CCONV ZEND_ASSIGN_OBJ_SPEC_UN
 
 assign_object:
 	zobj = Z_OBJ_P(object);
+	zobj = zend_value_class_separate(object, zobj);
 	if (IS_CONST == IS_CONST) {
 		if (EXPECTED(zobj->ce == CACHED_PTR(opline->extended_value))) {
 			void **cache_slot = CACHE_ADDR(opline->extended_value);
@@ -86504,6 +86678,7 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_CCONV ZEND_ASSIGN_OBJ_SPEC_UN
 
 assign_object:
 	zobj = Z_OBJ_P(object);
+	zobj = zend_value_class_separate(object, zobj);
 	if (IS_CONST == IS_CONST) {
 		if (EXPECTED(zobj->ce == CACHED_PTR(opline->extended_value))) {
 			void **cache_slot = CACHE_ADDR(opline->extended_value);
@@ -86660,6 +86835,7 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_CCONV ZEND_ASSIGN_OBJ_SPEC_UN
 
 assign_object:
 	zobj = Z_OBJ_P(object);
+	zobj = zend_value_class_separate(object, zobj);
 	if (IS_CONST == IS_CONST) {
 		if (EXPECTED(zobj->ce == CACHED_PTR(opline->extended_value))) {
 			void **cache_slot = CACHE_ADDR(opline->extended_value);
@@ -87877,6 +88053,7 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_CCONV ZEND_ASSIGN_OBJ_OP_SPEC
 assign_op_object:
 		/* here we are sure we are dealing with an object */
 		zobj = Z_OBJ_P(object);
+		zobj = zend_value_class_separate(object, zobj);
 		if (IS_TMP_VAR == IS_CONST) {
 			name = Z_STR_P(property);
 		} else {
@@ -87968,6 +88145,7 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_CCONV ZEND_PRE_INC_OBJ_SPEC_U
 pre_incdec_object:
 		/* here we are sure we are dealing with an object */
 		zobj = Z_OBJ_P(object);
+		zobj = zend_value_class_separate(object, zobj);
 		if (IS_TMP_VAR == IS_CONST) {
 			name = Z_STR_P(property);
 		} else {
@@ -88035,6 +88213,7 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_CCONV ZEND_POST_INC_OBJ_SPEC_
 post_incdec_object:
 		/* here we are sure we are dealing with an object */
 		zobj = Z_OBJ_P(object);
+		zobj = zend_value_class_separate(object, zobj);
 		if (IS_TMP_VAR == IS_CONST) {
 			name = Z_STR_P(property);
 		} else {
@@ -88468,6 +88647,7 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_CCONV ZEND_ASSIGN_OBJ_SPEC_UN
 
 assign_object:
 	zobj = Z_OBJ_P(object);
+	zobj = zend_value_class_separate(object, zobj);
 	if (IS_TMP_VAR == IS_CONST) {
 		if (EXPECTED(zobj->ce == CACHED_PTR(opline->extended_value))) {
 			void **cache_slot = CACHE_ADDR(opline->extended_value);
@@ -88625,6 +88805,7 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_CCONV ZEND_ASSIGN_OBJ_SPEC_UN
 
 assign_object:
 	zobj = Z_OBJ_P(object);
+	zobj = zend_value_class_separate(object, zobj);
 	if (IS_TMP_VAR == IS_CONST) {
 		if (EXPECTED(zobj->ce == CACHED_PTR(opline->extended_value))) {
 			void **cache_slot = CACHE_ADDR(opline->extended_value);
@@ -88780,6 +88961,7 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_CCONV ZEND_ASSIGN_OBJ_SPEC_UN
 
 assign_object:
 	zobj = Z_OBJ_P(object);
+	zobj = zend_value_class_separate(object, zobj);
 	if (IS_TMP_VAR == IS_CONST) {
 		if (EXPECTED(zobj->ce == CACHED_PTR(opline->extended_value))) {
 			void **cache_slot = CACHE_ADDR(opline->extended_value);
@@ -90014,12 +90196,26 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_CCONV ZEND_NEW_SPEC_UNUSED_UN
 			init_func_run_time_cache(&constructor->op_array);
 		}
 		/* We are not handling overloaded classes right now */
-		call = zend_vm_stack_push_call_frame(
-			ZEND_CALL_FUNCTION | ZEND_CALL_RELEASE_THIS | ZEND_CALL_HAS_THIS,
-			constructor,
-			opline->extended_value,
-			Z_OBJ_P(result));
-		Z_ADDREF_P(result);
+		if (UNEXPECTED(ce->ce_flags2 & ZEND_ACC2_VALUE_CLASS)) {
+			/* Value classes bind $this borrowed and exclusive: the constructor
+			 * shares the result slot's single reference (no addref, no
+			 * RELEASE_THIS), so promoted and body writes through $this land in
+			 * place instead of separating. The result slot owns the instance
+			 * across the call; the escape check verifies nothing else grabbed a
+			 * reference by the time the constructor returns. */
+			call = zend_vm_stack_push_call_frame(
+				ZEND_CALL_FUNCTION | ZEND_CALL_HAS_THIS,
+				constructor,
+				opline->extended_value,
+				Z_OBJ_P(result));
+		} else {
+			call = zend_vm_stack_push_call_frame(
+				ZEND_CALL_FUNCTION | ZEND_CALL_RELEASE_THIS | ZEND_CALL_HAS_THIS,
+				constructor,
+				opline->extended_value,
+				Z_OBJ_P(result));
+			Z_ADDREF_P(result);
+		}
 	}
 
 	call->prev_execute_data = EX(call);
@@ -90469,6 +90665,7 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_CCONV ZEND_ASSIGN_OBJ_OP_SPEC
 assign_op_object:
 		/* here we are sure we are dealing with an object */
 		zobj = Z_OBJ_P(object);
+		zobj = zend_value_class_separate(object, zobj);
 		if (IS_CV == IS_CONST) {
 			name = Z_STR_P(property);
 		} else {
@@ -90561,6 +90758,7 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_CCONV ZEND_PRE_INC_OBJ_SPEC_U
 pre_incdec_object:
 		/* here we are sure we are dealing with an object */
 		zobj = Z_OBJ_P(object);
+		zobj = zend_value_class_separate(object, zobj);
 		if (IS_CV == IS_CONST) {
 			name = Z_STR_P(property);
 		} else {
@@ -90628,6 +90826,7 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_CCONV ZEND_POST_INC_OBJ_SPEC_
 post_incdec_object:
 		/* here we are sure we are dealing with an object */
 		zobj = Z_OBJ_P(object);
+		zobj = zend_value_class_separate(object, zobj);
 		if (IS_CV == IS_CONST) {
 			name = Z_STR_P(property);
 		} else {
@@ -91066,6 +91265,7 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_CCONV ZEND_ASSIGN_OBJ_SPEC_UN
 
 assign_object:
 	zobj = Z_OBJ_P(object);
+	zobj = zend_value_class_separate(object, zobj);
 	if (IS_CV == IS_CONST) {
 		if (EXPECTED(zobj->ce == CACHED_PTR(opline->extended_value))) {
 			void **cache_slot = CACHE_ADDR(opline->extended_value);
@@ -91224,6 +91424,7 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_CCONV ZEND_ASSIGN_OBJ_SPEC_UN
 
 assign_object:
 	zobj = Z_OBJ_P(object);
+	zobj = zend_value_class_separate(object, zobj);
 	if (IS_CV == IS_CONST) {
 		if (EXPECTED(zobj->ce == CACHED_PTR(opline->extended_value))) {
 			void **cache_slot = CACHE_ADDR(opline->extended_value);
@@ -91380,6 +91581,7 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_CCONV ZEND_ASSIGN_OBJ_SPEC_UN
 
 assign_object:
 	zobj = Z_OBJ_P(object);
+	zobj = zend_value_class_separate(object, zobj);
 	if (IS_CV == IS_CONST) {
 		if (EXPECTED(zobj->ce == CACHED_PTR(opline->extended_value))) {
 			void **cache_slot = CACHE_ADDR(opline->extended_value);
@@ -94572,6 +94774,7 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_CCONV ZEND_ASSIGN_OBJ_OP_SPEC
 assign_op_object:
 		/* here we are sure we are dealing with an object */
 		zobj = Z_OBJ_P(object);
+		zobj = zend_value_class_separate(object, zobj);
 		if (IS_CONST == IS_CONST) {
 			name = Z_STR_P(property);
 		} else {
@@ -94798,6 +95001,7 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_CCONV ZEND_PRE_INC_OBJ_SPEC_C
 pre_incdec_object:
 		/* here we are sure we are dealing with an object */
 		zobj = Z_OBJ_P(object);
+		zobj = zend_value_class_separate(object, zobj);
 		if (IS_CONST == IS_CONST) {
 			name = Z_STR_P(property);
 		} else {
@@ -94865,6 +95069,7 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_CCONV ZEND_POST_INC_OBJ_SPEC_
 post_incdec_object:
 		/* here we are sure we are dealing with an object */
 		zobj = Z_OBJ_P(object);
+		zobj = zend_value_class_separate(object, zobj);
 		if (IS_CONST == IS_CONST) {
 			name = Z_STR_P(property);
 		} else {
@@ -95439,6 +95644,7 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_CCONV ZEND_ASSIGN_OBJ_SPEC_CV
 
 assign_object:
 	zobj = Z_OBJ_P(object);
+	zobj = zend_value_class_separate(object, zobj);
 	if (IS_CONST == IS_CONST) {
 		if (EXPECTED(zobj->ce == CACHED_PTR(opline->extended_value))) {
 			void **cache_slot = CACHE_ADDR(opline->extended_value);
@@ -95597,6 +95803,7 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_CCONV ZEND_ASSIGN_OBJ_SPEC_CV
 
 assign_object:
 	zobj = Z_OBJ_P(object);
+	zobj = zend_value_class_separate(object, zobj);
 	if (IS_CONST == IS_CONST) {
 		if (EXPECTED(zobj->ce == CACHED_PTR(opline->extended_value))) {
 			void **cache_slot = CACHE_ADDR(opline->extended_value);
@@ -95753,6 +95960,7 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_CCONV ZEND_ASSIGN_OBJ_SPEC_CV
 
 assign_object:
 	zobj = Z_OBJ_P(object);
+	zobj = zend_value_class_separate(object, zobj);
 	if (IS_CONST == IS_CONST) {
 		if (EXPECTED(zobj->ce == CACHED_PTR(opline->extended_value))) {
 			void **cache_slot = CACHE_ADDR(opline->extended_value);
@@ -98411,6 +98619,7 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_CCONV ZEND_ASSIGN_OBJ_OP_SPEC
 assign_op_object:
 		/* here we are sure we are dealing with an object */
 		zobj = Z_OBJ_P(object);
+		zobj = zend_value_class_separate(object, zobj);
 		if (IS_TMP_VAR == IS_CONST) {
 			name = Z_STR_P(property);
 		} else {
@@ -98636,6 +98845,7 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_CCONV ZEND_PRE_INC_OBJ_SPEC_C
 pre_incdec_object:
 		/* here we are sure we are dealing with an object */
 		zobj = Z_OBJ_P(object);
+		zobj = zend_value_class_separate(object, zobj);
 		if (IS_TMP_VAR == IS_CONST) {
 			name = Z_STR_P(property);
 		} else {
@@ -98703,6 +98913,7 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_CCONV ZEND_POST_INC_OBJ_SPEC_
 post_incdec_object:
 		/* here we are sure we are dealing with an object */
 		zobj = Z_OBJ_P(object);
+		zobj = zend_value_class_separate(object, zobj);
 		if (IS_TMP_VAR == IS_CONST) {
 			name = Z_STR_P(property);
 		} else {
@@ -99262,6 +99473,7 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_CCONV ZEND_ASSIGN_OBJ_SPEC_CV
 
 assign_object:
 	zobj = Z_OBJ_P(object);
+	zobj = zend_value_class_separate(object, zobj);
 	if (IS_TMP_VAR == IS_CONST) {
 		if (EXPECTED(zobj->ce == CACHED_PTR(opline->extended_value))) {
 			void **cache_slot = CACHE_ADDR(opline->extended_value);
@@ -99419,6 +99631,7 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_CCONV ZEND_ASSIGN_OBJ_SPEC_CV
 
 assign_object:
 	zobj = Z_OBJ_P(object);
+	zobj = zend_value_class_separate(object, zobj);
 	if (IS_TMP_VAR == IS_CONST) {
 		if (EXPECTED(zobj->ce == CACHED_PTR(opline->extended_value))) {
 			void **cache_slot = CACHE_ADDR(opline->extended_value);
@@ -99574,6 +99787,7 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_CCONV ZEND_ASSIGN_OBJ_SPEC_CV
 
 assign_object:
 	zobj = Z_OBJ_P(object);
+	zobj = zend_value_class_separate(object, zobj);
 	if (IS_TMP_VAR == IS_CONST) {
 		if (EXPECTED(zobj->ce == CACHED_PTR(opline->extended_value))) {
 			void **cache_slot = CACHE_ADDR(opline->extended_value);
@@ -103417,6 +103631,7 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_CCONV ZEND_ASSIGN_OBJ_OP_SPEC
 assign_op_object:
 		/* here we are sure we are dealing with an object */
 		zobj = Z_OBJ_P(object);
+		zobj = zend_value_class_separate(object, zobj);
 		if (IS_CV == IS_CONST) {
 			name = Z_STR_P(property);
 		} else {
@@ -103643,6 +103858,7 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_CCONV ZEND_PRE_INC_OBJ_SPEC_C
 pre_incdec_object:
 		/* here we are sure we are dealing with an object */
 		zobj = Z_OBJ_P(object);
+		zobj = zend_value_class_separate(object, zobj);
 		if (IS_CV == IS_CONST) {
 			name = Z_STR_P(property);
 		} else {
@@ -103710,6 +103926,7 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_CCONV ZEND_POST_INC_OBJ_SPEC_
 post_incdec_object:
 		/* here we are sure we are dealing with an object */
 		zobj = Z_OBJ_P(object);
+		zobj = zend_value_class_separate(object, zobj);
 		if (IS_CV == IS_CONST) {
 			name = Z_STR_P(property);
 		} else {
@@ -104279,6 +104496,7 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_CCONV ZEND_ASSIGN_OBJ_SPEC_CV
 
 assign_object:
 	zobj = Z_OBJ_P(object);
+	zobj = zend_value_class_separate(object, zobj);
 	if (IS_CV == IS_CONST) {
 		if (EXPECTED(zobj->ce == CACHED_PTR(opline->extended_value))) {
 			void **cache_slot = CACHE_ADDR(opline->extended_value);
@@ -104437,6 +104655,7 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_CCONV ZEND_ASSIGN_OBJ_SPEC_CV
 
 assign_object:
 	zobj = Z_OBJ_P(object);
+	zobj = zend_value_class_separate(object, zobj);
 	if (IS_CV == IS_CONST) {
 		if (EXPECTED(zobj->ce == CACHED_PTR(opline->extended_value))) {
 			void **cache_slot = CACHE_ADDR(opline->extended_value);
@@ -104593,6 +104812,7 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_CCONV ZEND_ASSIGN_OBJ_SPEC_CV
 
 assign_object:
 	zobj = Z_OBJ_P(object);
+	zobj = zend_value_class_separate(object, zobj);
 	if (IS_CV == IS_CONST) {
 		if (EXPECTED(zobj->ce == CACHED_PTR(opline->extended_value))) {
 			void **cache_slot = CACHE_ADDR(opline->extended_value);
@@ -110702,7 +110922,14 @@ zend_leave_helper_SPEC_LABEL:
 #endif
 		if (UNEXPECTED(call_info & ZEND_CALL_RELEASE_THIS)) {
 			OBJ_RELEASE(Z_OBJ(execute_data->This));
-		} else if (UNEXPECTED(call_info & ZEND_CALL_CLOSURE)) {
+		} else if (UNEXPECTED(call_info & ZEND_CALL_HAS_THIS)) {
+			zend_check_value_class_ctor_escape(execute_data);
+		}
+		/* Independent of RELEASE_THIS: a value-class receiver reached through a
+		 * closure owns its (possibly separated) $this via RELEASE_THIS while the
+		 * closure object is still released here. For every pre-existing frame the
+		 * two flags remain mutually exclusive, so behaviour is unchanged. */
+		if (UNEXPECTED(call_info & ZEND_CALL_CLOSURE)) {
 			OBJ_RELEASE(ZEND_CLOSURE_OBJECT(EX(func)));
 		}
 		EG(vm_stack_top) = (zval*)execute_data;
@@ -110736,7 +110963,14 @@ zend_leave_helper_SPEC_LABEL:
 
 		if (UNEXPECTED(call_info & ZEND_CALL_RELEASE_THIS)) {
 			OBJ_RELEASE(Z_OBJ(execute_data->This));
-		} else if (UNEXPECTED(call_info & ZEND_CALL_CLOSURE)) {
+		} else if (UNEXPECTED(call_info & ZEND_CALL_HAS_THIS)) {
+			zend_check_value_class_ctor_escape(execute_data);
+		}
+		/* Independent of RELEASE_THIS: a value-class receiver reached through a
+		 * closure owns its (possibly separated) $this via RELEASE_THIS while the
+		 * closure object is still released here. For every pre-existing frame the
+		 * two flags remain mutually exclusive, so behaviour is unchanged. */
+		if (UNEXPECTED(call_info & ZEND_CALL_CLOSURE)) {
 			OBJ_RELEASE(ZEND_CLOSURE_OBJECT(EX(func)));
 		}
 
