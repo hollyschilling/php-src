@@ -6269,6 +6269,13 @@ static zend_vm_opcode_handler_t zend_jit_trace(zend_jit_trace_rec *trace_buffer,
 						}
 						goto done;
 					case ZEND_FETCH_THIS:
+						if (opline->result_type == IS_VAR) {
+							/* Write-context $this: for a value-class receiver
+							 * the VM handler produces an INDIRECT into the
+							 * frame's This slot; the specialized copy+addref
+							 * load would break that. Use the VM handler. */
+							break;
+						}
 						delayed_fetch_this = 0;
 						if (ssa_op->result_def >= 0 && opline->result_type != IS_CV) {
 							if (zend_jit_may_delay_fetch_this(op_array, ssa, ssa_opcodes, ssa_op)) {
@@ -7042,7 +7049,17 @@ done:
 				}
 			}
 			if (init_opline) {
-				if (init_opline->opcode != ZEND_NEW
+				/* A frame whose receiver may be a value class can gain or lack
+				 * RELEASE_THIS in ways these static hints cannot capture:
+				 * separation takes ownership of $this mid-call, and a value
+				 * class constructor binds $this borrowed (NEW skips the
+				 * addref). Leave such frames on the generic flag-tested path. */
+				bool may_be_value_class = p->func && p->func->common.scope
+					&& (p->func->common.scope->ce_flags2 & ZEND_ACC2_VALUE_CLASS);
+
+				if (may_be_value_class) {
+					/* neither NO_NEED_RELEASE_THIS nor ALWAYS_RELEASE_THIS */
+				} else if (init_opline->opcode != ZEND_NEW
 				 && (init_opline->opcode != ZEND_INIT_METHOD_CALL
 				  || init_opline->op1_type == IS_UNDEF
 				  || (!(p->info & ZEND_JIT_TRACE_FAKE_INIT_CALL)

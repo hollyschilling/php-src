@@ -1,12 +1,9 @@
 --TEST--
 Structs: value semantics hold in a hot loop (JIT-sensitive)
 --DESCRIPTION--
-Exercises copy-on-write separation on the ASSIGN_OBJ write path in a tight loop.
-Pinned to the interpreter: the JIT currently inlines the object-property store
-without separating a shared value-class instance, so a JIT-forcing variant is
-deferred until the JIT value-class guard lands.
---INI--
-opcache.jit=disable
+Exercises copy-on-write separation on the ASSIGN_OBJ write path in a tight
+loop, under whatever engine the test run selects (interpreter or JIT). The
+JIT-forcing variants live in value_jit_tracing.phpt / value_jit_function.phpt.
 --FILE--
 <?php
 

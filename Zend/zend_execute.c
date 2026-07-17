@@ -1120,23 +1120,21 @@ static zend_never_inline zval* zend_assign_to_typed_prop_granted(const zend_prop
 	return zend_assign_to_typed_prop_ex(info, property_val, value, garbage_ptr, false EXECUTE_DATA_CC);
 }
 
-/* Value-class (struct) copy-on-write. A write through the object in *container
- * must not be visible to other holders, so if the instance is shared it is
- * cloned first and the fresh copy stored back into the writable slot -- exactly
- * as arrays separate before an element write. The clone is the default handler's
- * raw property copy (struct __clone is banned), so no user code runs.
- *
- * The constructor and set hooks bind $this borrowed and exclusive (refcount 1),
- * so they never separate and their writes land in place; every other context --
- * methods, get hooks, and writes through a plain variable -- holds a shared
- * reference and separates on first write. That single refcount test is the whole
- * value/reference distinction. Returns the object to operate on. */
-static zend_always_inline zend_object *zend_value_class_separate(zval *container, zend_object *zobj)
+/* Value-class (struct) copy-on-write, shared by the VM write paths and the
+ * JIT (generated code and its helpers call it through this export). The caller
+ * has established that *container holds a value-class instance; if it is
+ * shared, clone it and store the fresh copy back into the writable slot --
+ * exactly as arrays separate before an element write. The clone is the default
+ * handler's raw property copy (struct __clone is banned), so no user code runs
+ * and this function cannot throw. Returns the object to operate on. */
+ZEND_API zend_object* ZEND_FASTCALL zend_value_class_separate_container(zval *container)
 {
-	if (UNEXPECTED(zobj->ce->ce_flags2 & ZEND_ACC2_VALUE_CLASS)
-	 && GC_REFCOUNT(zobj) > 1) {
+	zend_object *zobj = Z_OBJ_P(container);
+
+	ZEND_ASSERT(zobj->ce->ce_flags2 & ZEND_ACC2_VALUE_CLASS);
+	if (GC_REFCOUNT(zobj) > 1) {
 		zend_execute_data *ex = EG(current_execute_data);
-		zend_object *separated = zobj->handlers->clone_obj(zobj);
+		zend_object *separated;
 
 		if (UNEXPECTED(container == &ex->This)
 		 && !(ZEND_CALL_INFO(ex) & ZEND_CALL_RELEASE_THIS)) {
@@ -1146,13 +1144,27 @@ static zend_always_inline zend_object *zend_value_class_separate(zval *container
 			 * refcount we do not own, so instead of releasing the original we
 			 * take ownership of the fresh copy: flag the frame RELEASE_THIS so
 			 * teardown frees it. The original's other holders are untouched.
-			 * (The constructor and set hooks also borrow $this, but hold it
-			 * exclusively, so refcount 1 keeps them off this path entirely.) */
+			 * (The constructor and set hooks also borrow $this, but hold them
+			 * exclusively, so refcount 1 keeps them off this path -- unless
+			 * $this has already escaped.) */
+			if (UNEXPECTED(ex->func->common.fn_flags & ZEND_ACC_CTOR)) {
+				/* A shared $this in a constructor frame means $this already
+				 * escaped. Separating would send the remaining initialization
+				 * into a discarded copy and mask the escape from the
+				 * return-time check (taking ownership sets RELEASE_THIS, which
+				 * that check reads as a frame that owns its receiver).
+				 * Constructor writes land in place by definition; keep doing
+				 * that -- the refcount stays elevated and the escape check
+				 * throws at return. */
+				return zobj;
+			}
+			separated = zobj->handlers->clone_obj(zobj);
 			ZEND_ADD_CALL_FLAG(ex, ZEND_CALL_RELEASE_THIS);
 		} else {
 			/* The container owns a counted reference to the shared instance
 			 * (a variable, a property slot, or a $this the frame owns): move
 			 * that reference from the original to the copy. */
+			separated = zobj->handlers->clone_obj(zobj);
 			GC_DELREF(zobj);
 		}
 		/* Swap only the object pointer, preserving the slot's type_info: for a
@@ -1166,6 +1178,18 @@ static zend_always_inline zend_object *zend_value_class_separate(zval *container
 	return zobj;
 }
 
+/* The one refcount-driven rule: writes to a shared value-class instance
+ * separate it into the writable slot first; writes to an exclusive one land in
+ * place. See zend_value_class_separate_container() for the mechanics. */
+static zend_always_inline zend_object *zend_value_class_separate(zval *container, zend_object *zobj)
+{
+	if (UNEXPECTED(zobj->ce->ce_flags2 & ZEND_ACC2_VALUE_CLASS)
+	 && GC_REFCOUNT(zobj) > 1) {
+		return zend_value_class_separate_container(container);
+	}
+	return zobj;
+}
+
 /* Constructor escape check. A value-class constructor binds $this borrowed and
  * exclusive, so its promoted and body writes land in place. That is only sound
  * while $this stays unshared: if the constructor stored it somewhere that
@@ -1174,8 +1198,9 @@ static zend_always_inline zend_object *zend_value_class_separate(zval *container
  * at constructor return, after the frame's compiled variables are freed (so a
  * plain local $x = $this, which dies with the frame, is correctly not an
  * escape); a refcount above the single reference the result slot holds is
- * exactly a surviving alias. Callers gate on ZEND_CALL_HAS_THIS. */
-static zend_never_inline void zend_check_value_class_ctor_escape(zend_execute_data *execute_data)
+ * exactly a surviving alias. Callers gate on ZEND_CALL_HAS_THIS. Exported for
+ * the JIT, whose compiled leave paths run the same check. */
+ZEND_API void ZEND_FASTCALL zend_check_value_class_ctor_escape(zend_execute_data *execute_data)
 {
 	if ((EX(func)->common.fn_flags & ZEND_ACC_CTOR)
 	 && EX(func)->common.scope

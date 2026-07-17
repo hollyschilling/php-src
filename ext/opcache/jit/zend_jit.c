@@ -2562,6 +2562,13 @@ static int zend_jit(const zend_op_array *op_array, zend_ssa *ssa, const zend_op 
 						}
 						goto done;
 					case ZEND_FETCH_THIS:
+						if (opline->result_type == IS_VAR) {
+							/* Write-context $this: for a value-class receiver
+							 * the VM handler produces an INDIRECT into the
+							 * frame's This slot; the specialized copy+addref
+							 * load would break that. Use the VM handler. */
+							break;
+						}
 						if (!zend_jit_fetch_this(&ctx, opline, op_array, 0)) {
 							goto jit_failure;
 						}

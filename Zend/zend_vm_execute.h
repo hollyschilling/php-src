@@ -1237,6 +1237,12 @@ static zend_never_inline ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_FUNC_CCONV 
 		zend_destroy_static_vars(&EX(func)->op_array);
 		destroy_op_array(&EX(func)->op_array);
 		efree_size(EX(func), sizeof(zend_op_array));
+		/* An eval/include frame binds $this borrowed; value-class separation
+		 * inside it takes ownership of the frame's copy via RELEASE_THIS
+		 * (the write is local to the eval, as to any frame). Release it. */
+		if (UNEXPECTED(call_info & ZEND_CALL_RELEASE_THIS)) {
+			OBJ_RELEASE(Z_OBJ(execute_data->This));
+		}
 		old_execute_data = execute_data;
 		execute_data = EG(current_execute_data) = EX(prev_execute_data);
 		zend_vm_stack_free_call_frame_ex(call_info, old_execute_data);
@@ -1270,6 +1276,16 @@ static zend_never_inline ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_FUNC_CCONV 
 				if (UNEXPECTED(call_info & ZEND_CALL_HAS_EXTRA_NAMED_PARAMS)) {
 					zend_free_extra_named_params(EX(extra_named_params));
 				}
+			}
+			/* Top frames (zend_call_function) bind $this borrowed and thus
+			 * never carried RELEASE_THIS historically. Value-class separation
+			 * can set it mid-call when a write takes ownership of the copy,
+			 * and a value-class constructor invoked through this route needs
+			 * its escape check, exactly as in the nested leave paths above. */
+			if (UNEXPECTED(call_info & ZEND_CALL_RELEASE_THIS)) {
+				OBJ_RELEASE(Z_OBJ(execute_data->This));
+			} else if (UNEXPECTED(call_info & ZEND_CALL_HAS_THIS)) {
+				zend_check_value_class_ctor_escape(execute_data);
 			}
 			if (UNEXPECTED(call_info & ZEND_CALL_CLOSURE)) {
 				OBJ_RELEASE(ZEND_CLOSURE_OBJECT(EX(func)));
@@ -54253,6 +54269,12 @@ static zend_never_inline ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_CCONV  zend
 		zend_destroy_static_vars(&EX(func)->op_array);
 		destroy_op_array(&EX(func)->op_array);
 		efree_size(EX(func), sizeof(zend_op_array));
+		/* An eval/include frame binds $this borrowed; value-class separation
+		 * inside it takes ownership of the frame's copy via RELEASE_THIS
+		 * (the write is local to the eval, as to any frame). Release it. */
+		if (UNEXPECTED(call_info & ZEND_CALL_RELEASE_THIS)) {
+			OBJ_RELEASE(Z_OBJ(execute_data->This));
+		}
 		old_execute_data = execute_data;
 		execute_data = EG(current_execute_data) = EX(prev_execute_data);
 		zend_vm_stack_free_call_frame_ex(call_info, old_execute_data);
@@ -54286,6 +54308,16 @@ static zend_never_inline ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_CCONV  zend
 				if (UNEXPECTED(call_info & ZEND_CALL_HAS_EXTRA_NAMED_PARAMS)) {
 					zend_free_extra_named_params(EX(extra_named_params));
 				}
+			}
+			/* Top frames (zend_call_function) bind $this borrowed and thus
+			 * never carried RELEASE_THIS historically. Value-class separation
+			 * can set it mid-call when a write takes ownership of the copy,
+			 * and a value-class constructor invoked through this route needs
+			 * its escape check, exactly as in the nested leave paths above. */
+			if (UNEXPECTED(call_info & ZEND_CALL_RELEASE_THIS)) {
+				OBJ_RELEASE(Z_OBJ(execute_data->This));
+			} else if (UNEXPECTED(call_info & ZEND_CALL_HAS_THIS)) {
+				zend_check_value_class_ctor_escape(execute_data);
 			}
 			if (UNEXPECTED(call_info & ZEND_CALL_CLOSURE)) {
 				OBJ_RELEASE(ZEND_CLOSURE_OBJECT(EX(func)));
@@ -110806,6 +110838,12 @@ zend_leave_helper_SPEC_LABEL:
 		zend_destroy_static_vars(&EX(func)->op_array);
 		destroy_op_array(&EX(func)->op_array);
 		efree_size(EX(func), sizeof(zend_op_array));
+		/* An eval/include frame binds $this borrowed; value-class separation
+		 * inside it takes ownership of the frame's copy via RELEASE_THIS
+		 * (the write is local to the eval, as to any frame). Release it. */
+		if (UNEXPECTED(call_info & ZEND_CALL_RELEASE_THIS)) {
+			OBJ_RELEASE(Z_OBJ(execute_data->This));
+		}
 		old_execute_data = execute_data;
 		execute_data = EG(current_execute_data) = EX(prev_execute_data);
 		zend_vm_stack_free_call_frame_ex(call_info, old_execute_data);
@@ -110839,6 +110877,16 @@ zend_leave_helper_SPEC_LABEL:
 				if (UNEXPECTED(call_info & ZEND_CALL_HAS_EXTRA_NAMED_PARAMS)) {
 					zend_free_extra_named_params(EX(extra_named_params));
 				}
+			}
+			/* Top frames (zend_call_function) bind $this borrowed and thus
+			 * never carried RELEASE_THIS historically. Value-class separation
+			 * can set it mid-call when a write takes ownership of the copy,
+			 * and a value-class constructor invoked through this route needs
+			 * its escape check, exactly as in the nested leave paths above. */
+			if (UNEXPECTED(call_info & ZEND_CALL_RELEASE_THIS)) {
+				OBJ_RELEASE(Z_OBJ(execute_data->This));
+			} else if (UNEXPECTED(call_info & ZEND_CALL_HAS_THIS)) {
+				zend_check_value_class_ctor_escape(execute_data);
 			}
 			if (UNEXPECTED(call_info & ZEND_CALL_CLOSURE)) {
 				OBJ_RELEASE(ZEND_CLOSURE_OBJECT(EX(func)));
