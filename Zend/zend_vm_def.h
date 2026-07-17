@@ -4029,6 +4029,17 @@ ZEND_VM_HANDLER(118, ZEND_INIT_USER_CALL, CONST, CONST|TMP|CV, NUM)
 			if (fcc.object) {
 				object_or_called_scope = fcc.object;
 				call_info |= ZEND_CALL_HAS_THIS;
+				if (UNEXPECTED(fcc.object->ce->ce_flags2 & ZEND_ACC2_VALUE_CLASS)) {
+					/* Each invocation of a closure bound to a value class must
+					 * act on a fresh copy of the captured receiver, so own $this
+					 * (addref + RELEASE_THIS): the first write then separates it
+					 * and the captured value is never mutated. Without this a
+					 * closure that exclusively holds its receiver (refcount 1)
+					 * would write in place and leak state across calls. The
+					 * closure object is still released independently on return. */
+					GC_ADDREF(fcc.object);
+					call_info |= ZEND_CALL_RELEASE_THIS;
+				}
 			}
 		} else if (fcc.object) {
 			GC_ADDREF(fcc.object); /* For $this pointer */
@@ -9332,6 +9343,20 @@ ZEND_VM_HOT_HANDLER(184, ZEND_FETCH_THIS, UNUSED, UNUSED)
 
 	if (EXPECTED(Z_TYPE(EX(This)) == IS_OBJECT)) {
 		zval *result = EX_VAR(opline->result.var);
+
+		if (UNEXPECTED(opline->result_type == IS_VAR)
+		 && (Z_OBJCE(EX(This))->ce_flags2 & ZEND_ACC2_VALUE_CLASS)) {
+			/* Write-context $this on a value class (this_guaranteed_exists() is
+			 * false, e.g. a scopeless closure later bound to a struct): hand
+			 * back a writable indirect to the frame's This slot rather than an
+			 * addref'd handle copy. A property write then separates EX(This)
+			 * itself -- so a later read of $this sees the copy -- instead of
+			 * mutating a throwaway that is discarded after the write. For
+			 * reference receivers the handle copy is already coherent, so this
+			 * only changes value classes. */
+			ZVAL_INDIRECT(result, &EX(This));
+			ZEND_VM_NEXT_OPCODE();
+		}
 
 		ZVAL_OBJ(result, Z_OBJ(EX(This)));
 		Z_ADDREF_P(result);

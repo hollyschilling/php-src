@@ -5288,6 +5288,15 @@ static zend_never_inline zend_execute_data *zend_init_dynamic_call_object(zend_o
 			if (object) {
 				call_info |= ZEND_CALL_HAS_THIS;
 				object_or_called_scope = object;
+				if (UNEXPECTED(object->ce->ce_flags2 & ZEND_ACC2_VALUE_CLASS)) {
+					/* Each invocation of a closure bound to a value class acts
+					 * on a fresh copy of the captured receiver: own $this so the
+					 * first write separates it and the captured value is never
+					 * mutated across calls. The closure object is released
+					 * independently on return (see zend_leave_helper). */
+					GC_ADDREF(object);
+					call_info |= ZEND_CALL_RELEASE_THIS;
+				}
 			}
 		} else {
 			call_info = ZEND_CALL_NESTED_FUNCTION | ZEND_CALL_DYNAMIC;
