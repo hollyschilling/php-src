@@ -1120,6 +1120,72 @@ static zend_never_inline zval* zend_assign_to_typed_prop_granted(const zend_prop
 	return zend_assign_to_typed_prop_ex(info, property_val, value, garbage_ptr, false EXECUTE_DATA_CC);
 }
 
+/* Value-class (struct) copy-on-write. A write through the object in *container
+ * must not be visible to other holders, so if the instance is shared it is
+ * cloned first and the fresh copy stored back into the writable slot -- exactly
+ * as arrays separate before an element write. The clone is the default handler's
+ * raw property copy (struct __clone is banned), so no user code runs.
+ *
+ * The constructor and set hooks bind $this borrowed and exclusive (refcount 1),
+ * so they never separate and their writes land in place; every other context --
+ * methods, get hooks, and writes through a plain variable -- holds a shared
+ * reference and separates on first write. That single refcount test is the whole
+ * value/reference distinction. Returns the object to operate on. */
+static zend_always_inline zend_object *zend_value_class_separate(zval *container, zend_object *zobj)
+{
+	if (UNEXPECTED(zobj->ce->ce_flags2 & ZEND_ACC2_VALUE_CLASS)
+	 && GC_REFCOUNT(zobj) > 1) {
+		zend_execute_data *ex = EG(current_execute_data);
+		zend_object *separated = zobj->handlers->clone_obj(zobj);
+
+		if (UNEXPECTED(container == &ex->This)
+		 && !(ZEND_CALL_INFO(ex) & ZEND_CALL_RELEASE_THIS)) {
+			/* The write target is a $this that the frame holds *borrowed* -- a
+			 * by-value receiver whose reference is owned elsewhere (a closure's
+			 * captured $this, a first-class callable). We must not drop a
+			 * refcount we do not own, so instead of releasing the original we
+			 * take ownership of the fresh copy: flag the frame RELEASE_THIS so
+			 * teardown frees it. The original's other holders are untouched.
+			 * (The constructor and set hooks also borrow $this, but hold it
+			 * exclusively, so refcount 1 keeps them off this path entirely.) */
+			ZEND_ADD_CALL_FLAG(ex, ZEND_CALL_RELEASE_THIS);
+		} else {
+			/* The container owns a counted reference to the shared instance
+			 * (a variable, a property slot, or a $this the frame owns): move
+			 * that reference from the original to the copy. */
+			GC_DELREF(zobj);
+		}
+		/* Swap only the object pointer, preserving the slot's type_info: for a
+		 * $this slot that field doubles as the frame's call_info (the call flags
+		 * live in its upper bits, with ZEND_CALL_HAS_THIS aliasing IS_OBJECT_EX),
+		 * so a plain ZVAL_OBJ would clobber it. A normal object slot already
+		 * carries object type_info and the clone is the same type. */
+		Z_OBJ_P(container) = separated;
+		return separated;
+	}
+	return zobj;
+}
+
+/* Constructor escape check. A value-class constructor binds $this borrowed and
+ * exclusive, so its promoted and body writes land in place. That is only sound
+ * while $this stays unshared: if the constructor stored it somewhere that
+ * outlives the call -- a registry, a static, another object's property -- that
+ * alias would observe the in-place writes, breaking value semantics. This runs
+ * at constructor return, after the frame's compiled variables are freed (so a
+ * plain local $x = $this, which dies with the frame, is correctly not an
+ * escape); a refcount above the single reference the result slot holds is
+ * exactly a surviving alias. Callers gate on ZEND_CALL_HAS_THIS. */
+static zend_never_inline void zend_check_value_class_ctor_escape(zend_execute_data *execute_data)
+{
+	if ((EX(func)->common.fn_flags & ZEND_ACC_CTOR)
+	 && EX(func)->common.scope
+	 && (EX(func)->common.scope->ce_flags2 & ZEND_ACC2_VALUE_CLASS)
+	 && GC_REFCOUNT(Z_OBJ(EX(This))) > 1) {
+		zend_throw_error(NULL, "Cannot export $this from constructor of value class %s",
+			ZSTR_VAL(EX(func)->common.scope->name));
+	}
+}
+
 static zend_always_inline bool zend_value_instanceof_static(const zval *zv) {
 	if (Z_TYPE_P(zv) != IS_OBJECT) {
 		return 0;
@@ -3531,7 +3597,7 @@ static zend_never_inline bool zend_handle_fetch_obj_flags(
 
 static zend_always_inline void zend_fetch_property_address(
 	zval *result,
-	const zval *container,
+	zval *container,
 	uint32_t container_op_type,
 	const zval *prop_ptr,
 	uint32_t prop_op_type,
@@ -3577,6 +3643,13 @@ static zend_always_inline void zend_fetch_property_address(
 	}
 
 	zobj = Z_OBJ_P(container);
+	/* A W/RW fetch that leads to a nested write must separate a shared
+	 * value-class container first, so the write chain lands in a private copy
+	 * -- exactly as nested array writes separate each level. UNSET is excluded:
+	 * unsetting a struct property is an error, so nothing is written. */
+	if (type == BP_VAR_W || type == BP_VAR_RW) {
+		zobj = zend_value_class_separate(container, zobj);
+	}
 	if (prop_op_type == IS_CONST &&
 	    EXPECTED(zobj->ce == CACHED_PTR_EX(cache_slot))) {
 		uintptr_t prop_offset = (uintptr_t)CACHED_PTR_EX(cache_slot + 1);
@@ -3686,7 +3759,7 @@ end:
 }
 
 static zend_always_inline void zend_assign_to_property_reference(
-	const zval *container,
+	zval *container,
 	uint32_t container_op_type,
 	const zval *prop_ptr,
 	uint32_t prop_op_type,
@@ -3730,25 +3803,25 @@ static zend_always_inline void zend_assign_to_property_reference(
 	}
 }
 
-static zend_never_inline void zend_assign_to_property_reference_this_const(const zval *container, const zval *prop_ptr, zval *value_ptr OPLINE_DC EXECUTE_DATA_DC)
+static zend_never_inline void zend_assign_to_property_reference_this_const(zval *container, const zval *prop_ptr, zval *value_ptr OPLINE_DC EXECUTE_DATA_DC)
 {
 	zend_assign_to_property_reference(container, IS_UNUSED, prop_ptr, IS_CONST, value_ptr
 		OPLINE_CC EXECUTE_DATA_CC);
 }
 
-static zend_never_inline void zend_assign_to_property_reference_var_const(const zval *container, const zval *prop_ptr, zval *value_ptr OPLINE_DC EXECUTE_DATA_DC)
+static zend_never_inline void zend_assign_to_property_reference_var_const(zval *container, const zval *prop_ptr, zval *value_ptr OPLINE_DC EXECUTE_DATA_DC)
 {
 	zend_assign_to_property_reference(container, IS_VAR, prop_ptr, IS_CONST, value_ptr
 		OPLINE_CC EXECUTE_DATA_CC);
 }
 
-static zend_never_inline void zend_assign_to_property_reference_this_var(const zval *container, const zval *prop_ptr, zval *value_ptr OPLINE_DC EXECUTE_DATA_DC)
+static zend_never_inline void zend_assign_to_property_reference_this_var(zval *container, const zval *prop_ptr, zval *value_ptr OPLINE_DC EXECUTE_DATA_DC)
 {
 	zend_assign_to_property_reference(container, IS_UNUSED, prop_ptr, IS_VAR, value_ptr
 		OPLINE_CC EXECUTE_DATA_CC);
 }
 
-static zend_never_inline void zend_assign_to_property_reference_var_var(const zval *container, const zval *prop_ptr, zval *value_ptr OPLINE_DC EXECUTE_DATA_DC)
+static zend_never_inline void zend_assign_to_property_reference_var_var(zval *container, const zval *prop_ptr, zval *value_ptr OPLINE_DC EXECUTE_DATA_DC)
 {
 	zend_assign_to_property_reference(container, IS_VAR, prop_ptr, IS_VAR, value_ptr
 		OPLINE_CC EXECUTE_DATA_CC);

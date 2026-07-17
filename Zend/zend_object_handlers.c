@@ -758,9 +758,25 @@ static bool zend_call_get_hook(
 		return false;
 	}
 
-	GC_ADDREF(zobj);
-	zend_call_known_instance_method_with_0_params(get, zobj, rv);
-	OBJ_RELEASE(zobj);
+	if (UNEXPECTED(zobj->ce->ce_flags2 & ZEND_ACC2_VALUE_CLASS)) {
+		/* Value-class get hook: a read must never mutate the value, so the
+		 * hook runs against a private copy whose writes are discarded when it
+		 * is released. Binding this copy exclusively (refcount 1) means writes
+		 * land in place on the throwaway rather than triggering a further
+		 * separation, and the caller's instance is never touched.
+		 *
+		 * The manual addref/release bracket used for reference classes cannot
+		 * be reused here: a write inside the hook would separate $this into the
+		 * frame, and the bracket's release would then target the stale original
+		 * the caller still holds. */
+		zend_object *copy = zobj->handlers->clone_obj(zobj);
+		zend_call_known_instance_method_with_0_params(get, copy, rv);
+		OBJ_RELEASE(copy);
+	} else {
+		GC_ADDREF(zobj);
+		zend_call_known_instance_method_with_0_params(get, zobj, rv);
+		OBJ_RELEASE(zobj);
+	}
 
 	return true;
 }
@@ -1247,9 +1263,32 @@ found:;
 			goto exit;
 		}
 
-		GC_ADDREF(zobj);
-		zend_call_known_instance_method_with_1_params(set, zobj, NULL, value);
-		OBJ_RELEASE(zobj);
+		if (UNEXPECTED(zobj->ce->ce_flags2 & ZEND_ACC2_VALUE_CLASS)) {
+			/* Value-class set hook: dispatch only ever reaches here after the
+			 * write site's caller-side separation, so the receiver is held
+			 * exclusively. Bind $this borrowed -- no addref -- so writes to the
+			 * backing store and sibling properties land in place and persist,
+			 * exactly as in the constructor. Inflating the refcount would make
+			 * the hook separate and silently discard its writes. The container
+			 * already keeps the instance alive across the call.
+			 *
+			 * As in the constructor, $this must not escape: if the hook stored
+			 * it somewhere, an alias would observe the in-place writes. The
+			 * borrowed binding leaves the refcount untouched, so a growth across
+			 * the call is exactly an escape. */
+			uint32_t refcount_before = GC_REFCOUNT(zobj);
+			zend_call_known_instance_method_with_1_params(set, zobj, NULL, value);
+			if (UNEXPECTED(GC_REFCOUNT(zobj) > refcount_before) && !EG(exception)) {
+				zend_throw_error(NULL, "Cannot export $this from a set hook of value class %s",
+					ZSTR_VAL(zobj->ce->name));
+				variable_ptr = &EG(error_zval);
+				goto exit;
+			}
+		} else {
+			GC_ADDREF(zobj);
+			zend_call_known_instance_method_with_1_params(set, zobj, NULL, value);
+			OBJ_RELEASE(zobj);
+		}
 
 		variable_ptr = value;
 		goto exit;

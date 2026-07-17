@@ -1040,6 +1040,7 @@ ZEND_VM_HANDLER(28, ZEND_ASSIGN_OBJ_OP, VAR|UNUSED|THIS|CV, CONST|TMP|CV, OP)
 ZEND_VM_C_LABEL(assign_op_object):
 		/* here we are sure we are dealing with an object */
 		zobj = Z_OBJ_P(object);
+		zobj = zend_value_class_separate(object, zobj);
 		if (OP2_TYPE == IS_CONST) {
 			name = Z_STR_P(property);
 		} else {
@@ -1317,6 +1318,7 @@ ZEND_VM_HANDLER(132, ZEND_PRE_INC_OBJ, VAR|UNUSED|THIS|CV, CONST|TMP|CV, CACHE_S
 ZEND_VM_C_LABEL(pre_incdec_object):
 		/* here we are sure we are dealing with an object */
 		zobj = Z_OBJ_P(object);
+		zobj = zend_value_class_separate(object, zobj);
 		if (OP2_TYPE == IS_CONST) {
 			name = Z_STR_P(property);
 		} else {
@@ -1388,6 +1390,7 @@ ZEND_VM_HANDLER(134, ZEND_POST_INC_OBJ, VAR|UNUSED|THIS|CV, CONST|TMP|CV, CACHE_
 ZEND_VM_C_LABEL(post_incdec_object):
 		/* here we are sure we are dealing with an object */
 		zobj = Z_OBJ_P(object);
+		zobj = zend_value_class_separate(object, zobj);
 		if (OP2_TYPE == IS_CONST) {
 			name = Z_STR_P(property);
 		} else {
@@ -2510,6 +2513,7 @@ ZEND_VM_HANDLER(24, ZEND_ASSIGN_OBJ, VAR|UNUSED|THIS|CV, CONST|TMP|CV, CACHE_SLO
 
 ZEND_VM_C_LABEL(assign_object):
 	zobj = Z_OBJ_P(object);
+	zobj = zend_value_class_separate(object, zobj);
 	if (OP2_TYPE == IS_CONST) {
 		if (EXPECTED(zobj->ce == CACHED_PTR(opline->extended_value))) {
 			void **cache_slot = CACHE_ADDR(opline->extended_value);
@@ -3003,7 +3007,14 @@ ZEND_VM_HOT_HELPER(zend_leave_helper, ANY, ANY)
 #endif
 		if (UNEXPECTED(call_info & ZEND_CALL_RELEASE_THIS)) {
 			OBJ_RELEASE(Z_OBJ(execute_data->This));
-		} else if (UNEXPECTED(call_info & ZEND_CALL_CLOSURE)) {
+		} else if (UNEXPECTED(call_info & ZEND_CALL_HAS_THIS)) {
+			zend_check_value_class_ctor_escape(execute_data);
+		}
+		/* Independent of RELEASE_THIS: a value-class receiver reached through a
+		 * closure owns its (possibly separated) $this via RELEASE_THIS while the
+		 * closure object is still released here. For every pre-existing frame the
+		 * two flags remain mutually exclusive, so behaviour is unchanged. */
+		if (UNEXPECTED(call_info & ZEND_CALL_CLOSURE)) {
 			OBJ_RELEASE(ZEND_CLOSURE_OBJECT(EX(func)));
 		}
 		EG(vm_stack_top) = (zval*)execute_data;
@@ -3037,7 +3048,14 @@ ZEND_VM_HOT_HELPER(zend_leave_helper, ANY, ANY)
 
 		if (UNEXPECTED(call_info & ZEND_CALL_RELEASE_THIS)) {
 			OBJ_RELEASE(Z_OBJ(execute_data->This));
-		} else if (UNEXPECTED(call_info & ZEND_CALL_CLOSURE)) {
+		} else if (UNEXPECTED(call_info & ZEND_CALL_HAS_THIS)) {
+			zend_check_value_class_ctor_escape(execute_data);
+		}
+		/* Independent of RELEASE_THIS: a value-class receiver reached through a
+		 * closure owns its (possibly separated) $this via RELEASE_THIS while the
+		 * closure object is still released here. For every pre-existing frame the
+		 * two flags remain mutually exclusive, so behaviour is unchanged. */
+		if (UNEXPECTED(call_info & ZEND_CALL_CLOSURE)) {
 			OBJ_RELEASE(ZEND_CLOSURE_OBJECT(EX(func)));
 		}
 
@@ -6033,12 +6051,26 @@ ZEND_VM_HANDLER(68, ZEND_NEW, UNUSED|CLASS_FETCH|CONST|VAR, UNUSED|CACHE_SLOT, N
 			init_func_run_time_cache(&constructor->op_array);
 		}
 		/* We are not handling overloaded classes right now */
-		call = zend_vm_stack_push_call_frame(
-			ZEND_CALL_FUNCTION | ZEND_CALL_RELEASE_THIS | ZEND_CALL_HAS_THIS,
-			constructor,
-			opline->extended_value,
-			Z_OBJ_P(result));
-		Z_ADDREF_P(result);
+		if (UNEXPECTED(ce->ce_flags2 & ZEND_ACC2_VALUE_CLASS)) {
+			/* Value classes bind $this borrowed and exclusive: the constructor
+			 * shares the result slot's single reference (no addref, no
+			 * RELEASE_THIS), so promoted and body writes through $this land in
+			 * place instead of separating. The result slot owns the instance
+			 * across the call; the escape check verifies nothing else grabbed a
+			 * reference by the time the constructor returns. */
+			call = zend_vm_stack_push_call_frame(
+				ZEND_CALL_FUNCTION | ZEND_CALL_HAS_THIS,
+				constructor,
+				opline->extended_value,
+				Z_OBJ_P(result));
+		} else {
+			call = zend_vm_stack_push_call_frame(
+				ZEND_CALL_FUNCTION | ZEND_CALL_RELEASE_THIS | ZEND_CALL_HAS_THIS,
+				constructor,
+				opline->extended_value,
+				Z_OBJ_P(result));
+			Z_ADDREF_P(result);
+		}
 	}
 
 	call->prev_execute_data = EX(call);
