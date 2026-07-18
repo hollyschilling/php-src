@@ -1634,6 +1634,14 @@ ZEND_API void zend_std_unset_property(zend_object *zobj, zend_string *name, void
 	const zend_property_info *prop_info = NULL;
 	uint32_t *guard = NULL;
 
+	if (UNEXPECTED(zobj->ce->ce_flags2 & ZEND_ACC2_VALUE_CLASS)) {
+		/* A struct is a fixed, total shape; there is no absent state for a
+		 * slot to take (and no __unset to simulate one). */
+		zend_throw_error(NULL, "Cannot unset struct property %s::$%s",
+			ZSTR_VAL(zobj->ce->name), ZSTR_VAL(name));
+		return;
+	}
+
 	property_offset = zend_get_property_offset(zobj->ce, name, (zobj->ce->__unset != NULL), cache_slot, &prop_info, true);
 
 	if (EXPECTED(IS_VALID_PROPERTY_OFFSET(property_offset))) {

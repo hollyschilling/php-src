@@ -3075,15 +3075,18 @@ ZEND_VM_HOT_HELPER(zend_leave_helper, ANY, ANY)
 			zend_detach_symbol_table(execute_data);
 			call_info |= ZEND_CALL_NEEDS_REATTACH;
 		}
-		zend_destroy_static_vars(&EX(func)->op_array);
-		destroy_op_array(&EX(func)->op_array);
-		efree_size(EX(func), sizeof(zend_op_array));
 		/* An eval/include frame binds $this borrowed; value-class separation
 		 * inside it takes ownership of the frame's copy via RELEASE_THIS
-		 * (the write is local to the eval, as to any frame). Release it. */
+		 * (the write is local to the eval, as to any frame). Release it
+		 * before the op_array is destroyed: dropping the copy can run
+		 * destructors of its property objects, which must not observe a
+		 * frame whose func has already been freed. */
 		if (UNEXPECTED(call_info & ZEND_CALL_RELEASE_THIS)) {
 			OBJ_RELEASE(Z_OBJ(execute_data->This));
 		}
+		zend_destroy_static_vars(&EX(func)->op_array);
+		destroy_op_array(&EX(func)->op_array);
+		efree_size(EX(func), sizeof(zend_op_array));
 		old_execute_data = execute_data;
 		execute_data = EG(current_execute_data) = EX(prev_execute_data);
 		zend_vm_stack_free_call_frame_ex(call_info, old_execute_data);
@@ -7093,6 +7096,16 @@ ZEND_VM_COLD_CONST_HANDLER(125, ZEND_FE_RESET_RW, CONST|TMP|VAR|CV, JMP_ADDR)
 		FREE_OP1_IF_VAR();
 		ZEND_VM_NEXT_OPCODE();
 	} else if (OP1_TYPE != IS_CONST && EXPECTED(Z_TYPE_P(array_ptr) == IS_OBJECT)) {
+		if (UNEXPECTED(Z_OBJCE_P(array_ptr)->ce_flags2 & ZEND_ACC2_VALUE_CLASS)) {
+			/* By-reference iteration takes references into the value's
+			 * property slots; a slot inside a value has no stable identity
+			 * to name. By-value foreach works as for any object. */
+			zend_throw_error(NULL, "Cannot iterate struct %s by reference",
+				ZSTR_VAL(Z_OBJCE_P(array_ptr)->name));
+			UNDEF_RESULT();
+			FREE_OP1_IF_VAR();
+			HANDLE_EXCEPTION();
+		}
 		if (!Z_OBJCE_P(array_ptr)->get_iterator) {
 			zend_object *zobj = Z_OBJ_P(array_ptr);
 			HashTable *properties;

@@ -3601,6 +3601,17 @@ static zend_never_inline bool zend_handle_fetch_obj_flags(
 			}
 			break;
 		case ZEND_FETCH_REF:
+			if (prop_info
+			 && UNEXPECTED(prop_info->ce->ce_flags2 & ZEND_ACC2_VALUE_CLASS)) {
+				/* A slot inside a value has no stable identity to name: any
+				 * assignment may separate the enclosing struct, stranding the
+				 * reference on an abandoned copy (hooked properties set the
+				 * same ban's precedent). */
+				zend_throw_error(NULL, "Cannot take reference to struct property %s::$%s",
+					ZSTR_VAL(prop_info->ce->name), ZSTR_VAL(prop_info->name));
+				if (result) ZVAL_ERROR(result);
+				return 0;
+			}
 			if (Z_TYPE_P(ptr) != IS_REFERENCE) {
 				if (!prop_info) {
 					break;
@@ -3812,7 +3823,14 @@ static zend_always_inline void zend_assign_to_property_reference(
 
 	if (EXPECTED(Z_TYPE_P(variable_ptr) == IS_INDIRECT)) {
 		variable_ptr = Z_INDIRECT_P(variable_ptr);
-		if (/*OP_DATA_TYPE == IS_VAR &&*/
+		if (UNEXPECTED(prop_info != NULL)
+		 && UNEXPECTED(prop_info->ce->ce_flags2 & ZEND_ACC2_VALUE_CLASS)) {
+			/* Binding a live reference into a value's slot would alias every
+			 * later copy of the struct through one mutable cell. */
+			zend_throw_error(NULL, "Cannot assign by reference to struct property %s::$%s",
+				ZSTR_VAL(prop_info->ce->name), ZSTR_VAL(prop_info->name));
+			variable_ptr = &EG(uninitialized_zval);
+		} else if (/*OP_DATA_TYPE == IS_VAR &&*/
 				   (opline->extended_value & ZEND_RETURNS_FUNCTION) &&
 				   UNEXPECTED(!Z_ISREF_P(value_ptr))) {
 
