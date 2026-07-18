@@ -11182,18 +11182,30 @@ static int zend_jit_leave_func(zend_jit_ctx         *jit,
 		may_throw = 1;
 	} else if (op_array->scope
 	 && (op_array->scope->ce_flags2 & ZEND_ACC2_VALUE_CLASS)
-	 && (op_array->fn_flags & ZEND_ACC_CTOR)
-	 && !(op_array->fn_flags & ZEND_ACC_STATIC)) {
-		/* Value-class constructor: $this is borrowed and exclusive (NEW skips
-		 * the addref), so there is never a receiver to release -- but $this
-		 * must not have escaped. Run the same check as the VM's leave paths. */
+	 && (op_array->fn_flags & ZEND_ACC_CTOR)) {
+		/* Value-class constructor: through object creation $this is borrowed
+		 * and exclusive (NEW skips the addref), so there is no receiver to
+		 * release -- but $this must not have escaped. Mirror the VM's leave
+		 * order exactly (release an owned receiver, otherwise escape-check)
+		 * so any frame shape the VM can produce behaves identically here. */
+		ir_ref if_release, fast_path;
+
 		if (!left_frame) {
 			left_frame = true;
 		    if (!zend_jit_leave_frame(jit)) {
 				return 0;
 		    }
 		}
+		if (!call_info) {
+			call_info = ir_LOAD_U32(jit_EX(This.u1.type_info));
+		}
+		if_release = ir_IF(ir_AND_U32(call_info, ir_CONST_U32(ZEND_CALL_RELEASE_THIS)));
+		ir_IF_TRUE_cold(if_release);
+		jit_OBJ_RELEASE(jit, ir_LOAD_A(jit_EX(This.value.obj)));
+		fast_path = ir_END();
+		ir_IF_FALSE(if_release);
 		ir_CALL_1(IR_VOID, ir_CONST_FC_FUNC(zend_jit_value_class_ctor_escape), jit_FP(jit));
+		ir_MERGE_WITH(fast_path);
 		may_throw = 1;
 	} else if (may_need_release_this) {
 		ir_ref if_release, fast_path = IR_UNUSED;

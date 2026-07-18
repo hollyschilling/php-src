@@ -861,6 +861,23 @@ zend_result zend_call_function(zend_fcall_info *fci, zend_fcall_info_cache *fci_
 		}
 	}
 
+	if (UNEXPECTED(func->common.fn_flags & ZEND_ACC_CTOR)
+	 && fci_cache->object
+	 && UNEXPECTED(fci_cache->object->ce->ce_flags2 & ZEND_ACC2_VALUE_CLASS)
+	 && GC_REFCOUNT(fci_cache->object) > 1) {
+		/* A struct constructor initializes its receiver in place under the
+		 * borrowed-exclusive $this convention, which only object creation can
+		 * establish. A shared receiver here means explicit re-invocation
+		 * (ReflectionMethod::invoke and friends); reject it as the VM's
+		 * method-resolution path does. Fresh-instance construction
+		 * (ReflectionClass::newInstance, internal object creation) holds the
+		 * sole reference and passes. */
+		zend_throw_error(NULL, "Cannot call the constructor of struct %s explicitly",
+			ZSTR_VAL(fci_cache->object->ce->name));
+		zend_release_fcall_info_cache(fci_cache);
+		return SUCCESS;
+	}
+
 #ifdef ZEND_CHECK_STACK_LIMIT
 	if (UNEXPECTED(zend_call_stack_overflowed(EG(stack_limit)))) {
 		zend_call_stack_size_error();

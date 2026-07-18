@@ -4030,6 +4030,18 @@ get_function_via_handler:
 				if (error) {
 					zend_spprintf(error, 0, "cannot call abstract method %s::%s()", ZSTR_VAL(fcc->calling_scope->name), ZSTR_VAL(fcc->function_handler->common.function_name));
 				}
+			} else if ((fcc->function_handler->common.fn_flags & ZEND_ACC_CTOR)
+			 && fcc->object
+			 && (fcc->object->ce->ce_flags2 & ZEND_ACC2_VALUE_CLASS)) {
+				/* A struct's constructor is a mutating call reachable only
+				 * through object creation; it is not callable explicitly.
+				 * This resolver backs every callable consumer (call_user_func,
+				 * Closure::fromCallable, INIT_USER_CALL, array_map, ...), and
+				 * reporting through *error keeps is_callable() non-throwing. */
+				retval = false;
+				if (error) {
+					zend_spprintf(error, 0, "cannot call the constructor of struct %s explicitly", ZSTR_VAL(fcc->object->ce->name));
+				}
 			} else if (!fcc->object && !(fcc->function_handler->common.fn_flags & ZEND_ACC_STATIC)) {
 				retval = false;
 				if (error) {
