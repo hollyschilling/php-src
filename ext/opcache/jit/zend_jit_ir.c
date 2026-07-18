@@ -1610,6 +1610,21 @@ static void jit_GC_ADDREF(zend_jit_ctx *jit, ir_ref ref)
 	ir_STORE(ref, ir_ADD_U32(ir_LOAD_U32(ref), ir_CONST_U32(1)));
 }
 
+/* Emit "is obj_ref's class a value class?" and return the ir_IF ref.
+ * Optionally hands back the loaded class entry, which remains valid across a
+ * subsequent separation: a clone shares its original's zend_class_entry. */
+static ir_ref jit_if_value_class(zend_jit_ctx *jit, ir_ref obj_ref, ir_ref *ce_ref_out)
+{
+	ir_ref ce_ref = ir_LOAD_A(ir_ADD_OFFSET(obj_ref, offsetof(zend_object, ce)));
+
+	if (ce_ref_out) {
+		*ce_ref_out = ce_ref;
+	}
+	return ir_IF(ir_AND_U32(
+		ir_LOAD_U32(ir_ADD_OFFSET(ce_ref, offsetof(zend_class_entry, ce_flags2))),
+		ir_CONST_U32(ZEND_ACC2_VALUE_CLASS)));
+}
+
 static void jit_GC_ADDREF2(zend_jit_ctx *jit, ir_ref ref)
 {
 	ir_ref counter = ir_LOAD_U32(ref);
@@ -8720,10 +8735,7 @@ static int zend_jit_push_call_frame(zend_jit_ctx *jit, const zend_op *opline, co
 			 * RELEASE_THIS) so the first write separates it and the capture
 			 * is never mutated across calls. Mirrors
 			 * zend_init_dynamic_call_object(). */
-			ir_ref obj_ce = ir_LOAD_A(ir_ADD_OFFSET(object, offsetof(zend_object, ce)));
-			ir_ref if_vc = ir_IF(ir_AND_U32(
-				ir_LOAD_U32(ir_ADD_OFFSET(obj_ce, offsetof(zend_class_entry, ce_flags2))),
-				ir_CONST_U32(ZEND_ACC2_VALUE_CLASS)));
+			ir_ref if_vc = jit_if_value_class(jit, object, NULL);
 			ir_ref call_info3;
 
 			ir_IF_TRUE_cold(if_vc);
@@ -14317,10 +14329,16 @@ static int zend_jit_func_arg_by_ref_guard(zend_jit_ctx *jit, const zend_op *opli
 }
 
 /* Emit value-class (struct) copy-on-write separation for a receiver about to
- * be written through *container_addr. Placement contract: after the receiver's
- * class guard (if any) and before any property address is computed, so every
- * downstream path -- inline store, typed-prop helper, slow-path helper --
- * operates on the separated object.
+ * be written. Placement contract: after the receiver's class guard (if any)
+ * and before any property address is computed, so every downstream path --
+ * inline store, typed-prop helper, slow-path helper -- operates on the
+ * separated object.
+ *
+ * The container -- the caller-visible slot separation writes the fresh copy
+ * back into -- is resolved here, not at the call sites: the frame's This slot
+ * for $this receivers, the (already INDIRECT/REF-dereferenced) op1 slot
+ * otherwise. A call site passing the wrong slot would separate into a stale
+ * location, so the choice is deliberately not repeatable per emitter.
  *
  * Static cases:
  * - ce known and a value class (a struct method's $this, an inferred or
@@ -14329,24 +14347,31 @@ static int zend_jit_func_arg_by_ref_guard(zend_jit_ctx *jit, const zend_op *opli
  * - ce known and a non-value class: nothing to emit. Structs are final and
  *   root, so no instance of a non-struct class (or its subclasses) is ever a
  *   struct; existing code pays nothing.
- * - ce unknown or an interface: runtime ce_flags2 test, then as above.
+ * - ce unknown or an interface: runtime ce_flags2 test, then as above. The
+ *   class entry loaded for that test is handed back through obj_ce_ref
+ *   (IR_UNUSED otherwise): it stays valid across the separation PHI because
+ *   a clone shares its original's class entry, letting the emitter's
+ *   runtime-cache compare skip a reload.
  * The helper cannot throw (struct __clone is banned), so call sites need no
  * opline sync or exception check. Returns the possibly-updated object ref. */
-static ir_ref jit_value_class_separation(zend_jit_ctx *jit, ir_ref obj_ref, zend_jit_addr container_addr, const zend_class_entry *ce)
+static ir_ref jit_value_class_separation(zend_jit_ctx *jit, ir_ref obj_ref, bool on_this, zend_jit_addr op1_addr, const zend_class_entry *ce, ir_ref *obj_ce_ref)
 {
+	zend_jit_addr container_addr = on_this
+		? ZEND_ADDR_MEM_ZVAL(ZREG_FP, offsetof(zend_execute_data, This))
+		: op1_addr;
 	ir_ref if_vc = IR_UNUSED;
 	ir_ref if_shared, sep_ref, inner_ref;
+
+	if (obj_ce_ref) {
+		*obj_ce_ref = IR_UNUSED;
+	}
 
 	if (ce && !(ce->ce_flags & ZEND_ACC_INTERFACE)) {
 		if (!(ce->ce_flags2 & ZEND_ACC2_VALUE_CLASS)) {
 			return obj_ref;
 		}
 	} else {
-		ir_ref ce_ref = ir_LOAD_A(ir_ADD_OFFSET(obj_ref, offsetof(zend_object, ce)));
-
-		if_vc = ir_IF(ir_AND_U32(
-			ir_LOAD_U32(ir_ADD_OFFSET(ce_ref, offsetof(zend_class_entry, ce_flags2))),
-			ir_CONST_U32(ZEND_ACC2_VALUE_CLASS)));
+		if_vc = jit_if_value_class(jit, obj_ref, obj_ce_ref);
 		ir_IF_TRUE_cold(if_vc);
 	}
 
@@ -14502,21 +14527,20 @@ static int zend_jit_fetch_obj(zend_jit_ctx         *jit,
 		}
 	}
 
+	ir_ref obj_ce_ref = IR_UNUSED;
 	if (opline->opcode == ZEND_FETCH_OBJ_W) {
 		/* Value-class copy-on-write: a W fetch leads to a write somewhere down
 		 * the access path, so separate a shared struct before the property
 		 * address is computed -- exactly as nested array writes separate each
 		 * level. */
-		obj_ref = jit_value_class_separation(jit, obj_ref,
-			on_this ? ZEND_ADDR_MEM_ZVAL(ZREG_FP, offsetof(zend_execute_data, This)) : op1_addr,
-			ce);
+		obj_ref = jit_value_class_separation(jit, obj_ref, on_this, op1_addr, ce, &obj_ce_ref);
 	}
 
 	if (!prop_info) {
 		ir_ref run_time_cache = ir_LOAD_A(jit_EX(run_time_cache));
 		ir_ref ref = ir_LOAD_A(ir_ADD_OFFSET(run_time_cache, opline->extended_value & ~ZEND_FETCH_OBJ_FLAGS));
 		ir_ref if_same = ir_IF(ir_EQ(ref,
-			ir_LOAD_A(ir_ADD_OFFSET(obj_ref, offsetof(zend_object, ce)))));
+			obj_ce_ref != IR_UNUSED ? obj_ce_ref : ir_LOAD_A(ir_ADD_OFFSET(obj_ref, offsetof(zend_object, ce)))));
 
 		ir_IF_FALSE_cold(if_same);
 		ir_END_list(slow_inputs);
@@ -14610,10 +14634,7 @@ static int zend_jit_fetch_obj(zend_jit_ctx         *jit,
 				/* Value-class (struct) instances are values: a nested write
 				 * through the property modifies the property's value and must
 				 * raise the indirect-modification error, as for arrays. */
-				ir_ref vc_ce = ir_LOAD_A(ir_ADD_OFFSET(ref, offsetof(zend_object, ce)));
-				ir_ref if_vc = ir_IF(ir_AND_U32(
-					ir_LOAD_U32(ir_ADD_OFFSET(vc_ce, offsetof(zend_class_entry, ce_flags2))),
-					ir_CONST_U32(ZEND_ACC2_VALUE_CLASS)));
+				ir_ref if_vc = jit_if_value_class(jit, ref, NULL);
 				ir_IF_TRUE_cold(if_vc);
 				ir_END_list(indirect_error_inputs);
 				ir_IF_FALSE(if_vc);
@@ -14693,10 +14714,7 @@ static int zend_jit_fetch_obj(zend_jit_ctx         *jit,
 				/* Value-class (struct) instances are values: a nested write
 				 * through the property modifies the property's value and must
 				 * raise the indirect-modification error, as for arrays. */
-				ir_ref vc_ce = ir_LOAD_A(ir_ADD_OFFSET(ref, offsetof(zend_object, ce)));
-				ir_ref if_vc = ir_IF(ir_AND_U32(
-					ir_LOAD_U32(ir_ADD_OFFSET(vc_ce, offsetof(zend_class_entry, ce_flags2))),
-					ir_CONST_U32(ZEND_ACC2_VALUE_CLASS)));
+				ir_ref if_vc = jit_if_value_class(jit, ref, NULL);
 				ir_IF_TRUE_cold(if_vc);
 				ir_END_list(indirect_error_inputs);
 				ir_IF_FALSE(if_vc);
@@ -14729,10 +14747,7 @@ static int zend_jit_fetch_obj(zend_jit_ctx         *jit,
 			ir_ref ref = jit_Z_PTR(jit, prop_addr);
 			{
 				/* As above: value-class receivers take the error path. */
-				ir_ref vc_ce = ir_LOAD_A(ir_ADD_OFFSET(ref, offsetof(zend_object, ce)));
-				ir_ref if_vc = ir_IF(ir_AND_U32(
-					ir_LOAD_U32(ir_ADD_OFFSET(vc_ce, offsetof(zend_class_entry, ce_flags2))),
-					ir_CONST_U32(ZEND_ACC2_VALUE_CLASS)));
+				ir_ref if_vc = jit_if_value_class(jit, ref, NULL);
 				ir_IF_TRUE_cold(if_vc);
 				ir_END_list(indirect_error_inputs);
 				ir_IF_FALSE(if_vc);
@@ -15088,14 +15103,14 @@ static int zend_jit_assign_obj(zend_jit_ctx         *jit,
 
 	/* Value-class copy-on-write: separate a shared struct before the write,
 	 * ahead of any property address computation. */
-	obj_ref = jit_value_class_separation(jit, obj_ref,
-		on_this ? ZEND_ADDR_MEM_ZVAL(ZREG_FP, offsetof(zend_execute_data, This)) : op1_addr,
-		ce);
+	ir_ref obj_ce_ref;
+	obj_ref = jit_value_class_separation(jit, obj_ref, on_this, op1_addr, ce, &obj_ce_ref);
 
 	if (!prop_info) {
 		ir_ref run_time_cache = ir_LOAD_A(jit_EX(run_time_cache));
 		ir_ref ref = ir_LOAD_A(ir_ADD_OFFSET(run_time_cache, opline->extended_value & ~ZEND_FETCH_OBJ_FLAGS));
-		ir_ref if_same = ir_IF(ir_EQ(ref, ir_LOAD_A(ir_ADD_OFFSET(obj_ref, offsetof(zend_object, ce)))));
+		ir_ref if_same = ir_IF(ir_EQ(ref,
+			obj_ce_ref != IR_UNUSED ? obj_ce_ref : ir_LOAD_A(ir_ADD_OFFSET(obj_ref, offsetof(zend_object, ce)))));
 
 		ir_IF_FALSE_cold(if_same);
 		ir_END_list(slow_inputs);
@@ -15452,14 +15467,14 @@ static int zend_jit_assign_obj_op(zend_jit_ctx         *jit,
 
 	/* Value-class copy-on-write: separate a shared struct before the write,
 	 * ahead of any property address computation. */
-	obj_ref = jit_value_class_separation(jit, obj_ref,
-		on_this ? ZEND_ADDR_MEM_ZVAL(ZREG_FP, offsetof(zend_execute_data, This)) : op1_addr,
-		ce);
+	ir_ref obj_ce_ref;
+	obj_ref = jit_value_class_separation(jit, obj_ref, on_this, op1_addr, ce, &obj_ce_ref);
 
 	if (!prop_info) {
 		ir_ref run_time_cache = ir_LOAD_A(jit_EX(run_time_cache));
 		ir_ref ref = ir_LOAD_A(ir_ADD_OFFSET(run_time_cache, (opline+1)->extended_value & ~ZEND_FETCH_OBJ_FLAGS));
-		ir_ref if_same = ir_IF(ir_EQ(ref, ir_LOAD_A(ir_ADD_OFFSET(obj_ref, offsetof(zend_object, ce)))));
+		ir_ref if_same = ir_IF(ir_EQ(ref,
+			obj_ce_ref != IR_UNUSED ? obj_ce_ref : ir_LOAD_A(ir_ADD_OFFSET(obj_ref, offsetof(zend_object, ce)))));
 
 		ir_IF_FALSE_cold(if_same);
 		ir_END_list(slow_inputs);
@@ -15881,14 +15896,14 @@ static int zend_jit_incdec_obj(zend_jit_ctx         *jit,
 
 	/* Value-class copy-on-write: separate a shared struct before the write,
 	 * ahead of any property address computation. */
-	obj_ref = jit_value_class_separation(jit, obj_ref,
-		on_this ? ZEND_ADDR_MEM_ZVAL(ZREG_FP, offsetof(zend_execute_data, This)) : op1_addr,
-		ce);
+	ir_ref obj_ce_ref;
+	obj_ref = jit_value_class_separation(jit, obj_ref, on_this, op1_addr, ce, &obj_ce_ref);
 
 	if (!prop_info) {
 		ir_ref run_time_cache = ir_LOAD_A(jit_EX(run_time_cache));
 		ir_ref ref = ir_LOAD_A(ir_ADD_OFFSET(run_time_cache, opline->extended_value & ~ZEND_FETCH_OBJ_FLAGS));
-		ir_ref if_same = ir_IF(ir_EQ(ref, ir_LOAD_A(ir_ADD_OFFSET(obj_ref, offsetof(zend_object, ce)))));
+		ir_ref if_same = ir_IF(ir_EQ(ref,
+			obj_ce_ref != IR_UNUSED ? obj_ce_ref : ir_LOAD_A(ir_ADD_OFFSET(obj_ref, offsetof(zend_object, ce)))));
 
 		ir_IF_FALSE_cold(if_same);
 		ir_END_list(slow_inputs);
