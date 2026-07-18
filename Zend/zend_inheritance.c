@@ -3059,14 +3059,14 @@ static void zend_verify_value_class(const zend_class_entry *ce) /* {{{ */
 	} ZEND_HASH_FOREACH_END();
 
 	/* The function table is keyed by lowercased name, which is what
-	 * zend_is_magic_method_name() expects; report the declared spelling. */
+	 * zend_is_value_class_forbidden_magic_method() expects; report the
+	 * declared spelling. */
 	zend_string *lcname;
 	ZEND_HASH_MAP_FOREACH_STR_KEY_PTR(&ce->function_table, lcname, func) {
 		if (func->common.scope != ce || lcname == NULL) {
 			continue;
 		}
-		if (zend_is_magic_method_name(lcname)
-		 && !zend_string_equals_literal(lcname, ZEND_CONSTRUCTOR_FUNC_NAME)) {
+		if (zend_is_value_class_forbidden_magic_method(lcname)) {
 			zend_error_noreturn(E_COMPILE_ERROR, "Struct %s cannot include magic method %s()",
 				ZSTR_VAL(ce->name), ZSTR_VAL(func->common.function_name));
 		}

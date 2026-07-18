@@ -1,5 +1,5 @@
 --TEST--
-Structs: __construct is the one permitted magic method
+Structs: __construct is permitted and runs through object creation
 --FILE--
 <?php
 

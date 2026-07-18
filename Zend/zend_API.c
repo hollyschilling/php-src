@@ -2870,29 +2870,37 @@ ZEND_API void zend_check_magic_method_implementation(const zend_class_entry *ce,
 }
 /* }}} */
 
-/* Whether lcname names one of the engine's magic methods. Kept adjacent to
- * zend_check_magic_method_implementation() above so the two lists stay in sync. */
-ZEND_API bool zend_is_magic_method_name(const zend_string *lcname)
+/* Whether lcname names a magic method a value class must not declare. Kept
+ * adjacent to zend_check_magic_method_implementation() above so the lists
+ * stay in sync when magic methods are added.
+ *
+ * The classification follows from the value model, not from a blanket rule:
+ * a copy hook (__clone) or lifetime hook (__destruct) would observe
+ * copy-on-write separation, which creates and destroys copies on an engine
+ * schedule; the shape is total, so there is nothing for __get/__set/__isset/
+ * __unset to simulate (and unset is banned outright); __sleep/__wakeup are
+ * the legacy serialization pair; __serialize/__unserialize are deferred with
+ * the wire-format decision (__unserialize is a mutating initializer and
+ * needs the mutating call convention from the unserializer); __set_state is
+ * deferred with var_export(). The pure reads -- __toString (Stringable),
+ * __invoke, __debugInfo, __call, __callStatic -- bind $this by value like
+ * any struct method and are permitted; __construct is the mutating member,
+ * reachable only through object creation. */
+ZEND_API bool zend_is_value_class_forbidden_magic_method(const zend_string *lcname)
 {
 	if (ZSTR_VAL(lcname)[0] != '_' || ZSTR_VAL(lcname)[1] != '_') {
 		return false;
 	}
 
-	return zend_string_equals_literal(lcname, ZEND_CONSTRUCTOR_FUNC_NAME)
-		|| zend_string_equals_literal(lcname, ZEND_DESTRUCTOR_FUNC_NAME)
+	return zend_string_equals_literal(lcname, ZEND_DESTRUCTOR_FUNC_NAME)
 		|| zend_string_equals_literal(lcname, ZEND_CLONE_FUNC_NAME)
 		|| zend_string_equals_literal(lcname, ZEND_GET_FUNC_NAME)
 		|| zend_string_equals_literal(lcname, ZEND_SET_FUNC_NAME)
 		|| zend_string_equals_literal(lcname, ZEND_UNSET_FUNC_NAME)
 		|| zend_string_equals_literal(lcname, ZEND_ISSET_FUNC_NAME)
-		|| zend_string_equals_literal(lcname, ZEND_CALL_FUNC_NAME)
-		|| zend_string_equals_literal(lcname, ZEND_CALLSTATIC_FUNC_LCNAME)
-		|| zend_string_equals_literal(lcname, ZEND_TOSTRING_FUNC_LCNAME)
-		|| zend_string_equals_literal(lcname, ZEND_DEBUGINFO_FUNC_LCNAME)
 		|| zend_string_equals_literal(lcname, ZEND_SERIALIZE_FUNC_NAME)
 		|| zend_string_equals_literal(lcname, ZEND_UNSERIALIZE_FUNC_NAME)
 		|| zend_string_equals_literal(lcname, ZEND_SET_STATE_FUNC_NAME)
-		|| zend_string_equals(lcname, ZSTR_KNOWN(ZEND_STR_MAGIC_INVOKE))
 		|| zend_string_equals(lcname, ZSTR_KNOWN(ZEND_STR_SLEEP))
 		|| zend_string_equals(lcname, ZSTR_KNOWN(ZEND_STR_WAKEUP));
 }

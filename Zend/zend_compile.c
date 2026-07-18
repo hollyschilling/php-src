@@ -8619,12 +8619,12 @@ static zend_string *zend_begin_method_decl(zend_op_array *op_array, zend_string 
 			ZSTR_VAL(ce->name), ZSTR_VAL(name));
 	}
 
-	/* A struct has a total, declared shape, so there is nothing for __get/__set
-	 * to simulate, and a copy hook would observe copy-on-write separation.
-	 * __construct is the one magic method a struct may declare. */
+	/* Magic methods incompatible with the value model are rejected; the pure
+	 * reads (__toString, __invoke, __debugInfo, __call, __callStatic) bind
+	 * $this by value like any struct method and are permitted. See
+	 * zend_is_value_class_forbidden_magic_method() for the classification. */
 	if ((ce->ce_flags2 & ZEND_ACC2_VALUE_CLASS)
-	 && !zend_string_equals_literal(lcname, ZEND_CONSTRUCTOR_FUNC_NAME)
-	 && zend_is_magic_method_name(lcname)) {
+	 && zend_is_value_class_forbidden_magic_method(lcname)) {
 		zend_error_noreturn(E_COMPILE_ERROR, "Struct %s cannot include magic method %s()",
 			ZSTR_VAL(ce->name), ZSTR_VAL(name));
 	}
