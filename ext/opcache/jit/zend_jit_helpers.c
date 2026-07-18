@@ -2316,6 +2316,18 @@ static void ZEND_FASTCALL zend_jit_fetch_obj_w_slow(zend_object *zobj)
 		return;
 	}
 
+	if (UNEXPECTED((opline->extended_value & ZEND_FETCH_OBJ_FLAGS) == ZEND_FETCH_REF)
+	 && UNEXPECTED(zobj->ce->ce_flags2 & ZEND_ACC2_VALUE_CLASS)) {
+		/* The VM's FETCH_OBJ_W runs zend_handle_fetch_obj_flags on this path;
+		 * this cold-cache helper skips the flags entirely, so the struct
+		 * interior-reference ban must be repeated here or a REF-flagged fetch
+		 * through a cold cache slot hands out a real slot pointer. */
+		zend_throw_error(NULL, "Cannot take reference to struct property %s::$%s",
+			ZSTR_VAL(zobj->ce->name), ZSTR_VAL(name));
+		ZVAL_ERROR(result);
+		return;
+	}
+
 	ZVAL_INDIRECT(result, retval);
 
 	/* Support for typed properties */
@@ -2364,6 +2376,17 @@ static void ZEND_FASTCALL zend_jit_check_array_promotion(zval *val, zend_propert
 
 static void ZEND_FASTCALL zend_jit_create_typed_ref(zval *val, zend_property_info *prop, zval *result)
 {
+	if (UNEXPECTED(prop->ce->ce_flags2 & ZEND_ACC2_VALUE_CLASS)) {
+		/* References into a struct's interior are banned; mirror the VM's
+		 * ZEND_FETCH_REF handling (zend_handle_fetch_obj_flags). Both JIT
+		 * FETCH_OBJ_W ref-emission sites route through this helper, and a
+		 * struct property always has a prop_info, so this is the single
+		 * chokepoint. Call sites sync EX(opline) before calling. */
+		zend_throw_error(NULL, "Cannot take reference to struct property %s::$%s",
+			ZSTR_VAL(prop->ce->name), ZSTR_VAL(prop->name));
+		ZVAL_ERROR(result);
+		return;
+	}
 	if (!Z_ISREF_P(val)) {
 		ZVAL_NEW_REF(val, val);
 		ZEND_REF_ADD_TYPE_SOURCE(Z_REF_P(val), prop);
