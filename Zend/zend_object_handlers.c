@@ -802,10 +802,16 @@ try_again:
 		if (prop_info && UNEXPECTED(prop_info->flags & (ZEND_ACC_READONLY|ZEND_ACC_PPP_SET_MASK))
 		 && (type == BP_VAR_W || type == BP_VAR_RW || type == BP_VAR_UNSET)
 		 && ((prop_info->flags & ZEND_ACC_READONLY) || !zend_asymmetric_property_has_set_access(prop_info))) {
-			if (Z_TYPE_P(retval) == IS_OBJECT) {
+			if (Z_TYPE_P(retval) == IS_OBJECT
+			 && EXPECTED(!(Z_OBJCE_P(retval)->ce_flags2 & ZEND_ACC2_VALUE_CLASS))) {
 				/* For objects, W/RW/UNSET fetch modes might not actually modify object.
 				 * Similar as with magic __get() allow them, but return the value as a copy
-				 * to make sure no actual modification is possible. */
+				 * to make sure no actual modification is possible.
+				 *
+				 * Value-class (struct) instances are excluded: they are
+				 * values, so a nested write through the property modifies the
+				 * property's value -- exactly as for arrays -- and must fail
+				 * the same way. */
 				ZVAL_COPY(rv, retval);
 				retval = rv;
 				goto exit;

@@ -14592,15 +14592,30 @@ static int zend_jit_fetch_obj(zend_jit_ctx         *jit,
 
 			ir_MERGE_list(forbidden_inputs);
 
+			ir_ref indirect_error_inputs = IR_UNUSED;
 			ir_ref if_prop_obj = jit_if_Z_TYPE(jit, prop_addr, IS_OBJECT);
 			ir_IF_TRUE(if_prop_obj);
 			ref = jit_Z_PTR(jit, prop_addr);
+			{
+				/* Value-class (struct) instances are values: a nested write
+				 * through the property modifies the property's value and must
+				 * raise the indirect-modification error, as for arrays. */
+				ir_ref vc_ce = ir_LOAD_A(ir_ADD_OFFSET(ref, offsetof(zend_object, ce)));
+				ir_ref if_vc = ir_IF(ir_AND_U32(
+					ir_LOAD_U32(ir_ADD_OFFSET(vc_ce, offsetof(zend_class_entry, ce_flags2))),
+					ir_CONST_U32(ZEND_ACC2_VALUE_CLASS)));
+				ir_IF_TRUE_cold(if_vc);
+				ir_END_list(indirect_error_inputs);
+				ir_IF_FALSE(if_vc);
+			}
 			jit_GC_ADDREF(jit, ref);
 			jit_set_Z_PTR(jit, res_addr, ref);
 			jit_set_Z_TYPE_INFO(jit, res_addr, IS_OBJECT_EX);
 			ir_END_list(end_inputs);
 
 			ir_IF_FALSE_cold(if_prop_obj);
+			ir_END_list(indirect_error_inputs);
+			ir_MERGE_list(indirect_error_inputs);
 
 			jit_SET_EX_OPLINE(jit, opline);
 			if_readonly = ir_IF(ir_AND_U32(prop_flags, ir_CONST_U32(ZEND_ACC_READONLY)));
@@ -14658,15 +14673,30 @@ static int zend_jit_fetch_obj(zend_jit_ctx         *jit,
 			ir_IF_TRUE(if_def);
 		}
 		if (opline->opcode == ZEND_FETCH_OBJ_W && (prop_info->flags & ZEND_ACC_READONLY)) {
+			ir_ref indirect_error_inputs = IR_UNUSED;
 			ir_ref if_prop_obj = jit_if_Z_TYPE(jit, prop_addr, IS_OBJECT);
 			ir_IF_TRUE(if_prop_obj);
 			ir_ref ref = jit_Z_PTR(jit, prop_addr);
+			{
+				/* Value-class (struct) instances are values: a nested write
+				 * through the property modifies the property's value and must
+				 * raise the indirect-modification error, as for arrays. */
+				ir_ref vc_ce = ir_LOAD_A(ir_ADD_OFFSET(ref, offsetof(zend_object, ce)));
+				ir_ref if_vc = ir_IF(ir_AND_U32(
+					ir_LOAD_U32(ir_ADD_OFFSET(vc_ce, offsetof(zend_class_entry, ce_flags2))),
+					ir_CONST_U32(ZEND_ACC2_VALUE_CLASS)));
+				ir_IF_TRUE_cold(if_vc);
+				ir_END_list(indirect_error_inputs);
+				ir_IF_FALSE(if_vc);
+			}
 			jit_GC_ADDREF(jit, ref);
 			jit_set_Z_PTR(jit, res_addr, ref);
 			jit_set_Z_TYPE_INFO(jit, res_addr, IS_OBJECT_EX);
 			ir_END_list(end_inputs);
 
 			ir_IF_FALSE_cold(if_prop_obj);
+			ir_END_list(indirect_error_inputs);
+			ir_MERGE_list(indirect_error_inputs);
 			jit_SET_EX_OPLINE(jit, opline);
 			ir_CALL_1(IR_VOID, ir_CONST_FC_FUNC(zend_readonly_property_indirect_modification_error), ir_CONST_ADDR(prop_info));
 			jit_set_Z_TYPE_INFO(jit, res_addr, _IS_ERROR);
@@ -14681,15 +14711,28 @@ static int zend_jit_fetch_obj(zend_jit_ctx         *jit,
 			ir_ref if_access = ir_IF(has_access);
 			ir_IF_FALSE_cold(if_access);
 
+			ir_ref indirect_error_inputs = IR_UNUSED;
 			ir_ref if_prop_obj = jit_if_Z_TYPE(jit, prop_addr, IS_OBJECT);
 			ir_IF_TRUE(if_prop_obj);
 			ir_ref ref = jit_Z_PTR(jit, prop_addr);
+			{
+				/* As above: value-class receivers take the error path. */
+				ir_ref vc_ce = ir_LOAD_A(ir_ADD_OFFSET(ref, offsetof(zend_object, ce)));
+				ir_ref if_vc = ir_IF(ir_AND_U32(
+					ir_LOAD_U32(ir_ADD_OFFSET(vc_ce, offsetof(zend_class_entry, ce_flags2))),
+					ir_CONST_U32(ZEND_ACC2_VALUE_CLASS)));
+				ir_IF_TRUE_cold(if_vc);
+				ir_END_list(indirect_error_inputs);
+				ir_IF_FALSE(if_vc);
+			}
 			jit_GC_ADDREF(jit, ref);
 			jit_set_Z_PTR(jit, res_addr, ref);
 			jit_set_Z_TYPE_INFO(jit, res_addr, IS_OBJECT_EX);
 			ir_END_list(end_inputs);
 
 			ir_IF_FALSE_cold(if_prop_obj);
+			ir_END_list(indirect_error_inputs);
+			ir_MERGE_list(indirect_error_inputs);
 			ir_CALL_2(IR_VOID, ir_CONST_FC_FUNC(zend_asymmetric_visibility_property_modification_error),
 				ir_CONST_ADDR(prop_info), ir_CONST_ADDR("indirectly modify"));
 			ir_END_list(end_inputs);
