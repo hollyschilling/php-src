@@ -642,18 +642,20 @@ trait_declaration_statement:
 			{ $$ = zend_ast_create_decl(ZEND_AST_CLASS, ZEND_ACC_TRAIT, $<num>2, $4, zend_ast_get_str($3), NULL, NULL, $6, NULL, NULL); }
 ;
 
-/* Structs are implicitly final and root: no extends_from, and no abstract/final
- * modifier. `readonly struct` mirrors `readonly class`. The value-class marker
- * travels in the decl's attr, not its flags, because flags is OR'd wholesale
- * into ce_flags and the marker lives in ce_flags2. */
+/* Structs are implicitly final and root: no extends_from. Modifiers share the
+ * class_modifiers production so each one parses and gets a targeted
+ * diagnostic (only readonly is valid; `readonly struct` mirrors `readonly
+ * class`). The value-class marker travels in the decl's attr, not its flags,
+ * because flags is OR'd wholesale into ce_flags and the marker lives in
+ * ce_flags2. */
 struct_declaration_statement:
-		T_STRUCT { $<num>$ = CG(zend_lineno); }
+		class_modifiers T_STRUCT { $<num>$ = CG(zend_lineno); if (!zend_validate_struct_modifiers($1)) { YYERROR; } }
+		T_STRING implements_list backup_doc_comment '{' class_statement_list '}'
+			{ $$ = zend_ast_create_decl(ZEND_AST_CLASS, $1|ZEND_ACC_FINAL|ZEND_ACC_NO_DYNAMIC_PROPERTIES, $<num>3, $6, zend_ast_get_str($4), NULL, $5, $8, NULL, NULL);
+			  $$->attr = ZEND_CLASS_IS_VALUE_CLASS; }
+	|	T_STRUCT { $<num>$ = CG(zend_lineno); }
 		T_STRING implements_list backup_doc_comment '{' class_statement_list '}'
 			{ $$ = zend_ast_create_decl(ZEND_AST_CLASS, ZEND_ACC_FINAL|ZEND_ACC_NO_DYNAMIC_PROPERTIES, $<num>2, $5, zend_ast_get_str($3), NULL, $4, $7, NULL, NULL);
-			  $$->attr = ZEND_CLASS_IS_VALUE_CLASS; }
-	|	T_READONLY T_STRUCT { $<num>$ = CG(zend_lineno); }
-		T_STRING implements_list backup_doc_comment '{' class_statement_list '}'
-			{ $$ = zend_ast_create_decl(ZEND_AST_CLASS, ZEND_ACC_FINAL|ZEND_ACC_NO_DYNAMIC_PROPERTIES|ZEND_ACC_READONLY_CLASS, $<num>3, $6, zend_ast_get_str($4), NULL, $5, $8, NULL, NULL);
 			  $$->attr = ZEND_CLASS_IS_VALUE_CLASS; }
 ;
 

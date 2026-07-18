@@ -1042,6 +1042,24 @@ uint32_t zend_add_anonymous_class_modifier(uint32_t flags, uint32_t new_flag)
 	return new_flags;
 }
 
+/* Structs share the class_modifiers production so every modifier parses and
+ * gets a targeted diagnostic; only readonly is meaningful (structs are
+ * implicitly final and never abstract). */
+bool zend_validate_struct_modifiers(uint32_t flags)
+{
+	if (flags & ZEND_ACC_EXPLICIT_ABSTRACT_CLASS) {
+		zend_throw_exception(zend_ce_compile_error,
+			"Cannot use the abstract modifier on a struct", 0);
+		return false;
+	}
+	if (flags & ZEND_ACC_FINAL) {
+		zend_throw_exception(zend_ce_compile_error,
+			"Cannot use the final modifier on a struct", 0);
+		return false;
+	}
+	return true;
+}
+
 uint32_t zend_add_member_modifier(uint32_t flags, uint32_t new_flag, zend_modifier_target target) /* {{{ */
 {
 	uint32_t new_flags = flags | new_flag;
