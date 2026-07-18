@@ -23,4 +23,4 @@ try {
 
 ?>
 --EXPECTF--
-Cannot export $this from a set hook of value class S
+Cannot export $this from a set hook of struct S

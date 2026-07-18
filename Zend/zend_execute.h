@@ -492,7 +492,9 @@ ZEND_API void zend_fetch_dimension_const(zval *result, const zval *container, zv
 ZEND_API zend_object* ZEND_FASTCALL zend_value_class_separate_container(zval *container);
 /* Throws if a value-class constructor let $this escape; run at ctor return,
  * gated on ZEND_CALL_HAS_THIS without ZEND_CALL_RELEASE_THIS. */
-ZEND_API void ZEND_FASTCALL zend_check_value_class_ctor_escape(zend_execute_data *execute_data);
+ZEND_API void ZEND_FASTCALL zend_check_value_class_this_escape(zend_execute_data *execute_data);
+/* Shared thrower for $this escaping an exclusive (mutating) context. */
+ZEND_API ZEND_COLD void ZEND_FASTCALL zend_throw_struct_this_escape(const zend_class_entry *ce, const char *site);
 
 ZEND_API zval* zend_get_compiled_variable_value(const zend_execute_data *execute_data_ptr, uint32_t var);
 

@@ -3008,7 +3008,7 @@ ZEND_VM_HOT_HELPER(zend_leave_helper, ANY, ANY)
 		if (UNEXPECTED(call_info & ZEND_CALL_RELEASE_THIS)) {
 			OBJ_RELEASE(Z_OBJ(execute_data->This));
 		} else if (UNEXPECTED(call_info & ZEND_CALL_HAS_THIS)) {
-			zend_check_value_class_ctor_escape(execute_data);
+			zend_check_value_class_this_escape(execute_data);
 		}
 		/* Independent of RELEASE_THIS: a value-class receiver reached through a
 		 * closure owns its (possibly separated) $this via RELEASE_THIS while the
@@ -3049,7 +3049,7 @@ ZEND_VM_HOT_HELPER(zend_leave_helper, ANY, ANY)
 		if (UNEXPECTED(call_info & ZEND_CALL_RELEASE_THIS)) {
 			OBJ_RELEASE(Z_OBJ(execute_data->This));
 		} else if (UNEXPECTED(call_info & ZEND_CALL_HAS_THIS)) {
-			zend_check_value_class_ctor_escape(execute_data);
+			zend_check_value_class_this_escape(execute_data);
 		}
 		/* Independent of RELEASE_THIS: a value-class receiver reached through a
 		 * closure owns its (possibly separated) $this via RELEASE_THIS while the
@@ -3126,7 +3126,7 @@ ZEND_VM_HOT_HELPER(zend_leave_helper, ANY, ANY)
 			if (UNEXPECTED(call_info & ZEND_CALL_RELEASE_THIS)) {
 				OBJ_RELEASE(Z_OBJ(execute_data->This));
 			} else if (UNEXPECTED(call_info & ZEND_CALL_HAS_THIS)) {
-				zend_check_value_class_ctor_escape(execute_data);
+				zend_check_value_class_this_escape(execute_data);
 			}
 			if (UNEXPECTED(call_info & ZEND_CALL_CLOSURE)) {
 				OBJ_RELEASE(ZEND_CLOSURE_OBJECT(EX(func)));

@@ -2906,6 +2906,14 @@ ZEND_API void zend_add_magic_method(zend_class_entry *ce, zend_function *fptr, c
 	} else if (zend_string_equals_literal(lcname, ZEND_CONSTRUCTOR_FUNC_NAME)) {
 		ce->constructor = fptr;
 		ce->constructor->common.fn_flags |= ZEND_ACC_CTOR;
+		if (ce->ce_flags2 & ZEND_ACC2_VALUE_CLASS) {
+			/* A struct's constructor is the (so far only) mutating callee:
+			 * object creation lends it the fresh slot as a borrowed,
+			 * exclusive $this. All value-class call machinery keys on this
+			 * flag, not on ACC_CTOR, so the `mutating` modifier can join by
+			 * setting the same bit. */
+			ce->constructor->common.fn_flags2 |= ZEND_ACC2_MUTATING;
+		}
 	} else if (zend_string_equals_literal(lcname, ZEND_DESTRUCTOR_FUNC_NAME)) {
 		ce->destructor = fptr;
 	} else if (zend_string_equals_literal(lcname, ZEND_GET_FUNC_NAME)) {
@@ -4030,12 +4038,12 @@ get_function_via_handler:
 				if (error) {
 					zend_spprintf(error, 0, "cannot call abstract method %s::%s()", ZSTR_VAL(fcc->calling_scope->name), ZSTR_VAL(fcc->function_handler->common.function_name));
 				}
-			} else if ((fcc->function_handler->common.fn_flags & ZEND_ACC_CTOR)
-			 && fcc->object
-			 && (fcc->object->ce->ce_flags2 & ZEND_ACC2_VALUE_CLASS)) {
-				/* A struct's constructor is a mutating call reachable only
-				 * through object creation; it is not callable explicitly.
-				 * This resolver backs every callable consumer (call_user_func,
+			} else if ((fcc->function_handler->common.fn_flags2 & ZEND_ACC2_MUTATING)
+			 && fcc->object) {
+				/* A mutating callee (today: a struct's constructor) is not
+				 * reachable through callables; its receiver must be lent by a
+				 * call site that can separate it in place. This resolver backs
+				 * every callable consumer (call_user_func,
 				 * Closure::fromCallable, INIT_USER_CALL, array_map, ...), and
 				 * reporting through *error keeps is_callable() non-throwing. */
 				retval = false;

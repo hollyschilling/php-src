@@ -3179,7 +3179,7 @@ static void zend_jit_setup_disasm(void)
 	REGISTER_HELPER(zend_jit_extract_helper);
 	REGISTER_HELPER(zend_jit_invalid_property_assign);
 	REGISTER_HELPER(zend_jit_value_class_separate);
-	REGISTER_HELPER(zend_jit_value_class_ctor_escape);
+	REGISTER_HELPER(zend_jit_value_class_this_escape);
 	REGISTER_HELPER(zend_jit_assign_to_typed_prop);
 	REGISTER_HELPER(zend_jit_assign_obj_helper);
 	REGISTER_HELPER(zend_jit_invalid_property_assign_op);
@@ -11180,11 +11180,9 @@ static int zend_jit_leave_func(zend_jit_ctx         *jit,
 		jit_OBJ_RELEASE(jit, ir_LOAD_A(jit_EX(This.value.obj)));
 		ir_MERGE_WITH(fast_path);
 		may_throw = 1;
-	} else if (op_array->scope
-	 && (op_array->scope->ce_flags2 & ZEND_ACC2_VALUE_CLASS)
-	 && (op_array->fn_flags & ZEND_ACC_CTOR)) {
-		/* Value-class constructor: through object creation $this is borrowed
-		 * and exclusive (NEW skips the addref), so there is no receiver to
+	} else if (op_array->fn_flags2 & ZEND_ACC2_MUTATING) {
+		/* Mutating callee (today: a value class's constructor): $this is
+		 * borrowed and exclusive, so there is normally no receiver to
 		 * release -- but $this must not have escaped. Mirror the VM's leave
 		 * order exactly (release an owned receiver, otherwise escape-check)
 		 * so any frame shape the VM can produce behaves identically here. */
@@ -11204,7 +11202,7 @@ static int zend_jit_leave_func(zend_jit_ctx         *jit,
 		jit_OBJ_RELEASE(jit, ir_LOAD_A(jit_EX(This.value.obj)));
 		fast_path = ir_END();
 		ir_IF_FALSE(if_release);
-		ir_CALL_1(IR_VOID, ir_CONST_FC_FUNC(zend_jit_value_class_ctor_escape), jit_FP(jit));
+		ir_CALL_1(IR_VOID, ir_CONST_FC_FUNC(zend_jit_value_class_this_escape), jit_FP(jit));
 		ir_MERGE_WITH(fast_path);
 		may_throw = 1;
 	} else if (may_need_release_this) {

@@ -1285,8 +1285,7 @@ found:;
 			uint32_t refcount_before = GC_REFCOUNT(zobj);
 			zend_call_known_instance_method_with_1_params(set, zobj, NULL, value);
 			if (UNEXPECTED(GC_REFCOUNT(zobj) > refcount_before) && !EG(exception)) {
-				zend_throw_error(NULL, "Cannot export $this from a set hook of value class %s",
-					ZSTR_VAL(zobj->ce->name));
+				zend_throw_struct_this_escape(zobj->ce, "a set hook");
 				variable_ptr = &EG(error_zval);
 				goto exit;
 			}
@@ -2074,16 +2073,15 @@ exit:
 		zend_abstract_method_call(fbc);
 		fbc = NULL;
 	}
-	if (fbc && UNEXPECTED((fbc->common.fn_flags & ZEND_ACC_CTOR)
-	 && (zobj->ce->ce_flags2 & ZEND_ACC2_VALUE_CLASS))) {
-		/* A struct's constructor is a mutating call: it initializes the
-		 * receiver in place under the borrowed-exclusive $this convention,
-		 * which only object creation can establish. Explicit re-invocation
-		 * is deferred until mutating calls exist (the call site must
-		 * separate a writable receiver first); until then, one loud error
-		 * on every route beats route-dependent discard-or-throw behavior.
-		 * This runs on the resolution slow path only: a throwing resolution
-		 * is never cached, so the inline cache cannot bypass it. */
+	if (fbc && UNEXPECTED(fbc->common.fn_flags2 & ZEND_ACC2_MUTATING)) {
+		/* A mutating callee (today: a struct's constructor) writes its
+		 * receiver in place under the borrowed-exclusive $this convention.
+		 * Explicit invocation is deferred until mutating calls exist (the
+		 * call site must separate a writable receiver first); until then,
+		 * one loud error on every route beats route-dependent
+		 * discard-or-throw behavior. This runs on the resolution slow path
+		 * only: a throwing resolution is never cached, so the inline cache
+		 * cannot bypass it. */
 		zend_throw_error(NULL, "Cannot call the constructor of struct %s explicitly",
 			ZSTR_VAL(zobj->ce->name));
 		fbc = NULL;

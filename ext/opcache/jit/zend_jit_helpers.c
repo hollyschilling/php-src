@@ -2702,9 +2702,9 @@ static zend_object* ZEND_FASTCALL zend_jit_value_class_separate(zval *container)
 
 /* Leave-time check for JIT-compiled value-class constructors: mirrors the
  * HAS_THIS-without-RELEASE_THIS branch of the VM's leave paths. */
-static void ZEND_FASTCALL zend_jit_value_class_ctor_escape(zend_execute_data *execute_data)
+static void ZEND_FASTCALL zend_jit_value_class_this_escape(zend_execute_data *execute_data)
 {
-	zend_check_value_class_ctor_escape(execute_data);
+	zend_check_value_class_this_escape(execute_data);
 }
 
 static void ZEND_FASTCALL zend_jit_invalid_property_assign(zval *container, const char *property_name)

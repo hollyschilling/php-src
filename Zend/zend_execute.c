@@ -1147,15 +1147,15 @@ ZEND_API zend_object* ZEND_FASTCALL zend_value_class_separate_container(zval *co
 			 * (The constructor and set hooks also borrow $this, but hold them
 			 * exclusively, so refcount 1 keeps them off this path -- unless
 			 * $this has already escaped.) */
-			if (UNEXPECTED(ex->func->common.fn_flags & ZEND_ACC_CTOR)) {
-				/* A shared $this in a constructor frame means $this already
-				 * escaped. Separating would send the remaining initialization
-				 * into a discarded copy and mask the escape from the
-				 * return-time check (taking ownership sets RELEASE_THIS, which
-				 * that check reads as a frame that owns its receiver).
-				 * Constructor writes land in place by definition; keep doing
-				 * that -- the refcount stays elevated and the escape check
-				 * throws at return. */
+			if (UNEXPECTED(ex->func->common.fn_flags2 & ZEND_ACC2_MUTATING)) {
+				/* A shared $this in a mutating frame (today: a value class's
+				 * constructor) means $this already escaped. Separating would
+				 * send the remaining writes into a discarded copy and mask
+				 * the escape from the return-time check (taking ownership
+				 * sets RELEASE_THIS, which that check reads as a frame that
+				 * owns its receiver). Mutating writes land in place by
+				 * definition; keep doing that -- the refcount stays elevated
+				 * and the escape check throws at return. */
 				return zobj;
 			}
 			separated = zobj->handlers->clone_obj(zobj);
@@ -1200,14 +1200,17 @@ static zend_always_inline zend_object *zend_value_class_separate(zval *container
  * escape); a refcount above the single reference the result slot holds is
  * exactly a surviving alias. Callers gate on ZEND_CALL_HAS_THIS. Exported for
  * the JIT, whose compiled leave paths run the same check. */
-ZEND_API void ZEND_FASTCALL zend_check_value_class_ctor_escape(zend_execute_data *execute_data)
+ZEND_API ZEND_COLD void ZEND_FASTCALL zend_throw_struct_this_escape(const zend_class_entry *ce, const char *site)
 {
-	if ((EX(func)->common.fn_flags & ZEND_ACC_CTOR)
-	 && EX(func)->common.scope
-	 && (EX(func)->common.scope->ce_flags2 & ZEND_ACC2_VALUE_CLASS)
+	zend_throw_error(NULL, "Cannot export $this from %s of struct %s", site, ZSTR_VAL(ce->name));
+}
+
+ZEND_API void ZEND_FASTCALL zend_check_value_class_this_escape(zend_execute_data *execute_data)
+{
+	if ((EX(func)->common.fn_flags2 & ZEND_ACC2_MUTATING)
 	 && GC_REFCOUNT(Z_OBJ(EX(This))) > 1) {
-		zend_throw_error(NULL, "Cannot export $this from constructor of value class %s",
-			ZSTR_VAL(EX(func)->common.scope->name));
+		zend_throw_struct_this_escape(EX(func)->common.scope,
+			(EX(func)->common.fn_flags & ZEND_ACC_CTOR) ? "the constructor" : "a mutating method");
 	}
 }
 
