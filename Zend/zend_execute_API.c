@@ -851,6 +851,22 @@ zend_result zend_call_function(zend_fcall_info *fci, zend_fcall_info_cache *fci_
 	} else {
 		object_or_called_scope = fci_cache->object;
 		call_info = ZEND_CALL_TOP_FUNCTION | ZEND_CALL_DYNAMIC | ZEND_CALL_HAS_THIS;
+		if (UNEXPECTED(fci_cache->object->ce->ce_flags2 & ZEND_ACC2_VALUE_CLASS)
+		 && !(func->common.fn_flags2 & ZEND_ACC2_MUTATING)
+		 && !func->common.prop_info) {
+			/* A by-value receiver must be owned by the frame so the first
+			 * write separates it: with only the caller's borrowed reference,
+			 * a sole-holder receiver (a closure's capture invoked via
+			 * array_map/usort/...) is written in place and state leaks
+			 * across invocations. Mirrors the VM call paths
+			 * (zend_init_dynamic_call_object, INIT_USER_CALL). Exclusive
+			 * contexts stay borrowed: mutating callees -- today a struct's
+			 * constructor, i.e. fresh-instance construction, shared
+			 * receivers having been rejected below -- and property hooks,
+			 * whose set variant must write the caller's instance in place. */
+			GC_ADDREF(fci_cache->object);
+			call_info |= ZEND_CALL_RELEASE_THIS;
+		}
 	}
 
 	if (UNEXPECTED(func->common.fn_flags & ZEND_ACC_DEPRECATED)) {
