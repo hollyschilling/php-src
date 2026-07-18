@@ -9360,16 +9360,18 @@ ZEND_VM_HOT_HANDLER(184, ZEND_FETCH_THIS, UNUSED, UNUSED)
 	if (EXPECTED(Z_TYPE(EX(This)) == IS_OBJECT)) {
 		zval *result = EX_VAR(opline->result.var);
 
-		if (UNEXPECTED(opline->result_type == IS_VAR)
+		if (UNEXPECTED(opline->extended_value == ZEND_FETCH_THIS_WRITE)
 		 && (Z_OBJCE(EX(This))->ce_flags2 & ZEND_ACC2_VALUE_CLASS)) {
-			/* Write-context $this on a value class (this_guaranteed_exists() is
-			 * false, e.g. a scopeless closure later bound to a struct): hand
-			 * back a writable indirect to the frame's This slot rather than an
-			 * addref'd handle copy. A property write then separates EX(This)
-			 * itself -- so a later read of $this sees the copy -- instead of
-			 * mutating a throwaway that is discarded after the write. For
-			 * reference receivers the handle copy is already coherent, so this
-			 * only changes value classes. */
+			/* $this is the container of a property write and the receiver is
+			 * a value class (this_guaranteed_exists() is false, e.g. a
+			 * scopeless closure later bound to a struct): hand back a writable
+			 * indirect to the frame's This slot rather than an addref'd handle
+			 * copy. The property write then separates EX(This) itself -- so a
+			 * later read of $this sees the copy -- instead of mutating a
+			 * throwaway that is discarded after the write. The compile-time
+			 * marker restricts this to property-write consumers, which
+			 * dereference INDIRECT; other IS_VAR consumers (argument sends)
+			 * keep the handle copy. */
 			ZVAL_INDIRECT(result, &EX(This));
 			ZEND_VM_NEXT_OPCODE();
 		}

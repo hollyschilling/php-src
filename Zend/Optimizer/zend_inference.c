@@ -3766,12 +3766,12 @@ static zend_always_inline zend_result _zend_update_type_info(
 				UPDATE_SSA_OBJ_TYPE(op_array->scope, 1, ssa_op->result_def);
 			}
 			tmp = MAY_BE_RCN|MAY_BE_OBJECT;
-			if (opline->result_type == IS_VAR) {
-				/* Write-context $this: on a value-class receiver the handler
-				 * hands back an INDIRECT into the frame's This slot, so the
-				 * write separates the slot itself (see ZEND_FETCH_THIS in
-				 * zend_vm_def.h). Consumers must be compiled INDIRECT-aware,
-				 * as for FETCH_OBJ_W results. */
+			if (opline->extended_value == ZEND_FETCH_THIS_WRITE) {
+				/* $this as a property-write container: on a value-class
+				 * receiver the handler hands back an INDIRECT into the
+				 * frame's This slot, so the write separates the slot itself
+				 * (see ZEND_FETCH_THIS in zend_vm_def.h). Consumers must be
+				 * compiled INDIRECT-aware, as for FETCH_OBJ_W results. */
 				tmp |= MAY_BE_INDIRECT;
 			}
 			UPDATE_SSA_TYPE(tmp, ssa_op->result_def);

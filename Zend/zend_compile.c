@@ -3176,6 +3176,12 @@ static zend_op *zend_delayed_compile_prop(znode *result, zend_ast *ast, uint32_t
 			if ((type == BP_VAR_R) || (type == BP_VAR_IS)) {
 				opline->result_type = IS_TMP_VAR;
 				obj_node.op_type = IS_TMP_VAR;
+			} else if (type == BP_VAR_W || type == BP_VAR_RW || type == BP_VAR_UNSET) {
+				/* $this is the container of a property write; a value-class
+				 * receiver hands back an INDIRECT so the write separates the
+				 * This slot itself. BP_VAR_FUNC_ARG stays unmarked: its
+				 * by-value branch does not dereference INDIRECT. */
+				opline->extended_value = ZEND_FETCH_THIS_WRITE;
 			}
 		}
 		CG(active_op_array)->fn_flags |= ZEND_ACC_USES_THIS;

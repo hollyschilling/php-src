@@ -1228,6 +1228,13 @@ static zend_always_inline bool zend_check_arg_send_type(const zend_function *zf,
  * it becomes ZEND_ACC2_VALUE_CLASS in ce_flags2 at compile time. */
 #define ZEND_CLASS_IS_VALUE_CLASS 1
 
+/* extended_value of ZEND_FETCH_THIS when its result is the container of a
+ * property write (BP_VAR_W/RW/UNSET). Only then may the handler produce an
+ * INDIRECT into the frame's This slot for a value-class receiver: property
+ * write consumers dereference INDIRECT, argument sends and other IS_VAR
+ * consumers do not. */
+#define ZEND_FETCH_THIS_WRITE 1
+
 /* For "use" AST nodes and the seen symbol table */
 #define ZEND_SYMBOL_CLASS    (1<<0)
 #define ZEND_SYMBOL_FUNCTION (1<<1)
