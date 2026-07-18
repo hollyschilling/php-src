@@ -61,7 +61,7 @@ ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_CCONV zend_jit_leave_func_helper_tai
 		if (UNEXPECTED(call_info & ZEND_CALL_RELEASE_THIS)) {
 			OBJ_RELEASE(Z_OBJ(execute_data->This));
 		} else if (UNEXPECTED(call_info & ZEND_CALL_HAS_THIS)) {
-			zend_check_value_class_ctor_escape(execute_data);
+			zend_check_value_class_this_escape(execute_data);
 		}
 		if (UNEXPECTED(call_info & ZEND_CALL_CLOSURE)) {
 			OBJ_RELEASE(ZEND_CLOSURE_OBJECT(EX(func)));
@@ -99,7 +99,7 @@ ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_CCONV zend_jit_leave_func_helper_tai
 		if (UNEXPECTED(call_info & ZEND_CALL_RELEASE_THIS)) {
 			OBJ_RELEASE(Z_OBJ(execute_data->This));
 		} else if (UNEXPECTED(call_info & ZEND_CALL_HAS_THIS)) {
-			zend_check_value_class_ctor_escape(execute_data);
+			zend_check_value_class_this_escape(execute_data);
 		}
 		if (UNEXPECTED(call_info & ZEND_CALL_CLOSURE)) {
 			OBJ_RELEASE(ZEND_CLOSURE_OBJECT(EX(func)));
@@ -125,7 +125,7 @@ ZEND_OPCODE_HANDLER_RET ZEND_FASTCALL zend_jit_leave_nested_func_helper(ZEND_OPC
 	if (UNEXPECTED(call_info & ZEND_CALL_RELEASE_THIS)) {
 		OBJ_RELEASE(Z_OBJ(execute_data->This));
 	} else if (UNEXPECTED(call_info & ZEND_CALL_HAS_THIS)) {
-		zend_check_value_class_ctor_escape(execute_data);
+		zend_check_value_class_this_escape(execute_data);
 	}
 	if (UNEXPECTED(call_info & ZEND_CALL_CLOSURE)) {
 		OBJ_RELEASE(ZEND_CLOSURE_OBJECT(EX(func)));
@@ -177,7 +177,7 @@ ZEND_OPCODE_HANDLER_RET ZEND_FASTCALL zend_jit_leave_top_func_helper(ZEND_OPCODE
 	if (UNEXPECTED(call_info & ZEND_CALL_RELEASE_THIS)) {
 		OBJ_RELEASE(Z_OBJ(execute_data->This));
 	} else if (UNEXPECTED(call_info & ZEND_CALL_HAS_THIS)) {
-		zend_check_value_class_ctor_escape(execute_data);
+		zend_check_value_class_this_escape(execute_data);
 	}
 	if (UNEXPECTED(call_info & ZEND_CALL_CLOSURE)) {
 		OBJ_RELEASE(ZEND_CLOSURE_OBJECT(EX(func)));

@@ -33,6 +33,6 @@ var_dump($f->n, $f->doubled);
 
 ?>
 --EXPECTF--
-Cannot export $this from constructor of value class Leaky
+Cannot export $this from the constructor of struct Leaky
 int(21)
 int(42)
