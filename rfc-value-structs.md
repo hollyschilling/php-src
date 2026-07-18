@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| **Version** | 0.17 |
+| **Version** | 0.18 |
 | **Date** | 2026-07-14 |
 | **Author** | Holly Schilling, holly.a.schilling@outlook.com |
 | **Status** | Draft |
@@ -32,7 +32,7 @@ var_dump($a->x);    // float(1.0) — $a unaffected
 
 A struct is **a class-like construct with value semantics**: properties (including hooks), constants, a constructor, methods, interfaces, and traits — everything a class has, minus exactly the features that contradict values. Each exclusion is a consequence, not a scoping choice. No `extends`, because a hierarchy is a relationship between handles: struct behavior is composed with traits and its contracts declared with interfaces. No identity, because "same instance" is meaningless when any assignment may copy: `===` compares contents. No references into the interior and no state-simulating or lifecycle magic methods, because a slot inside a value has no stable name, a total, declared shape leaves nothing for `__get` to simulate, and a copy or lifetime hook would observe the engine's sharing decisions; the pure-read magic methods remain available (see Magic methods). And no method can mutate its caller's value, because `$this` — in every context that runs user code — obeys a single refcount-driven rule (see Semantics); the `mutating` opt-in is sketched as far scope (see Future Scope).
 
-Structs are **shallow** values, matching arrays: a property holding an object copies the *handle*, so the object is shared between copies. A struct whose object-typed properties are themselves structs or scalars — or which is declared `readonly` — is a value all the way down.
+Structs are **shallow** values, matching arrays: a property holding an object copies the *handle*, so the object is shared between copies. A struct whose properties hold only structs and scalars is a value all the way down. `readonly` is orthogonal: it freezes the struct's own slots after construction — every copy anyone observes satisfies the constructor's invariants, and a frozen value never physically separates — but it does not reach into a held object's interior (the established shallow-freeze rule).
 
 ## Proposal
 
@@ -313,6 +313,7 @@ tbd
 
 ## Changelog
 
+- 0.18 (2026-07-18): Corrected an introduction overclaim: `readonly` does not make a struct "a value all the way down" (a held object's interior remains mutable through the shared handle, per shallow-freeze); its function is stated precisely — frozen slots, constructor invariants held for the value's lifetime, and copies that never physically separate. Deep value-ness requires value-typed properties, with or without `readonly`.
 - 0.17 (2026-07-18): Magic methods reclassified by the value model (resolving the `__toString` open issue): the pure reads — `__toString` (unlocking `Stringable`), `__invoke`, `__debugInfo`, `__call`, `__callStatic` — are permitted and bind `$this` by value; `__construct` is identified as the mutating member, reachable only through object creation (explicit re-invocation deferred with `mutating` methods); `__serialize`/`__unserialize` deferred with the wire-format open issue (`__unserialize` is a mutating initializer); `__set_state` deferred with `var_export()`. New Magic methods section; implemented in the prototype.
 - 0.16 (2026-07-16): Implementation-driven corrections, no semantic changes. The class flag is `ZEND_ACC2_VALUE_CLASS` in `ce_flags2`, not `ce_flags` (which has one free bit left; `ce_flags2` persists with the class entry at no cost) — the extension-facing name in RFC Impact corrected accordingly. The `__toString` open issue broadened to the other pure-read magic methods, `__invoke` and `__debugInfo`, which enums permit and the prototype currently bans.
 - 0.15 (2026-07-16): Pre-publication fixes: target version pinned to PHP 9.0 (the next cycle); the extension-methods interop note updated for methods being in scope (extensions add methods to structs you do not own, under the same value rules).
