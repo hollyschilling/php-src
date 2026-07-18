@@ -891,7 +891,21 @@ zend_result zend_call_function(zend_fcall_info *fci, zend_fcall_info_cache *fci_
 	} else {
 		object_or_called_scope = fci_cache->object;
 		call_info = ZEND_CALL_TOP_FUNCTION | ZEND_CALL_DYNAMIC | ZEND_CALL_HAS_THIS;
-		pinned_this = zend_object_copy(fci_cache->object);
+		if (UNEXPECTED(fci_cache->object->ce->ce_flags2 & ZEND_ACC2_VALUE_CLASS)
+		 && ((func->common.fn_flags2 & ZEND_ACC2_MUTATING) || func->common.prop_info)) {
+			/* Exclusive-context callees on a value class stay borrowed and
+			 * unpinned: mutating callees -- today a struct's constructor,
+			 * i.e. fresh-instance construction, shared receivers being
+			 * rejected below -- and property hooks, whose set variant must
+			 * write the caller's instance in place. The borrowed-exclusive
+			 * $this convention keys on refcount 1, so pinning would make
+			 * every such write separate (and the ctor escape check
+			 * misfire). The sole reference is the caller's, which it holds
+			 * across the call. By-value receivers are owned by the frame
+			 * once it is pushed, see below. */
+		} else {
+			pinned_this = zend_object_copy(fci_cache->object);
+		}
 	}
 
 	if (UNEXPECTED(func->common.fn_flags & ZEND_ACC_DEPRECATED)) {
@@ -918,6 +932,9 @@ zend_result zend_call_function(zend_fcall_info *fci, zend_fcall_info_cache *fci_
 		zend_throw_error(NULL, "Cannot call the constructor of struct %s explicitly",
 			ZSTR_VAL(fci_cache->object->ce->name));
 		zend_release_fcall_info_cache(fci_cache);
+		if (pinned_this) {
+			OBJ_RELEASE(pinned_this);
+		}
 		return SUCCESS;
 	}
 
@@ -1084,6 +1101,26 @@ cleanup_args:
 		fci_cache->function_handler = NULL;
 	}
 
+	if (UNEXPECTED(ZEND_CALL_INFO(call) & ZEND_CALL_HAS_THIS)
+	 && UNEXPECTED(Z_OBJ(call->This)->ce->ce_flags2 & ZEND_ACC2_VALUE_CLASS)
+	 && !(func->common.fn_flags2 & ZEND_ACC2_MUTATING)
+	 && !func->common.prop_info) {
+		/* A by-value receiver must be owned by the frame so the first
+		 * write separates it: with only the caller's borrowed reference,
+		 * a sole-holder receiver (a closure's capture invoked via
+		 * array_map/usort/...) is written in place and state leaks
+		 * across invocations. The pin above covers the call itself, but
+		 * not a generator body, which runs after the pin is released on
+		 * the frame copied into the generator; the owned reference
+		 * travels with that copy and is released at generator
+		 * destruction. Mirrors the VM call paths
+		 * (zend_init_dynamic_call_object, INIT_USER_CALL). Taken after
+		 * every early exit above so none of them has to release it. */
+		GC_ADDREF(Z_OBJ(call->This));
+		ZEND_ADD_CALL_FLAG(call, ZEND_CALL_RELEASE_THIS);
+	}
+
+
 	const zend_class_entry *orig_fake_scope = EG(fake_scope);
 	EG(fake_scope) = NULL;
 	if (func->type == ZEND_USER_FUNCTION) {
@@ -1148,7 +1185,13 @@ cleanup_args:
 		}
 	}
 
-	if (UNEXPECTED(ZEND_CALL_INFO(call) & ZEND_CALL_RELEASE_THIS)) {
+	/* A user frame releases an owned $this on its VM/JIT leave path, which
+	 * is value-class-aware: a copy-on-write separation can take ownership of
+	 * the fresh copy mid-call and flag the top frame RELEASE_THIS (see
+	 * zend_leave_helper). Only an internal frame, which has no leave path,
+	 * is released here. */
+	if (func->type == ZEND_INTERNAL_FUNCTION
+	 && UNEXPECTED(ZEND_CALL_INFO(call) & ZEND_CALL_RELEASE_THIS)) {
 		OBJ_RELEASE(Z_OBJ(call->This));
 	}
 
