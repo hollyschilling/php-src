@@ -640,6 +640,8 @@ trait_declaration_statement:
 		T_TRAIT { $<num>$ = CG(zend_lineno); }
 		T_STRING backup_doc_comment '{' class_statement_list '}'
 			{ $$ = zend_ast_create_decl(ZEND_AST_CLASS, ZEND_ACC_TRAIT, $<num>2, $4, zend_ast_get_str($3), NULL, NULL, $6, NULL, NULL); }
+	|	class_modifiers T_TRAIT
+			{ $$ = NULL; zend_unexpected_class_modifiers($1, "a trait"); YYERROR; }
 ;
 
 /* Structs are implicitly final and root: no extends_from. Modifiers share the
@@ -663,12 +665,16 @@ interface_declaration_statement:
 		T_INTERFACE { $<num>$ = CG(zend_lineno); }
 		T_STRING interface_extends_list backup_doc_comment '{' class_statement_list '}'
 			{ $$ = zend_ast_create_decl(ZEND_AST_CLASS, ZEND_ACC_INTERFACE, $<num>2, $5, zend_ast_get_str($3), NULL, $4, $7, NULL, NULL); }
+	|	class_modifiers T_INTERFACE
+			{ $$ = NULL; zend_unexpected_class_modifiers($1, "an interface"); YYERROR; }
 ;
 
 enum_declaration_statement:
 		T_ENUM { $<num>$ = CG(zend_lineno); }
 		T_STRING enum_backing_type implements_list backup_doc_comment '{' class_statement_list '}'
 			{ $$ = zend_ast_create_decl(ZEND_AST_CLASS, ZEND_ACC_ENUM|ZEND_ACC_FINAL, $<num>2, $6, zend_ast_get_str($3), NULL, $5, $8, NULL, $4); }
+	|	class_modifiers T_ENUM
+			{ $$ = NULL; zend_unexpected_class_modifiers($1, "an enum"); YYERROR; }
 ;
 
 enum_backing_type:

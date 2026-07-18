@@ -1042,6 +1042,17 @@ uint32_t zend_add_anonymous_class_modifier(uint32_t flags, uint32_t new_flag)
 	return new_flags;
 }
 
+/* Grammar error production support: enum/interface/trait declarations accept
+ * no modifiers; naming the offending modifier beats a bare parse error. */
+ZEND_COLD void zend_unexpected_class_modifiers(uint32_t flags, const char *decl_kind)
+{
+	const char *modifier =
+		(flags & ZEND_ACC_EXPLICIT_ABSTRACT_CLASS) ? "abstract" :
+		(flags & ZEND_ACC_FINAL) ? "final" : "readonly";
+	zend_throw_exception_ex(zend_ce_compile_error, 0,
+		"Cannot use the %s modifier on %s", modifier, decl_kind);
+}
+
 /* Structs share the class_modifiers production so every modifier parses and
  * gets a targeted diagnostic; only readonly is meaningful (structs are
  * implicitly final and never abstract). */

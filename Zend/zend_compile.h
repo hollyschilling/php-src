@@ -946,6 +946,7 @@ zend_ast *zend_negate_num_string(zend_ast *ast);
 uint32_t zend_add_class_modifier(uint32_t flags, uint32_t new_flag);
 uint32_t zend_add_anonymous_class_modifier(uint32_t flags, uint32_t new_flag);
 bool zend_validate_struct_modifiers(uint32_t flags);
+ZEND_COLD void zend_unexpected_class_modifiers(uint32_t flags, const char *decl_kind);
 uint32_t zend_add_member_modifier(uint32_t flags, uint32_t new_flag, zend_modifier_target target);
 
 uint32_t zend_modifier_token_to_flag(zend_modifier_target target, uint32_t flags);
