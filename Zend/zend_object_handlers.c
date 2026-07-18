@@ -758,25 +758,16 @@ static bool zend_call_get_hook(
 		return false;
 	}
 
-	if (UNEXPECTED(zobj->ce->ce_flags2 & ZEND_ACC2_VALUE_CLASS)) {
-		/* Value-class get hook: a read must never mutate the value, so the
-		 * hook runs against a private copy whose writes are discarded when it
-		 * is released. Binding this copy exclusively (refcount 1) means writes
-		 * land in place on the throwaway rather than triggering a further
-		 * separation, and the caller's instance is never touched.
-		 *
-		 * The manual addref/release bracket used for reference classes cannot
-		 * be reused here: a write inside the hook would separate $this into the
-		 * frame, and the bracket's release would then target the stale original
-		 * the caller still holds. */
-		zend_object *copy = zobj->handlers->clone_obj(zobj);
-		zend_call_known_instance_method_with_0_params(get, copy, rv);
-		OBJ_RELEASE(copy);
-	} else {
-		GC_ADDREF(zobj);
-		zend_call_known_instance_method_with_0_params(get, zobj, rv);
-		OBJ_RELEASE(zobj);
-	}
+	/* The bracket also implements value-class get-hook semantics with no
+	 * eager copy: the addref makes the receiver shared, so a hook that
+	 * writes $this lazily separates into the hook frame (which owns and
+	 * releases the copy -- top frames honor RELEASE_THIS), the write is
+	 * discarded, and the bracket's release balances the refcount it added
+	 * to the untouched original. A read never mutates a value, and a
+	 * read-only hook -- the common case -- allocates nothing. */
+	GC_ADDREF(zobj);
+	zend_call_known_instance_method_with_0_params(get, zobj, rv);
+	OBJ_RELEASE(zobj);
 
 	return true;
 }
