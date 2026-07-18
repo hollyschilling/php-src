@@ -11531,26 +11531,22 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_FUNC_CCONV ZEND_NEW_SPEC_CONS
 			init_func_run_time_cache(&constructor->op_array);
 		}
 		/* We are not handling overloaded classes right now */
-		if (UNEXPECTED(ce->ce_flags2 & ZEND_ACC2_VALUE_CLASS)) {
-			/* Value classes bind $this borrowed and exclusive: the constructor
-			 * shares the result slot's single reference (no addref, no
-			 * RELEASE_THIS), so promoted and body writes through $this land in
-			 * place instead of separating. The result slot owns the instance
-			 * across the call; the escape check verifies nothing else grabbed a
-			 * reference by the time the constructor returns. */
-			call = zend_vm_stack_push_call_frame(
-				ZEND_CALL_FUNCTION | ZEND_CALL_HAS_THIS,
-				constructor,
-				opline->extended_value,
-				Z_OBJ_P(result));
-		} else {
-			call = zend_vm_stack_push_call_frame(
-				ZEND_CALL_FUNCTION | ZEND_CALL_RELEASE_THIS | ZEND_CALL_HAS_THIS,
-				constructor,
-				opline->extended_value,
-				Z_OBJ_P(result));
+		/* Value classes bind $this borrowed and exclusive: the constructor
+		 * shares the result slot's single reference (no addref, no
+		 * RELEASE_THIS), so promoted and body writes through $this land in
+		 * place instead of separating. The result slot owns the instance
+		 * across the call; the escape check verifies nothing else grabbed a
+		 * reference by the time the constructor returns. */
+		uint32_t ctor_call_info = ZEND_CALL_FUNCTION | ZEND_CALL_HAS_THIS;
+		if (EXPECTED(!(ce->ce_flags2 & ZEND_ACC2_VALUE_CLASS))) {
 			Z_ADDREF_P(result);
+			ctor_call_info |= ZEND_CALL_RELEASE_THIS;
 		}
+		call = zend_vm_stack_push_call_frame(
+			ctor_call_info,
+			constructor,
+			opline->extended_value,
+			Z_OBJ_P(result));
 	}
 
 	call->prev_execute_data = EX(call);
@@ -30325,26 +30321,22 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_FUNC_CCONV ZEND_NEW_SPEC_VAR_
 			init_func_run_time_cache(&constructor->op_array);
 		}
 		/* We are not handling overloaded classes right now */
-		if (UNEXPECTED(ce->ce_flags2 & ZEND_ACC2_VALUE_CLASS)) {
-			/* Value classes bind $this borrowed and exclusive: the constructor
-			 * shares the result slot's single reference (no addref, no
-			 * RELEASE_THIS), so promoted and body writes through $this land in
-			 * place instead of separating. The result slot owns the instance
-			 * across the call; the escape check verifies nothing else grabbed a
-			 * reference by the time the constructor returns. */
-			call = zend_vm_stack_push_call_frame(
-				ZEND_CALL_FUNCTION | ZEND_CALL_HAS_THIS,
-				constructor,
-				opline->extended_value,
-				Z_OBJ_P(result));
-		} else {
-			call = zend_vm_stack_push_call_frame(
-				ZEND_CALL_FUNCTION | ZEND_CALL_RELEASE_THIS | ZEND_CALL_HAS_THIS,
-				constructor,
-				opline->extended_value,
-				Z_OBJ_P(result));
+		/* Value classes bind $this borrowed and exclusive: the constructor
+		 * shares the result slot's single reference (no addref, no
+		 * RELEASE_THIS), so promoted and body writes through $this land in
+		 * place instead of separating. The result slot owns the instance
+		 * across the call; the escape check verifies nothing else grabbed a
+		 * reference by the time the constructor returns. */
+		uint32_t ctor_call_info = ZEND_CALL_FUNCTION | ZEND_CALL_HAS_THIS;
+		if (EXPECTED(!(ce->ce_flags2 & ZEND_ACC2_VALUE_CLASS))) {
 			Z_ADDREF_P(result);
+			ctor_call_info |= ZEND_CALL_RELEASE_THIS;
 		}
+		call = zend_vm_stack_push_call_frame(
+			ctor_call_info,
+			constructor,
+			opline->extended_value,
+			Z_OBJ_P(result));
 	}
 
 	call->prev_execute_data = EX(call);
@@ -37493,26 +37485,22 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_FUNC_CCONV ZEND_NEW_SPEC_UNUS
 			init_func_run_time_cache(&constructor->op_array);
 		}
 		/* We are not handling overloaded classes right now */
-		if (UNEXPECTED(ce->ce_flags2 & ZEND_ACC2_VALUE_CLASS)) {
-			/* Value classes bind $this borrowed and exclusive: the constructor
-			 * shares the result slot's single reference (no addref, no
-			 * RELEASE_THIS), so promoted and body writes through $this land in
-			 * place instead of separating. The result slot owns the instance
-			 * across the call; the escape check verifies nothing else grabbed a
-			 * reference by the time the constructor returns. */
-			call = zend_vm_stack_push_call_frame(
-				ZEND_CALL_FUNCTION | ZEND_CALL_HAS_THIS,
-				constructor,
-				opline->extended_value,
-				Z_OBJ_P(result));
-		} else {
-			call = zend_vm_stack_push_call_frame(
-				ZEND_CALL_FUNCTION | ZEND_CALL_RELEASE_THIS | ZEND_CALL_HAS_THIS,
-				constructor,
-				opline->extended_value,
-				Z_OBJ_P(result));
+		/* Value classes bind $this borrowed and exclusive: the constructor
+		 * shares the result slot's single reference (no addref, no
+		 * RELEASE_THIS), so promoted and body writes through $this land in
+		 * place instead of separating. The result slot owns the instance
+		 * across the call; the escape check verifies nothing else grabbed a
+		 * reference by the time the constructor returns. */
+		uint32_t ctor_call_info = ZEND_CALL_FUNCTION | ZEND_CALL_HAS_THIS;
+		if (EXPECTED(!(ce->ce_flags2 & ZEND_ACC2_VALUE_CLASS))) {
 			Z_ADDREF_P(result);
+			ctor_call_info |= ZEND_CALL_RELEASE_THIS;
 		}
+		call = zend_vm_stack_push_call_frame(
+			ctor_call_info,
+			constructor,
+			opline->extended_value,
+			Z_OBJ_P(result));
 	}
 
 	call->prev_execute_data = EX(call);
@@ -64529,26 +64517,22 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_CCONV ZEND_NEW_SPEC_CONST_UNU
 			init_func_run_time_cache(&constructor->op_array);
 		}
 		/* We are not handling overloaded classes right now */
-		if (UNEXPECTED(ce->ce_flags2 & ZEND_ACC2_VALUE_CLASS)) {
-			/* Value classes bind $this borrowed and exclusive: the constructor
-			 * shares the result slot's single reference (no addref, no
-			 * RELEASE_THIS), so promoted and body writes through $this land in
-			 * place instead of separating. The result slot owns the instance
-			 * across the call; the escape check verifies nothing else grabbed a
-			 * reference by the time the constructor returns. */
-			call = zend_vm_stack_push_call_frame(
-				ZEND_CALL_FUNCTION | ZEND_CALL_HAS_THIS,
-				constructor,
-				opline->extended_value,
-				Z_OBJ_P(result));
-		} else {
-			call = zend_vm_stack_push_call_frame(
-				ZEND_CALL_FUNCTION | ZEND_CALL_RELEASE_THIS | ZEND_CALL_HAS_THIS,
-				constructor,
-				opline->extended_value,
-				Z_OBJ_P(result));
+		/* Value classes bind $this borrowed and exclusive: the constructor
+		 * shares the result slot's single reference (no addref, no
+		 * RELEASE_THIS), so promoted and body writes through $this land in
+		 * place instead of separating. The result slot owns the instance
+		 * across the call; the escape check verifies nothing else grabbed a
+		 * reference by the time the constructor returns. */
+		uint32_t ctor_call_info = ZEND_CALL_FUNCTION | ZEND_CALL_HAS_THIS;
+		if (EXPECTED(!(ce->ce_flags2 & ZEND_ACC2_VALUE_CLASS))) {
 			Z_ADDREF_P(result);
+			ctor_call_info |= ZEND_CALL_RELEASE_THIS;
 		}
+		call = zend_vm_stack_push_call_frame(
+			ctor_call_info,
+			constructor,
+			opline->extended_value,
+			Z_OBJ_P(result));
 	}
 
 	call->prev_execute_data = EX(call);
@@ -83223,26 +83207,22 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_CCONV ZEND_NEW_SPEC_VAR_UNUSE
 			init_func_run_time_cache(&constructor->op_array);
 		}
 		/* We are not handling overloaded classes right now */
-		if (UNEXPECTED(ce->ce_flags2 & ZEND_ACC2_VALUE_CLASS)) {
-			/* Value classes bind $this borrowed and exclusive: the constructor
-			 * shares the result slot's single reference (no addref, no
-			 * RELEASE_THIS), so promoted and body writes through $this land in
-			 * place instead of separating. The result slot owns the instance
-			 * across the call; the escape check verifies nothing else grabbed a
-			 * reference by the time the constructor returns. */
-			call = zend_vm_stack_push_call_frame(
-				ZEND_CALL_FUNCTION | ZEND_CALL_HAS_THIS,
-				constructor,
-				opline->extended_value,
-				Z_OBJ_P(result));
-		} else {
-			call = zend_vm_stack_push_call_frame(
-				ZEND_CALL_FUNCTION | ZEND_CALL_RELEASE_THIS | ZEND_CALL_HAS_THIS,
-				constructor,
-				opline->extended_value,
-				Z_OBJ_P(result));
+		/* Value classes bind $this borrowed and exclusive: the constructor
+		 * shares the result slot's single reference (no addref, no
+		 * RELEASE_THIS), so promoted and body writes through $this land in
+		 * place instead of separating. The result slot owns the instance
+		 * across the call; the escape check verifies nothing else grabbed a
+		 * reference by the time the constructor returns. */
+		uint32_t ctor_call_info = ZEND_CALL_FUNCTION | ZEND_CALL_HAS_THIS;
+		if (EXPECTED(!(ce->ce_flags2 & ZEND_ACC2_VALUE_CLASS))) {
 			Z_ADDREF_P(result);
+			ctor_call_info |= ZEND_CALL_RELEASE_THIS;
 		}
+		call = zend_vm_stack_push_call_frame(
+			ctor_call_info,
+			constructor,
+			opline->extended_value,
+			Z_OBJ_P(result));
 	}
 
 	call->prev_execute_data = EX(call);
@@ -90391,26 +90371,22 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_CCONV ZEND_NEW_SPEC_UNUSED_UN
 			init_func_run_time_cache(&constructor->op_array);
 		}
 		/* We are not handling overloaded classes right now */
-		if (UNEXPECTED(ce->ce_flags2 & ZEND_ACC2_VALUE_CLASS)) {
-			/* Value classes bind $this borrowed and exclusive: the constructor
-			 * shares the result slot's single reference (no addref, no
-			 * RELEASE_THIS), so promoted and body writes through $this land in
-			 * place instead of separating. The result slot owns the instance
-			 * across the call; the escape check verifies nothing else grabbed a
-			 * reference by the time the constructor returns. */
-			call = zend_vm_stack_push_call_frame(
-				ZEND_CALL_FUNCTION | ZEND_CALL_HAS_THIS,
-				constructor,
-				opline->extended_value,
-				Z_OBJ_P(result));
-		} else {
-			call = zend_vm_stack_push_call_frame(
-				ZEND_CALL_FUNCTION | ZEND_CALL_RELEASE_THIS | ZEND_CALL_HAS_THIS,
-				constructor,
-				opline->extended_value,
-				Z_OBJ_P(result));
+		/* Value classes bind $this borrowed and exclusive: the constructor
+		 * shares the result slot's single reference (no addref, no
+		 * RELEASE_THIS), so promoted and body writes through $this land in
+		 * place instead of separating. The result slot owns the instance
+		 * across the call; the escape check verifies nothing else grabbed a
+		 * reference by the time the constructor returns. */
+		uint32_t ctor_call_info = ZEND_CALL_FUNCTION | ZEND_CALL_HAS_THIS;
+		if (EXPECTED(!(ce->ce_flags2 & ZEND_ACC2_VALUE_CLASS))) {
 			Z_ADDREF_P(result);
+			ctor_call_info |= ZEND_CALL_RELEASE_THIS;
 		}
+		call = zend_vm_stack_push_call_frame(
+			ctor_call_info,
+			constructor,
+			opline->extended_value,
+			Z_OBJ_P(result));
 	}
 
 	call->prev_execute_data = EX(call);
