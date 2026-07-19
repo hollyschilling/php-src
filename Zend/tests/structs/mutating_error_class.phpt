@@ -3,7 +3,7 @@ Structs: mutating methods cannot be declared outside a struct
 --FILE--
 <?php
 class C {
-    public mutating function f(): void {}
+    public function f() mutating: void {}
 }
 ?>
 --EXPECTF--

@@ -5,7 +5,7 @@ Structs: mutating methods are not reachable through callables
 
 struct Counter {
     public function __construct(public int $n = 0) {}
-    public mutating function inc(): void { $this->n++; }
+    public function inc() mutating: void { $this->n++; }
 }
 
 $c = new Counter();

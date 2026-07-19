@@ -352,10 +352,11 @@ typedef struct _zend_oparray_context {
 /* Function Flags (unused: 30)                            |     |     |     */
 /* ==============                                         |     |     |     */
 /*                                                        |     |     |     */
-/* `mutating` declaration modifier. Transport only: set   |     |     |     */
-/* by the modifier parser, translated to (and replaced    |     |     |     */
-/* by) ZEND_ACC2_MUTATING in zend_begin_method_decl, so   |     |     |     */
-/* bit 30 never appears on a finished op_array.           |     |     |     */
+/* `mutating` receiver marker (`function m() mutating:    |     |     |     */
+/* T`). Transport only: set by the signature parser,      |     |     |     */
+/* translated to (and replaced by) ZEND_ACC2_MUTATING in  |     |     |     */
+/* zend_begin_method_decl, so bit 30 never appears on a   |     |     |     */
+/* finished op_array.                                     |     |     |     */
 #define ZEND_ACC_MUTATING                (1 << 30) /*     |  X  |     |     */
 /*                                                        |     |     |     */
 /* Function returning by reference                        |     |     |     */

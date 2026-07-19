@@ -7,7 +7,7 @@ interface Advances {
 }
 struct Cursor implements Advances {
     public int $pos = 0;
-    public mutating function advance(): void { $this->pos++; }
+    public function advance() mutating: void { $this->pos++; }
 }
 ?>
 --EXPECTF--

@@ -158,7 +158,6 @@ static YYSIZE_T zend_yytnamerr(char*, const char*);
 %token <ident> T_PROTECTED_SET "'protected(set)'"
 %token <ident> T_PUBLIC_SET    "'public(set)'"
 %token <ident> T_READONLY      "'readonly'"
-%token <ident> T_MUTATING      "'mutating'"
 %token <ident> T_VAR           "'var'"
 %token <ident> T_UNSET         "'unset'"
 %token <ident> T_ISSET         "'isset'"
@@ -293,6 +292,7 @@ static YYSIZE_T zend_yytnamerr(char*, const char*);
 
 %type <num> returns_ref function fn is_reference is_variadic property_modifiers property_hook_modifiers
 %type <num> method_modifiers class_const_modifiers member_modifier optional_cpp_modifiers
+%type <num> optional_receiver_modifier
 %type <num> class_modifiers class_modifier anonymous_class_modifiers anonymous_class_modifiers_optional use_type backup_fn_flags
 
 %type <ptr> backup_lex_pos
@@ -319,7 +319,7 @@ reserved_non_modifiers:
 
 semi_reserved:
 	  reserved_non_modifiers
-	| T_STATIC | T_ABSTRACT | T_FINAL | T_PRIVATE | T_PROTECTED | T_PUBLIC | T_READONLY | T_MUTATING
+	| T_STATIC | T_ABSTRACT | T_FINAL | T_PRIVATE | T_PROTECTED | T_PUBLIC | T_READONLY
 ;
 
 ampersand:
@@ -581,11 +581,6 @@ unset_variable:
 function_name:
 		T_STRING { $$ = $1; }
 	|	T_READONLY {
-			zval zv;
-			if (zend_lex_tstring(&zv, $1) == FAILURE) { YYABORT; }
-			$$ = zend_ast_create_zval(&zv);
-		}
-	|	T_MUTATING {
 			zval zv;
 			if (zend_lex_tstring(&zv, $1) == FAILURE) { YYABORT; }
 			$$ = zend_ast_create_zval(&zv);
@@ -1028,9 +1023,9 @@ attributed_class_statement:
 			{ $$ = zend_ast_create(ZEND_AST_CLASS_CONST_GROUP, $4, NULL, $3);
 			  $$->attr = $1; }
 	|	method_modifiers function returns_ref identifier backup_doc_comment '(' parameter_list ')'
-		return_type backup_fn_flags method_body backup_fn_flags
-			{ $$ = zend_ast_create_decl(ZEND_AST_METHOD, $3 | $1 | $12, $2, $5,
-				  zend_ast_get_str($4), $7, NULL, $11, $9, NULL); CG(extra_fn_flags) = $10; }
+		optional_receiver_modifier return_type backup_fn_flags method_body backup_fn_flags
+			{ $$ = zend_ast_create_decl(ZEND_AST_METHOD, $3 | $1 | $9 | $13, $2, $5,
+				  zend_ast_get_str($4), $7, NULL, $12, $10, NULL); CG(extra_fn_flags) = $11; }
 	|	enum_case { $$ = $1; }
 ;
 
@@ -1078,22 +1073,11 @@ trait_alias:
 			  $$ = zend_ast_create(ZEND_AST_TRAIT_ALIAS, $1, zend_ast_create_zval(&zv)); }
 	|	trait_method_reference T_AS member_modifier identifier
 			{ uint32_t modifiers = zend_modifier_token_to_flag(ZEND_MODIFIER_TARGET_METHOD, $3);
-			  /* ZEND_ACC_MUTATING does not fit the 16-bit ast attr; reject by token. */
-			  if ($3 == T_MUTATING) {
-				  zend_throw_exception(zend_ce_compile_error,
-					  "Cannot use \"mutating\" as method modifier in trait alias", 0);
-				  modifiers = 0;
-			  }
 			  $$ = zend_ast_create_ex(ZEND_AST_TRAIT_ALIAS, modifiers, $1, $4);
 			  /* identifier nonterminal can cause allocations, so we need to free the node */
 			  if (!modifiers) { zend_ast_destroy($$); YYERROR; } }
 	|	trait_method_reference T_AS member_modifier
 			{ uint32_t modifiers = zend_modifier_token_to_flag(ZEND_MODIFIER_TARGET_METHOD, $3);
-			  if ($3 == T_MUTATING) {
-				  zend_throw_exception(zend_ce_compile_error,
-					  "Cannot use \"mutating\" as method modifier in trait alias", 0);
-				  modifiers = 0;
-			  }
 			  $$ = zend_ast_create_ex(ZEND_AST_TRAIT_ALIAS, modifiers, $1, NULL);
 			  /* identifier nonterminal can cause allocations, so we need to free the node */
 			  if (!modifiers) { zend_ast_destroy($$); YYERROR; } }
@@ -1132,6 +1116,26 @@ method_modifiers:
 			  if (!($$ & ZEND_ACC_PPP_MASK)) { $$ |= ZEND_ACC_PUBLIC; } }
 ;
 
+/* The receiver marker sits between the parameter list and the return type
+ * (`function m() mutating: void`), where no identifier can otherwise appear,
+ * so `mutating` needs no token and reserves nothing. */
+optional_receiver_modifier:
+		%empty
+			{ $$ = 0; }
+	|	T_STRING {
+			zend_string *marker = zend_ast_get_str($1);
+			bool ok = zend_string_equals_literal_ci(marker, "mutating");
+			if (!ok) {
+				zend_throw_exception_ex(zend_ce_compile_error, 0,
+					"Unexpected identifier \"%s\" in method signature, expecting \"mutating\"",
+					ZSTR_VAL(marker));
+			}
+			zend_ast_destroy($1);
+			if (!ok) { YYERROR; }
+			$$ = ZEND_ACC_MUTATING;
+		}
+;
+
 class_const_modifiers:
 		%empty
 			{ $$ = ZEND_ACC_PUBLIC; }
@@ -1159,7 +1163,6 @@ member_modifier:
 	|	T_ABSTRACT				{ $$ = T_ABSTRACT; }
 	|	T_FINAL					{ $$ = T_FINAL; }
 	|	T_READONLY				{ $$ = T_READONLY; }
-	|	T_MUTATING				{ $$ = T_MUTATING; }
 ;
 
 property_list:
@@ -1494,11 +1497,6 @@ function_call:
 		name argument_list
 			{ $$ = zend_ast_create(ZEND_AST_CALL, $1, $2); }
 	|	T_READONLY argument_list {
-			zval zv;
-			if (zend_lex_tstring(&zv, $1) == FAILURE) { YYABORT; }
-			$$ = zend_ast_create(ZEND_AST_CALL, zend_ast_create_zval(&zv), $2);
-		}
-	|	T_MUTATING argument_list {
 			zval zv;
 			if (zend_lex_tstring(&zv, $1) == FAILURE) { YYABORT; }
 			$$ = zend_ast_create(ZEND_AST_CALL, zend_ast_create_zval(&zv), $2);

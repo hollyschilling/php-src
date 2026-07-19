@@ -5,7 +5,7 @@ Structs: mutating calls require a lendable receiver slot
 
 struct Counter {
     public function __construct(public int $n = 0) {}
-    public mutating function inc(): void { $this->n++; }
+    public function inc() mutating: void { $this->n++; }
     public function copy(): Counter { return $this; }
     public function tryIndirect(): void { $this->inc(); }
     public function tryIndirectStatic(): void { self::inc(); }

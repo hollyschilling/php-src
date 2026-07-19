@@ -887,8 +887,6 @@ static const char *zend_modifier_token_to_string(uint32_t token)
 			return "final";
 		case T_READONLY:
 			return "readonly";
-		case T_MUTATING:
-			return "mutating";
 		case T_ABSTRACT:
 			return "abstract";
 		case T_PUBLIC_SET:
@@ -922,11 +920,6 @@ uint32_t zend_modifier_token_to_flag(zend_modifier_target target, uint32_t token
 		case T_READONLY:
 			if (target == ZEND_MODIFIER_TARGET_PROPERTY || target == ZEND_MODIFIER_TARGET_CPP) {
 				return ZEND_ACC_READONLY;
-			}
-			break;
-		case T_MUTATING:
-			if (target == ZEND_MODIFIER_TARGET_METHOD) {
-				return ZEND_ACC_MUTATING;
 			}
 			break;
 		case T_ABSTRACT:
@@ -9392,8 +9385,6 @@ static void zend_check_trait_alias_modifiers(uint32_t attr) /* {{{ */
 	} else if (attr & ZEND_ACC_ABSTRACT) {
 		zend_error_noreturn(E_COMPILE_ERROR, "Cannot use \"abstract\" as method modifier in trait alias");
 	}
-	/* T_MUTATING is rejected in the trait_alias grammar action: ZEND_ACC_MUTATING
-	 * does not fit the 16-bit ast attr this function receives. */
 }
 /* }}} */
 

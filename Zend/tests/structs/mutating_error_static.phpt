@@ -4,7 +4,7 @@ Structs: mutating methods cannot be static
 <?php
 struct S {
     public int $x = 0;
-    public static mutating function f(): void {}
+    public static function f() mutating: void {}
 }
 ?>
 --EXPECTF--
