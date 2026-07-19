@@ -208,6 +208,7 @@ static YYSIZE_T zend_yytnamerr(char*, const char*);
 %token T_SPACESHIP "'<=>'"
 %token T_SL "'<<'"
 %token T_SR "'>>'"
+%token T_GENERIC_OPEN "generic '<'"
 %token T_INC "'++'"
 %token T_DEC "'--'"
 %token T_INT_CAST    "'(int)'"
@@ -281,6 +282,7 @@ static YYSIZE_T zend_yytnamerr(char*, const char*);
 %type <ast> identifier type_expr_without_static union_type_without_static_element union_type_without_static intersection_type_without_static
 %type <ast> inline_function union_type_element union_type intersection_type
 %type <ast> generic_params generic_param_list generic_param
+%type <ast> generic_type_args generic_arg_list generic_arg
 %type <ast> attributed_statement attributed_top_statement attributed_class_statement attributed_parameter
 %type <ast> attribute_decl attribute attributes attribute_group namespace_declaration_name
 %type <ast> match match_arm_list non_empty_match_arm_list match_arm match_arm_cond_list
@@ -612,7 +614,26 @@ class_declaration_statement:
 
 generic_params:
 		%empty							{ $$ = NULL; }
-	|	'<' generic_param_list '>'		{ $$ = $2; }
+	|	generic_open generic_param_list '>'		{ $$ = $2; }
+;
+
+generic_open:
+		'<'
+	|	T_GENERIC_OPEN
+;
+
+generic_type_args:
+		generic_open generic_arg_list '>'	{ $$ = $2; }
+;
+
+generic_arg_list:
+		generic_arg							{ $$ = zend_ast_create_list(1, ZEND_AST_GENERIC_ARG_LIST, $1); }
+	|	generic_arg_list ',' generic_arg	{ $$ = zend_ast_list_add($1, $3); }
+;
+
+generic_arg:
+		name								{ $$ = $1; }
+	|	name generic_type_args				{ $$ = zend_ast_create(ZEND_AST_GENERIC_TYPE, $1, $2); }
 ;
 
 generic_param_list:
@@ -893,6 +914,8 @@ type_without_static:
 		T_ARRAY		{ $$ = zend_ast_create_ex(ZEND_AST_TYPE, IS_ARRAY); }
 	|	T_CALLABLE	{ $$ = zend_ast_create_ex(ZEND_AST_TYPE, IS_CALLABLE); }
 	|	name		{ $$ = $1; }
+	|	name generic_type_args
+			{ $$ = zend_ast_create(ZEND_AST_GENERIC_TYPE, $1, $2); }
 ;
 
 union_type_without_static_element:
@@ -1489,6 +1512,8 @@ class_name:
 			{ zval zv; ZVAL_INTERNED_STR(&zv, ZSTR_KNOWN(ZEND_STR_STATIC));
 			  $$ = zend_ast_create_zval_ex(&zv, ZEND_NAME_NOT_FQ); }
 	|	name { $$ = $1; }
+	|	name T_GENERIC_OPEN generic_arg_list '>'
+			{ $$ = zend_ast_create(ZEND_AST_GENERIC_TYPE, $1, $3); }
 ;
 
 class_name_reference:

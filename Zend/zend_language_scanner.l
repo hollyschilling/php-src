@@ -194,10 +194,92 @@ void startup_scanner(void)
 	zend_stack_init(&SCNG(nest_location_stack), sizeof(zend_nest_location));
 	zend_ptr_stack_init(&SCNG(heredoc_label_stack));
 	SCNG(heredoc_scan_ahead) = 0;
+	SCNG(generic_depth) = 0;
 }
 
 static void heredoc_label_dtor(zend_heredoc_label *heredoc_label) {
     efree(heredoc_label->label);
+}
+
+#define ZEND_GENERIC_SCAN_MAX 1024
+
+/* Bounded lookahead deciding whether a lone '<' opens a generic type-argument
+ * list. `cursor` points just past the '<'. The region must have the exact
+ * shape of a static type-argument list -- optionally \-qualified type names,
+ * commas, whitespace and balanced nested <...> -- closed by the matching '>'
+ * whose follow character can plausibly continue a generic type reference.
+ * Variables, literals and operators reject immediately, so comparisons are
+ * left untouched; the token shapes this claims (A<B>$x, A<B,C>(...), ...)
+ * are chained-comparison parse errors in current PHP. */
+static bool zend_scan_is_generic_open(const unsigned char *cursor, const unsigned char *limit)
+{
+	const unsigned char *end = cursor + ZEND_GENERIC_SCAN_MAX < limit
+		? cursor + ZEND_GENERIC_SCAN_MAX : limit;
+	uint32_t depth = 1;
+	enum { EXPECT_ELEM, IN_NAME, AFTER_ELEM } state = EXPECT_ELEM;
+
+	while (cursor < end && depth > 0) {
+		unsigned char c = *cursor++;
+
+		if (c == ' ' || c == '\t' || c == '\r' || c == '\n') {
+			if (state == IN_NAME) {
+				state = AFTER_ELEM;
+			}
+		} else if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_' || c >= 0x80) {
+			if (state == AFTER_ELEM) {
+				return false; /* two adjacent names: not a type-argument list */
+			}
+			state = IN_NAME;
+		} else if (c >= '0' && c <= '9') {
+			if (state != IN_NAME) {
+				return false; /* names cannot start with a digit; literals reject */
+			}
+		} else if (c == '\\') {
+			if (state == AFTER_ELEM) {
+				return false;
+			}
+			state = IN_NAME;
+		} else if (c == ',') {
+			if (state == EXPECT_ELEM) {
+				return false;
+			}
+			state = EXPECT_ELEM;
+		} else if (c == '<') {
+			if (state == EXPECT_ELEM) {
+				return false;
+			}
+			depth++;
+			state = EXPECT_ELEM;
+		} else if (c == '>') {
+			if (state == EXPECT_ELEM) {
+				return false; /* empty argument list */
+			}
+			depth--;
+			state = AFTER_ELEM;
+		} else {
+			return false;
+		}
+	}
+	if (depth != 0) {
+		return false;
+	}
+
+	/* Follow check: the closed list must be followed by a character that can
+	 * continue a generic type reference (call parens, ::, a variable, a
+	 * return-type body, list glue or a union/intersection separator). */
+	while (cursor < limit && (*cursor == ' ' || *cursor == '\t' || *cursor == '\r' || *cursor == '\n')) {
+		cursor++;
+	}
+	if (cursor >= limit) {
+		return false;
+	}
+	switch (*cursor) {
+		case '(': case '$': case ':': case '{': case '>':
+		case ',': case ')': case ';': case '=': case '|': case '&':
+			return true;
+		default:
+			return false;
+	}
 }
 
 void shutdown_scanner(void)
@@ -227,6 +309,9 @@ ZEND_API void zend_save_lexical_state(zend_lex_state *lex_state)
 
 	lex_state->nest_location_stack = SCNG(nest_location_stack);
 	zend_stack_init(&SCNG(nest_location_stack), sizeof(zend_nest_location));
+
+	lex_state->generic_depth = SCNG(generic_depth);
+	SCNG(generic_depth) = 0;
 
 	lex_state->heredoc_label_stack = SCNG(heredoc_label_stack);
 	zend_ptr_stack_init(&SCNG(heredoc_label_stack));
@@ -266,6 +351,8 @@ ZEND_API void zend_restore_lexical_state(zend_lex_state *lex_state)
 
 	zend_stack_destroy(&SCNG(nest_location_stack));
 	SCNG(nest_location_stack) = lex_state->nest_location_stack;
+
+	SCNG(generic_depth) = lex_state->generic_depth;
 
 	zend_ptr_stack_clean(&SCNG(heredoc_label_stack), (void (*)(void *)) &heredoc_label_dtor, 1);
 	zend_ptr_stack_destroy(&SCNG(heredoc_label_stack));
@@ -1943,7 +2030,28 @@ OPTIONAL_WHITESPACE_OR_COMMENTS ({WHITESPACE}|{MULTI_LINE_COMMENT}|{SINGLE_LINE_
 }
 
 <ST_IN_SCRIPTING>">>" {
+	if (SCNG(generic_depth) > 0) {
+		/* '>>' closes two nested generic argument lists; split it. */
+		yyless(1);
+		SCNG(generic_depth)--;
+		RETURN_TOKEN('>');
+	}
 	RETURN_TOKEN(T_SR);
+}
+
+<ST_IN_SCRIPTING>"<" {
+	if (zend_scan_is_generic_open((const unsigned char *) YYCURSOR, (const unsigned char *) YYLIMIT)) {
+		SCNG(generic_depth)++;
+		RETURN_TOKEN(T_GENERIC_OPEN);
+	}
+	RETURN_TOKEN('<');
+}
+
+<ST_IN_SCRIPTING>">" {
+	if (SCNG(generic_depth) > 0) {
+		SCNG(generic_depth)--;
+	}
+	RETURN_TOKEN('>');
 }
 
 <ST_IN_SCRIPTING>"&"{OPTIONAL_WHITESPACE_OR_COMMENTS}("$"|"...") {

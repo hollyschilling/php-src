@@ -599,6 +599,11 @@ const T_SL = UNKNOWN;
 const T_SR = UNKNOWN;
 /**
  * @var int
+ * @cvalue T_GENERIC_OPEN
+ */
+const T_GENERIC_OPEN = UNKNOWN;
+/**
+ * @var int
  * @cvalue T_INC
  */
 const T_INC = UNKNOWN;

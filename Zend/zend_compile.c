@@ -38,6 +38,7 @@
 #include "zend_call_stack.h"
 #include "zend_frameless_function.h"
 #include "zend_property_hooks.h"
+#include "zend_smart_str.h"
 
 #define SET_NODE(target, src) do { \
 		target ## _type = (src)->op_type; \
@@ -1226,8 +1227,13 @@ static zend_string *zend_resolve_class_name(zend_string *name, uint32_t type) /*
 }
 /* }}} */
 
+static zend_string *zend_resolve_generic_type_ast(zend_ast *ast);
+
 static zend_string *zend_resolve_class_name_ast(zend_ast *ast) /* {{{ */
 {
+	if (ast->kind == ZEND_AST_GENERIC_TYPE) {
+		return zend_string_copy(zend_resolve_generic_type_ast(ast));
+	}
 	const zval *class_name = zend_ast_get_zval(ast);
 	if (Z_TYPE_P(class_name) != IS_STRING) {
 		zend_error_noreturn(E_COMPILE_ERROR, "Illegal class name");
@@ -1776,6 +1782,10 @@ static uint32_t zend_get_class_fetch_type_ast(zend_ast *name_ast) /* {{{ */
 
 static zend_string *zend_resolve_const_class_name_reference(zend_ast *ast, const char *type)
 {
+	if (UNEXPECTED(ast->kind == ZEND_AST_GENERIC_TYPE)) {
+		zend_error_noreturn(E_COMPILE_ERROR,
+			"Cannot use a generic type as %s (not yet supported)", type);
+	}
 	zend_string *class_name = zend_ast_get_str(ast);
 	if (ZEND_FETCH_CLASS_DEFAULT != zend_get_class_fetch_type_ast(ast)) {
 		zend_error_noreturn(E_COMPILE_ERROR,
@@ -2861,6 +2871,13 @@ static inline void zend_set_class_name_op1(zend_op *opline, znode *class_node) /
 static void zend_compile_class_ref(znode *result, zend_ast *name_ast, uint32_t fetch_flags) /* {{{ */
 {
 	uint32_t fetch_type;
+
+	if (name_ast->kind == ZEND_AST_GENERIC_TYPE) {
+		/* Mangled generic names are already fully qualified. */
+		result->op_type = IS_CONST;
+		ZVAL_STR(&result->u.constant, zend_resolve_class_name_ast(name_ast));
+		return;
+	}
 
 	if (name_ast->kind != ZEND_AST_ZVAL) {
 		znode name_node;
@@ -7361,9 +7378,116 @@ ZEND_API void zend_set_function_arg_flags(zend_function *func) /* {{{ */
 }
 /* }}} */
 
+static bool zend_is_active_template_param(const zend_string *name)
+{
+	if (CG(active_class_entry) && CG(active_class_entry)->generic_params) {
+		const zend_generic_params *gp = CG(active_class_entry)->generic_params;
+		for (uint32_t i = 0; i < gp->num_params; i++) {
+			if (zend_string_equals_ci(gp->params[i].name, name)) {
+				return true;
+			}
+		}
+	}
+	return false;
+}
+
+static void zend_append_generic_type_ref(smart_str *buf, zend_ast *ast);
+
+static void zend_append_generic_arg(smart_str *buf, zend_ast *ast)
+{
+	if (ast->kind == ZEND_AST_GENERIC_TYPE) {
+		zend_append_generic_type_ref(buf, ast);
+		return;
+	}
+
+	zend_string *name = zend_ast_get_str(ast);
+	if (ast->attr == ZEND_NAME_NOT_FQ) {
+		if (zend_is_active_template_param(name)) {
+			zend_error_noreturn(E_COMPILE_ERROR,
+				"Cannot use type parameter %s as a generic type argument "
+				"(type arguments must be concrete in this version)", ZSTR_VAL(name));
+		}
+		uint8_t type_code = zend_lookup_builtin_type_by_name(name);
+		if (type_code != 0) {
+			/* Canonical scalar spellings so use-aliases and case converge. */
+			switch (type_code) {
+				case IS_LONG:   smart_str_appendl(buf, "int", 3); return;
+				case IS_DOUBLE: smart_str_appendl(buf, "float", 5); return;
+				case IS_STRING: smart_str_appendl(buf, "string", 6); return;
+				case _IS_BOOL:  smart_str_appendl(buf, "bool", 4); return;
+				default:
+					zend_error_noreturn(E_COMPILE_ERROR,
+						"Built-in type \"%s\" cannot be used as a generic type argument",
+						ZSTR_VAL(name));
+			}
+		}
+	}
+	if (zend_get_class_fetch_type_ast(ast) != ZEND_FETCH_CLASS_DEFAULT) {
+		zend_error_noreturn(E_COMPILE_ERROR,
+			"Cannot use \"%s\" as a generic type argument, as it is reserved", ZSTR_VAL(name));
+	}
+
+	zend_string *resolved = zend_resolve_class_name_ast(ast);
+	zend_assert_valid_class_name(resolved, "a generic type argument");
+	smart_str_append(buf, resolved);
+	zend_string_release(resolved);
+}
+
+static void zend_append_generic_type_ref(smart_str *buf, zend_ast *ast)
+{
+	zend_ast *base_ast = ast->child[0];
+	const zend_ast_list *args = zend_ast_get_list(ast->child[1]);
+	zend_string *base_name = zend_ast_get_str(base_ast);
+
+	if (zend_get_class_fetch_type_ast(base_ast) != ZEND_FETCH_CLASS_DEFAULT) {
+		zend_error_noreturn(E_COMPILE_ERROR,
+			"Cannot use \"%s\" as a generic class name, as it is reserved", ZSTR_VAL(base_name));
+	}
+	if (base_ast->attr == ZEND_NAME_NOT_FQ) {
+		if (zend_is_active_template_param(base_name)) {
+			zend_error_noreturn(E_COMPILE_ERROR,
+				"Type parameter %s cannot take type arguments", ZSTR_VAL(base_name));
+		}
+		if (zend_lookup_builtin_type_by_name(base_name)) {
+			zend_error_noreturn(E_COMPILE_ERROR,
+				"Built-in type \"%s\" cannot take type arguments", ZSTR_VAL(base_name));
+		}
+	}
+
+	zend_string *resolved = zend_resolve_class_name_ast(base_ast);
+	zend_assert_valid_class_name(resolved, "a generic class name");
+	smart_str_append(buf, resolved);
+	zend_string_release(resolved);
+
+	smart_str_appendc(buf, '<');
+	for (uint32_t i = 0; i < args->children; i++) {
+		if (i) {
+			smart_str_appendc(buf, ',');
+		}
+		zend_append_generic_arg(buf, args->child[i]);
+	}
+	smart_str_appendc(buf, '>');
+}
+
+/* Resolve a ZEND_AST_GENERIC_TYPE reference to its canonical mangled name:
+ * fully-qualified base and class arguments (use-aliases applied), canonical
+ * scalar spellings, no whitespace, declared argument order. The interned
+ * result is both the display name and (lowercased) the class-table key. */
+static zend_string *zend_resolve_generic_type_ast(zend_ast *ast)
+{
+	smart_str buf = {0};
+	zend_append_generic_type_ref(&buf, ast);
+	return zend_new_interned_string(smart_str_extract(&buf));
+}
+
 static zend_type zend_compile_single_typename(zend_ast *ast)
 {
 	ZEND_ASSERT(!(ast->attr & ZEND_TYPE_NULLABLE));
+	if (ast->kind == ZEND_AST_GENERIC_TYPE) {
+		zend_string *mangled = zend_resolve_generic_type_ast(ast);
+		zend_alloc_ce_cache(mangled);
+		return (zend_type) ZEND_TYPE_INIT_CLASS(zend_string_copy(mangled), /* allow null */ false, 0);
+	}
 	if (ast->kind == ZEND_AST_TYPE) {
 		if (ast->attr == IS_STATIC && !CG(active_class_entry) && zend_is_scope_known()) {
 			zend_error_noreturn(E_COMPILE_ERROR,
@@ -11509,6 +11633,13 @@ static void zend_compile_class_const(znode *result, zend_ast *ast) /* {{{ */
 static void zend_compile_class_name(znode *result, const zend_ast *ast) /* {{{ */
 {
 	zend_ast *class_ast = ast->child[0];
+
+	if (class_ast->kind == ZEND_AST_GENERIC_TYPE) {
+		/* Vec<Foo>::class yields the canonical mangled name, no class load. */
+		result->op_type = IS_CONST;
+		ZVAL_STR(&result->u.constant, zend_resolve_class_name_ast(class_ast));
+		return;
+	}
 
 	if (zend_try_compile_const_expr_resolve_class_name(&result->u.constant, class_ast)) {
 		result->op_type = IS_CONST;
