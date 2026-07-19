@@ -2095,6 +2095,7 @@ ZEND_API void zend_initialize_class_data(zend_class_entry *ce, bool nullify_hand
 	ce->attributes = NULL;
 	ce->enum_backing_type = IS_UNDEF;
 	ce->backed_enum_table = NULL;
+	ce->generic_params = NULL;
 
 	if (nullify_handlers) {
 		ce->constructor = NULL;
@@ -7396,8 +7397,34 @@ static zend_type zend_compile_single_typename(zend_ast *ast)
 			zend_string *class_name = type_name;
 
 			if (fetch_type == ZEND_FETCH_CLASS_DEFAULT) {
+				/* Inside a generic template, a bare single-label name matching a
+				 * type parameter denotes that parameter; it shadows any class of
+				 * the same name and must not be namespace-qualified. */
+				if (ast->attr == ZEND_NAME_NOT_FQ
+						&& CG(active_class_entry)
+						&& CG(active_class_entry)->generic_params
+						&& !memchr(ZSTR_VAL(type_name), '\\', ZSTR_LEN(type_name))) {
+					const zend_generic_params *gp = CG(active_class_entry)->generic_params;
+					for (uint32_t i = 0; i < gp->num_params; i++) {
+						if (zend_string_equals_ci(gp->params[i].name, type_name)) {
+							return (zend_type) ZEND_TYPE_INIT_CLASS(
+								zend_string_copy(gp->params[i].name), /* allow null */ false, 0);
+						}
+					}
+				}
 				class_name = zend_resolve_class_name_ast(ast);
 				zend_assert_valid_class_name(class_name, "a type name");
+				if (CG(active_class_entry) && CG(active_class_entry)->generic_params) {
+					const zend_generic_params *gp = CG(active_class_entry)->generic_params;
+					for (uint32_t i = 0; i < gp->num_params; i++) {
+						if (zend_string_equals_ci(gp->params[i].name, class_name)) {
+							zend_error_noreturn(E_COMPILE_ERROR,
+								"Cannot reference class %s inside generic template %s "
+								"because the name is used by a type parameter",
+								ZSTR_VAL(class_name), ZSTR_VAL(CG(active_class_entry)->name));
+						}
+					}
+				}
 			} else {
 				ZEND_ASSERT(fetch_type == ZEND_FETCH_CLASS_SELF || fetch_type == ZEND_FETCH_CLASS_PARENT);
 
@@ -9546,13 +9573,62 @@ static void zend_compile_enum_backing_type(zend_class_entry *ce, zend_ast *enum_
 	zend_type_release(type, 0);
 }
 
+static void zend_compile_generic_params(zend_class_entry *ce, const zend_ast *params_ast)
+{
+	const zend_ast_list *list = zend_ast_get_list((zend_ast *) params_ast);
+	zend_generic_params *generic_params;
+
+	ZEND_ASSERT(list->children > 0);
+
+	generic_params = zend_arena_alloc(&CG(arena),
+		sizeof(zend_generic_params) + (list->children - 1) * sizeof(zend_generic_param));
+	generic_params->num_params = list->children;
+
+	for (uint32_t i = 0; i < list->children; i++) {
+		const zend_ast *param_ast = list->child[i];
+		zend_string *param_name = zend_ast_get_str(param_ast->child[0]);
+		zend_ast *bound_ast = param_ast->child[1];
+
+		if (zend_lookup_builtin_type_by_name(param_name)) {
+			zend_error_noreturn(E_COMPILE_ERROR,
+				"Cannot use built-in type \"%s\" as a generic type parameter name",
+				ZSTR_VAL(param_name));
+		}
+		zend_assert_valid_class_name(param_name, "a generic type parameter name");
+
+		for (uint32_t j = 0; j < i; j++) {
+			if (zend_string_equals_ci(generic_params->params[j].name, param_name)) {
+				zend_error_noreturn(E_COMPILE_ERROR,
+					"Duplicate generic type parameter %s", ZSTR_VAL(param_name));
+			}
+		}
+
+		generic_params->params[i].name = zend_new_interned_string(zend_string_copy(param_name));
+		if (bound_ast) {
+			zend_string *bound_name =
+				zend_resolve_const_class_name_reference(bound_ast, "an interface name");
+			generic_params->params[i].bound_name = zend_new_interned_string(bound_name);
+		} else {
+			generic_params->params[i].bound_name = NULL;
+		}
+	}
+
+	ce->ce_flags2 |= ZEND_ACC2_GENERIC_TEMPLATE;
+	ce->generic_params = generic_params;
+}
+
 static void zend_compile_class_decl(znode *result, const zend_ast *ast, bool toplevel) /* {{{ */
 {
 	const zend_ast_decl *decl = (const zend_ast_decl *) ast;
 	zend_ast *extends_ast = decl->child[0];
 	zend_ast *implements_ast = decl->child[1];
 	zend_ast *stmt_ast = decl->child[2];
-	zend_ast *enum_backing_type_ast = decl->child[4];
+	/* Slot 4 holds the backing type for enums and the generic type-parameter
+	 * list for classes/interfaces. */
+	zend_ast *enum_backing_type_ast =
+		(decl->flags & ZEND_ACC_ENUM) ? decl->child[4] : NULL;
+	zend_ast *generic_params_ast =
+		(decl->flags & ZEND_ACC_ENUM) ? NULL : decl->child[4];
 	zend_string *name, *lcname;
 	zend_class_entry *ce = zend_arena_alloc(&CG(arena), sizeof(zend_class_entry));
 	zend_op *opline;
@@ -9627,6 +9703,10 @@ static void zend_compile_class_decl(znode *result, const zend_ast *ast, bool top
 	if (UNEXPECTED((decl->flags & ZEND_ACC_ANON_CLASS))) {
 		/* Serialization is not supported for anonymous classes */
 		ce->ce_flags |= ZEND_ACC_NOT_SERIALIZABLE;
+	}
+
+	if (generic_params_ast) {
+		zend_compile_generic_params(ce, generic_params_ast);
 	}
 
 	if (extends_ast) {

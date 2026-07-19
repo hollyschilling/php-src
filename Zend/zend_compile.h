@@ -340,10 +340,17 @@ typedef struct _zend_oparray_context {
 /* Class cannot be serialized or unserialized             |     |     |     */
 #define ZEND_ACC_NOT_SERIALIZABLE        (1 << 29) /*  X  |     |     |     */
 /*                                                        |     |     |     */
-/* Class Flags 2 (ce_flags2) (unused: 0-31)               |     |     |     */
+/* Class Flags 2 (ce_flags2) (unused: 0, 3-31)            |     |     |     */
 /* =========================                              |     |     |     */
 /*                                                        |     |     |     */
 /* #define ZEND_ACC2_EXAMPLE             (1 << 0)      X  |     |     |     */
+/*                                                        |     |     |     */
+/* Generic class template (uninstantiable; stamps         |     |     |     */
+/* monomorphized instantiations)                          |     |     |     */
+#define ZEND_ACC2_GENERIC_TEMPLATE       (1 << 1)  /*  X  |     |     |     */
+/*                                                        |     |     |     */
+/* Stamped instantiation of a generic template            |     |     |     */
+#define ZEND_ACC2_GENERIC_INSTANCE       (1 << 2)  /*  X  |     |     |     */
 /*                                                        |     |     |     */
 /* Function Flags (unused: 30)                            |     |     |     */
 /* ==============                                         |     |     |     */
