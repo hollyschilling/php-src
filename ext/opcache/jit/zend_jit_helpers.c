@@ -170,6 +170,29 @@ static zend_function* ZEND_FASTCALL zend_jit_find_method_helper(zend_object *obj
 				*obj_ptr = zend_value_class_separate_container(container);
 				return fbc;
 			}
+		} else if ((opline->op1_type & (IS_VAR|IS_TMP_VAR)) && EXPECTED(obj == *obj_ptr)) {
+			zval *op1 = EX_VAR(opline->op1.var);
+
+			if (Z_TYPE_P(op1) == IS_INDIRECT) {
+				/* Scoped borrow (ZEND_FETCH_OBJ_RECEIVER): separate the value
+				 * in the caller's slot. The emitted INDIRECT deref already
+				 * addref'd the object for the frame, so the separation must
+				 * read the slot's count alone: drop that reference around it,
+				 * then restore it on the ORIGINAL either way --
+				 * zend_jit_find_method_tmp_helper swaps the accounting when
+				 * *obj_ptr changed (addref new, delref old), and the restored
+				 * reference is what its delref consumes; when nothing was
+				 * separated it simply remains the frame's reference. */
+				zval *slot = Z_INDIRECT_P(op1);
+
+				if (EXPECTED(Z_TYPE_P(slot) == IS_OBJECT)
+				 && EXPECTED(Z_OBJ_P(slot) == obj)) {
+					GC_DELREF(obj);
+					*obj_ptr = zend_value_class_separate_container(slot);
+					GC_ADDREF(obj);
+					return fbc;
+				}
+			}
 		} else if (opline->op1_type == IS_UNUSED) {
 			if (EXPECTED(EX(func)->common.fn_flags2 & ZEND_ACC2_MUTATING)) {
 				/* Nested $this chain: stays borrowed. */
