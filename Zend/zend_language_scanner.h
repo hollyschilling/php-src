@@ -33,6 +33,7 @@ typedef struct _zend_lex_state {
 	zend_stack state_stack;
 	zend_ptr_stack heredoc_label_stack;
 	zend_stack nest_location_stack; /* for syntax error reporting */
+	uint32_t generic_depth;
 
 	zend_file_handle *in;
 	uint32_t lineno;

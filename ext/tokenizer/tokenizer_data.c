@@ -142,6 +142,7 @@ char *get_token_type_name(int token_type)
 		case T_SPACESHIP: return "T_SPACESHIP";
 		case T_SL: return "T_SL";
 		case T_SR: return "T_SR";
+		case T_GENERIC_OPEN: return "T_GENERIC_OPEN";
 		case T_INC: return "T_INC";
 		case T_DEC: return "T_DEC";
 		case T_INT_CAST: return "T_INT_CAST";
