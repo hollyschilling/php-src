@@ -436,7 +436,7 @@ typedef struct _zend_oparray_context {
 /* fresh slot); the `mutating` method modifier will set it  |     |     |   */
 /* from the declaration. Implies a value-class scope, so    |     |     |   */
 /* call sites need no separate ce_flags2 test.              |     |     |   */
-#define ZEND_ACC2_MUTATING               (1 << 1)  /*     |  X  |     |     */
+#define ZEND_ACC2_MUTATING               (1 << 2)  /*     |  X  |     |     */
 
 #define ZEND_ACC_PPP_MASK  (ZEND_ACC_PUBLIC | ZEND_ACC_PROTECTED | ZEND_ACC_PRIVATE)
 #define ZEND_ACC_PPP_SET_MASK  (ZEND_ACC_PUBLIC_SET | ZEND_ACC_PROTECTED_SET | ZEND_ACC_PRIVATE_SET)
