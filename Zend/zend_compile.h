@@ -1060,6 +1060,10 @@ ZEND_API zend_string *zend_type_to_string(zend_type type);
 #define ZEND_FETCH_CLASS_AUTO		4
 #define ZEND_FETCH_CLASS_INTERFACE	5
 #define ZEND_FETCH_CLASS_TRAIT		6
+/* Resolve through the executing scope's generic binding; the type-parameter
+ * index is carried in the bits at ZEND_FETCH_CLASS_TYPE_PARAM_SHIFT. */
+#define ZEND_FETCH_CLASS_TYPE_PARAM	7
+#define ZEND_FETCH_CLASS_TYPE_PARAM_SHIFT 16
 #define ZEND_FETCH_CLASS_MASK        0x0f
 #define ZEND_FETCH_CLASS_NO_AUTOLOAD 0x80
 #define ZEND_FETCH_CLASS_SILENT      0x0100

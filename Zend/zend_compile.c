@@ -2869,6 +2869,31 @@ static inline void zend_set_class_name_op1(zend_op *opline, znode *class_node) /
 }
 /* }}} */
 
+/* If the AST is a bare single-label name matching a type parameter of the
+ * class currently being compiled, return its index; otherwise (uint32_t)-1. */
+static uint32_t zend_compile_type_param_index(const zend_ast *name_ast)
+{
+	if (name_ast->kind != ZEND_AST_ZVAL || name_ast->attr != ZEND_NAME_NOT_FQ
+			|| !CG(active_class_entry) || !CG(active_class_entry)->generic_params) {
+		return (uint32_t) -1;
+	}
+	const zval *zv = zend_ast_get_zval((zend_ast *) name_ast);
+	if (Z_TYPE_P(zv) != IS_STRING) {
+		return (uint32_t) -1;
+	}
+	zend_string *name = Z_STR_P(zv);
+	if (memchr(ZSTR_VAL(name), '\\', ZSTR_LEN(name))) {
+		return (uint32_t) -1;
+	}
+	const zend_generic_params *gp = CG(active_class_entry)->generic_params;
+	for (uint32_t i = 0; i < gp->num_params; i++) {
+		if (zend_string_equals_ci(gp->params[i].name, name)) {
+			return i;
+		}
+	}
+	return (uint32_t) -1;
+}
+
 static void zend_compile_class_ref(znode *result, zend_ast *name_ast, uint32_t fetch_flags) /* {{{ */
 {
 	uint32_t fetch_type;
@@ -2877,6 +2902,16 @@ static void zend_compile_class_ref(znode *result, zend_ast *name_ast, uint32_t f
 		/* Mangled generic names are already fully qualified. */
 		result->op_type = IS_CONST;
 		ZVAL_STR(&result->u.constant, zend_resolve_class_name_ast(name_ast));
+		return;
+	}
+
+	uint32_t param_idx = zend_compile_type_param_index(name_ast);
+	if (param_idx != (uint32_t) -1) {
+		/* new T() / instanceof T / T::... resolve through the executing
+		 * scope's generic binding; opcodes stay shared with the template. */
+		result->op_type = IS_UNUSED;
+		result->u.op.num = ZEND_FETCH_CLASS_TYPE_PARAM | fetch_flags
+			| (param_idx << ZEND_FETCH_CLASS_TYPE_PARAM_SHIFT);
 		return;
 	}
 
@@ -11654,6 +11689,15 @@ static void zend_compile_class_name(znode *result, const zend_ast *ast) /* {{{ *
 		/* Vec<Foo>::class yields the canonical mangled name, no class load. */
 		result->op_type = IS_CONST;
 		ZVAL_STR(&result->u.constant, zend_resolve_class_name_ast(class_ast));
+		return;
+	}
+
+	uint32_t param_idx = zend_compile_type_param_index(class_ast);
+	if (param_idx != (uint32_t) -1) {
+		/* T::class resolves at runtime through the scope's generic binding. */
+		zend_op *opline = zend_emit_op_tmp(result, ZEND_FETCH_CLASS_NAME, NULL, NULL);
+		opline->op1.num = ZEND_FETCH_CLASS_TYPE_PARAM
+			| (param_idx << ZEND_FETCH_CLASS_TYPE_PARAM_SHIFT);
 		return;
 	}
 

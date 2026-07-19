@@ -1764,6 +1764,30 @@ check_fetch_type:
 				return NULL;
 			}
 			return ce;
+		case ZEND_FETCH_CLASS_TYPE_PARAM: {
+			uint32_t param_idx = fetch_type >> ZEND_FETCH_CLASS_TYPE_PARAM_SHIFT;
+			scope = zend_get_executed_scope();
+			if (UNEXPECTED(!scope || !scope->generic_binding)) {
+				zend_throw_or_error(fetch_type, NULL,
+					"Cannot resolve a type parameter when no generic binding is in scope");
+				return NULL;
+			}
+			ZEND_ASSERT(param_idx < scope->generic_binding->num_args);
+			zend_type arg = scope->generic_binding->args[param_idx];
+			if (UNEXPECTED(!ZEND_TYPE_HAS_NAME(arg))) {
+				zend_string *type_str = zend_type_to_string(arg);
+				zend_throw_or_error(fetch_type, NULL,
+					"Cannot use scalar type argument %s as a class", ZSTR_VAL(type_str));
+				zend_string_release(type_str);
+				return NULL;
+			}
+			ce = zend_lookup_class_ex(ZEND_TYPE_NAME(arg), NULL, fetch_type);
+			if (!ce) {
+				report_class_fetch_error(ZEND_TYPE_NAME(arg), fetch_type);
+				return NULL;
+			}
+			return ce;
+		}
 		case ZEND_FETCH_CLASS_AUTO: {
 				fetch_sub_type = zend_get_class_fetch_type(class_name);
 				if (UNEXPECTED(fetch_sub_type != ZEND_FETCH_CLASS_DEFAULT)) {
