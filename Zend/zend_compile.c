@@ -9604,9 +9604,11 @@ static void zend_compile_generic_params(zend_class_entry *ce, const zend_ast *pa
 		}
 
 		generic_params->params[i].name = zend_new_interned_string(zend_string_copy(param_name));
+		generic_params->params[i].bound_kind = param_ast->attr;
 		if (bound_ast) {
-			zend_string *bound_name =
-				zend_resolve_const_class_name_reference(bound_ast, "an interface name");
+			zend_string *bound_name = zend_resolve_const_class_name_reference(bound_ast,
+				param_ast->attr == ZEND_GENERIC_BOUND_EXTENDS
+					? "a generic bound class name" : "a generic bound interface name");
 			generic_params->params[i].bound_name = zend_new_interned_string(bound_name);
 		} else {
 			generic_params->params[i].bound_name = NULL;

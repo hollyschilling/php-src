@@ -623,7 +623,10 @@ generic_param_list:
 
 generic_param:
 		T_STRING						{ $$ = zend_ast_create(ZEND_AST_GENERIC_PARAM, $1, NULL); }
-	|	T_STRING T_IMPLEMENTS name		{ $$ = zend_ast_create(ZEND_AST_GENERIC_PARAM, $1, $3); }
+	|	T_STRING T_IMPLEMENTS name
+			{ $$ = zend_ast_create_ex(ZEND_AST_GENERIC_PARAM, ZEND_GENERIC_BOUND_IMPLEMENTS, $1, $3); }
+	|	T_STRING T_EXTENDS name
+			{ $$ = zend_ast_create_ex(ZEND_AST_GENERIC_PARAM, ZEND_GENERIC_BOUND_EXTENDS, $1, $3); }
 ;
 
 class_modifiers:

@@ -1068,6 +1068,11 @@ ZEND_API zend_string *zend_type_to_string(zend_type type);
 #define ZEND_NAME_NOT_FQ   1
 #define ZEND_NAME_RELATIVE 2
 
+/* Bound kind on a ZEND_AST_GENERIC_PARAM node (attr) and zend_generic_param */
+#define ZEND_GENERIC_BOUND_NONE       0
+#define ZEND_GENERIC_BOUND_IMPLEMENTS 1
+#define ZEND_GENERIC_BOUND_EXTENDS    2
+
 /* ZEND_FETCH_ flags in class name AST of new const expression must not clash with ZEND_NAME_ flags */
 #define ZEND_CONST_EXPR_NEW_FETCH_TYPE_SHIFT 2
 
