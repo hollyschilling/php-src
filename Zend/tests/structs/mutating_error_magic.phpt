@@ -4,7 +4,7 @@ Structs: magic methods (other than the constructor) cannot be mutating
 <?php
 struct S {
     public int $x = 0;
-    public mutating function __invoke(): void {}
+    public function __invoke() mutating: void {}
 }
 ?>
 --EXPECTF--

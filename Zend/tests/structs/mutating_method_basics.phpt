@@ -5,9 +5,9 @@ Structs: mutating methods write a variable receiver in place, separating shared 
 
 struct Counter {
     public function __construct(public int $n = 0) {}
-    public mutating function inc(): void { $this->n++; }
-    public mutating function add(int $k): void { $this->n += $k; }
-    public mutating function incTwice(): void { $this->inc(); self::inc(); }
+    public function inc() mutating: void { $this->n++; }
+    public function add(int $k) mutating: void { $this->n += $k; }
+    public function incTwice() mutating: void { $this->inc(); self::inc(); }
 }
 
 // Exclusive receiver: writes land in the caller's variable.
@@ -50,7 +50,7 @@ var_dump($counters[0]->n, $counters[1]->n);
 // Non-mutating methods on the same struct still bind $this by value.
 struct Probe {
     public int $x = 0;
-    public mutating function set(int $v): void { $this->x = $v; }
+    public function set(int $v) mutating: void { $this->x = $v; }
     public function tryLeak(): int { $this->x = 99; return $this->x; }
 }
 $p = new Probe();

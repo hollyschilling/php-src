@@ -4,7 +4,7 @@ Structs: traits may declare mutating methods for struct consumers; the color tra
 <?php
 
 trait Bumps {
-    public mutating function bump(): void { $this->n++; }
+    public function bump() mutating: void { $this->n++; }
 }
 
 struct Counter {

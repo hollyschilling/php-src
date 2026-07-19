@@ -359,11 +359,6 @@ const T_PUBLIC_SET = UNKNOWN;
 const T_READONLY = UNKNOWN;
 /**
  * @var int
- * @cvalue T_MUTATING
- */
-const T_MUTATING = UNKNOWN;
-/**
- * @var int
  * @cvalue T_VAR
  */
 const T_VAR = UNKNOWN;
