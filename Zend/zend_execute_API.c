@@ -894,9 +894,9 @@ zend_result zend_call_function(zend_fcall_info *fci, zend_fcall_info_cache *fci_
 		if (UNEXPECTED(fci_cache->object->ce->ce_flags2 & ZEND_ACC2_VALUE_CLASS)
 		 && ((func->common.fn_flags2 & ZEND_ACC2_MUTATING) || func->common.prop_info)) {
 			/* Exclusive-context callees on a value class stay borrowed and
-			 * unpinned: mutating callees -- today a struct's constructor,
-			 * i.e. fresh-instance construction, shared receivers being
-			 * rejected below -- and property hooks, whose set variant must
+			 * unpinned: mutating callees -- a struct's constructor or a
+			 * mutating method, shared receivers being rejected below -- and
+			 * property hooks, whose set variant must
 			 * write the caller's instance in place. The borrowed-exclusive
 			 * $this convention keys on refcount 1, so pinning would make
 			 * every such write separate (and the ctor escape check
@@ -923,14 +923,19 @@ zend_result zend_call_function(zend_fcall_info *fci, zend_fcall_info_cache *fci_
 	if (UNEXPECTED(func->common.fn_flags2 & ZEND_ACC2_MUTATING)
 	 && fci_cache->object
 	 && GC_REFCOUNT(fci_cache->object) > 1) {
-		/* A mutating callee (today: a struct's constructor) writes its
-		 * receiver in place under the borrowed-exclusive $this convention,
-		 * which this route cannot establish for a shared receiver. Reject it
-		 * as the VM's method-resolution path does. Fresh-instance
-		 * construction (ReflectionClass::newInstance, internal object
-		 * creation) holds the sole reference and passes borrowed. */
-		zend_throw_error(NULL, "Cannot call the constructor of struct %s explicitly",
-			ZSTR_VAL(fci_cache->object->ce->name));
+		/* A mutating callee writes its receiver in place under the
+		 * borrowed-exclusive $this convention, which this route cannot
+		 * establish for a shared receiver: only ZEND_INIT_METHOD_CALL can
+		 * separate the caller's slot. Fresh-instance construction
+		 * (ReflectionClass::newInstance, internal object creation) holds the
+		 * sole reference and passes borrowed. */
+		if (func->common.fn_flags & ZEND_ACC_CTOR) {
+			zend_throw_error(NULL, "Cannot call the constructor of struct %s explicitly",
+				ZSTR_VAL(fci_cache->object->ce->name));
+		} else {
+			zend_throw_error(NULL, "Cannot call mutating method %s::%s() on a shared instance",
+				ZSTR_VAL(fci_cache->object->ce->name), ZSTR_VAL(func->common.function_name));
+		}
 		zend_release_fcall_info_cache(fci_cache);
 		if (pinned_this) {
 			OBJ_RELEASE(pinned_this);

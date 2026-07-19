@@ -155,6 +155,37 @@ static zend_function* ZEND_FASTCALL zend_jit_find_method_helper(zend_object *obj
 		zend_init_func_run_time_cache(&fbc->op_array);
 	}
 
+	if (UNEXPECTED(fbc->common.fn_flags2 & ZEND_ACC2_MUTATING)) {
+		/* VM parity for ZEND_INIT_METHOD_CALL's receiver validation. The
+		 * emitted code rebinds $this from *obj_ptr after this call, so
+		 * separating the caller's slot here gives the frame the same
+		 * exclusive receiver the interpreter would bind. Mutating callees
+		 * never enter the inline cache, so this resolver is their only
+		 * JIT route. */
+		if (opline->op1_type == IS_CV && EXPECTED(obj == *obj_ptr)) {
+			zval *container = EX_VAR(opline->op1.var);
+			ZVAL_DEREF(container);
+			if (EXPECTED(Z_TYPE_P(container) == IS_OBJECT)
+			 && EXPECTED(Z_OBJ_P(container) == obj)) {
+				*obj_ptr = zend_value_class_separate_container(container);
+				return fbc;
+			}
+		} else if (opline->op1_type == IS_UNUSED) {
+			if (EXPECTED(EX(func)->common.fn_flags2 & ZEND_ACC2_MUTATING)) {
+				/* Nested $this chain: stays borrowed. */
+				return fbc;
+			}
+			zend_throw_error(NULL,
+				"Cannot call mutating method %s::%s() on $this in a non-mutating method",
+				ZSTR_VAL(obj->ce->name), ZSTR_VAL(fbc->common.function_name));
+			return NULL;
+		}
+		zend_throw_error(NULL,
+			"Cannot call mutating method %s::%s() on a temporary value",
+			ZSTR_VAL(obj->ce->name), ZSTR_VAL(fbc->common.function_name));
+		return NULL;
+	}
+
 	if (UNEXPECTED(obj != *obj_ptr)) {
 		return fbc;
 	}
@@ -233,6 +264,7 @@ static zend_function* ZEND_FASTCALL zend_jit_find_static_method_helper(zend_exec
 			return NULL;
 		}
 		if (EXPECTED(!(fbc->common.fn_flags & (ZEND_ACC_CALL_VIA_TRAMPOLINE|ZEND_ACC_NEVER_CACHE))) &&
+			EXPECTED(!(fbc->common.fn_flags2 & ZEND_ACC2_MUTATING)) &&
 			EXPECTED(!(fbc->common.scope->ce_flags & ZEND_ACC_TRAIT))) {
 			CACHE_POLYMORPHIC_PTR(opline->result.num, ce, fbc);
 		}
@@ -252,6 +284,21 @@ static zend_function* ZEND_FASTCALL zend_jit_find_static_method_helper(zend_exec
 		if (EXPECTED(fbc->type == ZEND_USER_FUNCTION) && UNEXPECTED(!RUN_TIME_CACHE(&fbc->op_array))) {
 			zend_init_func_run_time_cache(&fbc->op_array);
 		}
+	}
+
+	/* VM parity for ZEND_INIT_STATIC_METHOD_CALL's $this rule: a mutating
+	 * callee that would bind the frame's $this requires a mutating caller
+	 * (the borrow convention). Receivers that do not bind $this fall through
+	 * to the ordinary non-static-call error. */
+	if (UNEXPECTED(fbc->common.fn_flags2 & ZEND_ACC2_MUTATING)
+	 && !(fbc->common.fn_flags & ZEND_ACC_STATIC)
+	 && Z_TYPE(EX(This)) == IS_OBJECT
+	 && instanceof_function(Z_OBJCE(EX(This)), ce)
+	 && UNEXPECTED(!(EX(func)->common.fn_flags2 & ZEND_ACC2_MUTATING))) {
+		zend_throw_error(NULL,
+			"Cannot call mutating method %s::%s() on $this in a non-mutating method",
+			ZSTR_VAL(Z_OBJ(EX(This))->ce->name), ZSTR_VAL(fbc->common.function_name));
+		return NULL;
 	}
 
 	return fbc;

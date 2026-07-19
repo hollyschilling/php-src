@@ -2072,19 +2072,11 @@ exit:
 		zend_abstract_method_call(fbc);
 		fbc = NULL;
 	}
-	if (fbc && UNEXPECTED(fbc->common.fn_flags2 & ZEND_ACC2_MUTATING)) {
-		/* A mutating callee (today: a struct's constructor) writes its
-		 * receiver in place under the borrowed-exclusive $this convention.
-		 * Explicit invocation is deferred until mutating calls exist (the
-		 * call site must separate a writable receiver first); until then,
-		 * one loud error on every route beats route-dependent
-		 * discard-or-throw behavior. This runs on the resolution slow path
-		 * only: a throwing resolution is never cached, so the inline cache
-		 * cannot bypass it. */
-		zend_throw_error(NULL, "Cannot call the constructor of struct %s explicitly",
-			ZSTR_VAL(zobj->ce->name));
-		fbc = NULL;
-	}
+	/* Mutating callees (struct constructors and `mutating` methods) resolve
+	 * normally here: ZEND_INIT_METHOD_CALL validates and separates the
+	 * receiver after resolution, and every route that cannot lend a writable
+	 * receiver (callables, dynamic calls, first-class callables) enforces its
+	 * own ban post-resolution. */
 	if (UNEXPECTED(!key)) {
 		ZSTR_ALLOCA_FREE(lc_method_name, use_heap);
 	}
