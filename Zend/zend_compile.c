@@ -8605,9 +8605,13 @@ static zend_string *zend_begin_method_decl(zend_op_array *op_array, zend_string 
 	}
 
 	if (fn_flags & ZEND_ACC_MUTATING) {
-		/* Traits cannot be checked here: whether the consumer is a struct is
-		 * only known at flattening (zend_add_trait_method). */
-		if (!(ce->ce_flags2 & ZEND_ACC2_VALUE_CLASS) && !(ce->ce_flags & ZEND_ACC_TRAIT)) {
+		/* Structs declare mutating implementations; interfaces declare
+		 * mutating requirements (permission, not obligation -- see the
+		 * effect-variance rule in do_inheritance_check_on_method). Traits
+		 * cannot be checked here: whether the consumer is a struct is only
+		 * known at flattening (zend_add_trait_method). */
+		if (!(ce->ce_flags2 & ZEND_ACC2_VALUE_CLASS)
+		 && !(ce->ce_flags & (ZEND_ACC_TRAIT|ZEND_ACC_INTERFACE))) {
 			zend_error_noreturn(E_COMPILE_ERROR,
 				"Cannot declare mutating method %s::%s() outside a struct",
 				ZSTR_VAL(ce->name), ZSTR_VAL(name));

@@ -1187,6 +1187,25 @@ static inheritance_status do_inheritance_check_on_method(
 			ZEND_FN_SCOPE_NAME(parent), ZSTR_VAL(child->common.function_name), ZEND_FN_SCOPE_NAME(child));
 	}
 
+	/* Effect variance: along any subtyping edge -- implements, interface
+	 * extends interface, trait abstract requirements -- `mutating` may be
+	 * removed, never added. An uncolored requirement is a guarantee callers
+	 * rely on; a colored one is permission an implementation need not use.
+	 * Constructors are exempt: their mutating role is unreachable through
+	 * dispatch. */
+	if ((flags & ZEND_INHERITANCE_CHECK_PROTO)
+	 && UNEXPECTED((child->common.fn_flags2 & ZEND_ACC2_MUTATING)
+		&& !(parent->common.fn_flags2 & ZEND_ACC2_MUTATING)
+		&& !(child_flags & ZEND_ACC_CTOR))) {
+		if (flags & ZEND_INHERITANCE_CHECK_SILENT) {
+			return INHERITANCE_ERROR;
+		}
+		zend_error_at_noreturn(E_COMPILE_ERROR, func_filename(child), func_lineno(child),
+			"Mutating method %s::%s() cannot satisfy the non-mutating requirement %s::%s()",
+			ZEND_FN_SCOPE_NAME(child), ZSTR_VAL(child->common.function_name),
+			ZEND_FN_SCOPE_NAME(parent), ZSTR_VAL(child->common.function_name));
+	}
+
 	if ((flags & ZEND_INHERITANCE_SET_CHILD_CHANGED)
 	 && (parent_flags & (ZEND_ACC_PRIVATE|ZEND_ACC_CHANGED))) {
 		SEPARATE_METHOD();
@@ -2369,7 +2388,12 @@ static void zend_add_trait_method(zend_class_entry *ce, zend_string *name, zend_
 	zend_function *new_fn;
 
 	if (UNEXPECTED((fn->common.fn_flags2 & ZEND_ACC2_MUTATING)
+	 && !(fn->common.fn_flags & ZEND_ACC_ABSTRACT)
 	 && !(ce->ce_flags2 & ZEND_ACC2_VALUE_CLASS))) {
+		/* A concrete mutating body needs a struct consumer. An abstract
+		 * colored member is only a requirement -- permission the consumer's
+		 * implementation need not use -- and is valid anywhere; the
+		 * effect-variance edge rule governs whatever satisfies it. */
 		zend_error_noreturn(E_COMPILE_ERROR,
 			"%s %s cannot use mutating method %s::%s(); mutating methods require a struct",
 			zend_get_object_type_case(ce, true), ZSTR_VAL(ce->name),
@@ -3088,27 +3112,8 @@ static void zend_verify_value_class(const zend_class_entry *ce) /* {{{ */
 		}
 	} ZEND_HASH_FOREACH_END();
 
-	/* Effect variance: a mutating implementation cannot satisfy an interface
-	 * requirement — interface callers must never face the mutating call's
-	 * receiver restrictions. The constructor is exempt: its mutating role is
-	 * reachable only through object creation, never through the interface. */
-	if (ce->num_interfaces) {
-		ZEND_HASH_MAP_FOREACH_STR_KEY_PTR(&ce->function_table, lcname, func) {
-			if (lcname == NULL
-			 || !(func->common.fn_flags2 & ZEND_ACC2_MUTATING)
-			 || (func->common.fn_flags & ZEND_ACC_CTOR)) {
-				continue;
-			}
-			for (uint32_t i = 0; i < ce->num_interfaces; i++) {
-				if (zend_hash_exists(&ce->interfaces[i]->function_table, lcname)) {
-					zend_error_noreturn(E_COMPILE_ERROR,
-						"Mutating method %s::%s() cannot satisfy the non-mutating requirement %s::%s()",
-						ZSTR_VAL(ce->name), ZSTR_VAL(func->common.function_name),
-						ZSTR_VAL(ce->interfaces[i]->name), ZSTR_VAL(func->common.function_name));
-				}
-			}
-		} ZEND_HASH_FOREACH_END();
-	}
+	/* Effect variance for mutating methods is enforced on every subtyping
+	 * edge in do_inheritance_check_on_method(). */
 }
 /* }}} */
 
