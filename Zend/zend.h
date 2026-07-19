@@ -148,6 +148,18 @@ C23_ENUM(zend_class_type, uint8_t) {
 	ZEND_USER_CLASS = 2,
 };
 
+/* Type parameters of a generic class template (ZEND_ACC2_GENERIC_TEMPLATE).
+ * Names are interned; bound_name is the resolved FQ interface name or NULL. */
+typedef struct _zend_generic_param {
+	zend_string *name;
+	zend_string *bound_name;
+} zend_generic_param;
+
+typedef struct _zend_generic_params {
+	uint32_t num_params;
+	zend_generic_param params[1];
+} zend_generic_params;
+
 struct _zend_class_entry {
 	zend_class_type type;
 	zend_string *name;
@@ -225,6 +237,9 @@ struct _zend_class_entry {
 
 	uint32_t enum_backing_type;
 	HashTable *backed_enum_table;
+
+	/* allocated only for generic templates (ZEND_ACC2_GENERIC_TEMPLATE) */
+	zend_generic_params *generic_params;
 
 	zend_string *doc_comment;
 
