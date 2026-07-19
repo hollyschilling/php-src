@@ -3507,6 +3507,11 @@ ZEND_API zend_class_entry *zend_do_link_class(zend_class_entry *ce, zend_string 
 		parent = zend_fetch_class_by_name(
 			ce->parent_name, lc_parent_name,
 			ZEND_FETCH_CLASS_ALLOW_NEARLY_LINKED | ZEND_FETCH_CLASS_EXCEPTION);
+		if (parent && UNEXPECTED(parent->ce_flags2 & ZEND_ACC2_GENERIC_TEMPLATE)) {
+			zend_throw_error(NULL, "Class %s cannot extend generic class %s without type arguments",
+				ZSTR_VAL(ce->name), ZSTR_VAL(parent->name));
+			return NULL;
+		}
 		if (!parent) {
 			check_unrecoverable_load_failure(ce);
 			return NULL;
@@ -3564,6 +3569,12 @@ ZEND_API zend_class_entry *zend_do_link_class(zend_class_entry *ce, zend_string 
 				ZEND_FETCH_CLASS_ALLOW_NEARLY_LINKED | ZEND_FETCH_CLASS_EXCEPTION);
 			if (!iface) {
 				check_unrecoverable_load_failure(ce);
+				free_alloca(traits_and_interfaces, use_heap);
+				return NULL;
+			}
+			if (UNEXPECTED(iface->ce_flags2 & ZEND_ACC2_GENERIC_TEMPLATE)) {
+				zend_throw_error(NULL, "%s cannot implement generic interface %s without type arguments",
+					ZSTR_VAL(ce->name), ZSTR_VAL(iface->name));
 				free_alloca(traits_and_interfaces, use_heap);
 				return NULL;
 			}
@@ -3922,6 +3933,12 @@ ZEND_API zend_class_entry *zend_try_early_bind(zend_class_entry *ce, zend_class_
 	inheritance_status status;
 	zend_class_entry *proto = NULL;
 	zend_class_entry *orig_linking_class;
+
+	if (UNEXPECTED(parent_ce->ce_flags2 & ZEND_ACC2_GENERIC_TEMPLATE)) {
+		/* Never early-bind against a generic template; the runtime link path
+		 * reports the missing type arguments. */
+		return NULL;
+	}
 
 	if (ce->ce_flags & ZEND_ACC_LINKED) {
 		ZEND_ASSERT(ce->parent == NULL);

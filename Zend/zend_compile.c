@@ -9657,8 +9657,9 @@ static void zend_compile_implements(zend_ast *ast) /* {{{ */
 
 	for (i = 0; i < list->children; ++i) {
 		zend_ast *class_ast = list->child[i];
-		interface_names[i].name =
-			zend_resolve_const_class_name_reference(class_ast, "interface name");
+		interface_names[i].name = class_ast->kind == ZEND_AST_GENERIC_TYPE
+			? zend_resolve_class_name_ast(class_ast)
+			: zend_resolve_const_class_name_reference(class_ast, "interface name");
 		interface_names[i].lc_name = zend_string_tolower(interface_names[i].name);
 	}
 
@@ -9841,16 +9842,21 @@ static void zend_compile_class_decl(znode *result, const zend_ast *ast, bool top
 		ce->ce_flags |= ZEND_ACC_NOT_SERIALIZABLE;
 	}
 
+	/* Set the active class entry before resolving extends/implements so that
+	 * generic references there see the class's own type parameters (and
+	 * param-dependent inheritance errors cleanly rather than mangling T as a
+	 * class name). */
+	CG(active_class_entry) = ce;
+
 	if (generic_params_ast) {
 		zend_compile_generic_params(ce, generic_params_ast);
 	}
 
 	if (extends_ast) {
-		ce->parent_name =
-			zend_resolve_const_class_name_reference(extends_ast, "class name");
+		ce->parent_name = extends_ast->kind == ZEND_AST_GENERIC_TYPE
+			? zend_resolve_class_name_ast(extends_ast)
+			: zend_resolve_const_class_name_reference(extends_ast, "class name");
 	}
-
-	CG(active_class_entry) = ce;
 
 	if (decl->child[3]) {
 		zend_compile_attributes(&ce->attributes, decl->child[3], 0, ZEND_ATTRIBUTE_TARGET_CLASS, 0);
