@@ -158,6 +158,7 @@ static YYSIZE_T zend_yytnamerr(char*, const char*);
 %token <ident> T_PROTECTED_SET "'protected(set)'"
 %token <ident> T_PUBLIC_SET    "'public(set)'"
 %token <ident> T_READONLY      "'readonly'"
+%token <ident> T_MUTATING      "'mutating'"
 %token <ident> T_VAR           "'var'"
 %token <ident> T_UNSET         "'unset'"
 %token <ident> T_ISSET         "'isset'"
@@ -318,7 +319,7 @@ reserved_non_modifiers:
 
 semi_reserved:
 	  reserved_non_modifiers
-	| T_STATIC | T_ABSTRACT | T_FINAL | T_PRIVATE | T_PROTECTED | T_PUBLIC | T_READONLY
+	| T_STATIC | T_ABSTRACT | T_FINAL | T_PRIVATE | T_PROTECTED | T_PUBLIC | T_READONLY | T_MUTATING
 ;
 
 ampersand:
@@ -580,6 +581,11 @@ unset_variable:
 function_name:
 		T_STRING { $$ = $1; }
 	|	T_READONLY {
+			zval zv;
+			if (zend_lex_tstring(&zv, $1) == FAILURE) { YYABORT; }
+			$$ = zend_ast_create_zval(&zv);
+		}
+	|	T_MUTATING {
 			zval zv;
 			if (zend_lex_tstring(&zv, $1) == FAILURE) { YYABORT; }
 			$$ = zend_ast_create_zval(&zv);
@@ -1072,11 +1078,22 @@ trait_alias:
 			  $$ = zend_ast_create(ZEND_AST_TRAIT_ALIAS, $1, zend_ast_create_zval(&zv)); }
 	|	trait_method_reference T_AS member_modifier identifier
 			{ uint32_t modifiers = zend_modifier_token_to_flag(ZEND_MODIFIER_TARGET_METHOD, $3);
+			  /* ZEND_ACC_MUTATING does not fit the 16-bit ast attr; reject by token. */
+			  if ($3 == T_MUTATING) {
+				  zend_throw_exception(zend_ce_compile_error,
+					  "Cannot use \"mutating\" as method modifier in trait alias", 0);
+				  modifiers = 0;
+			  }
 			  $$ = zend_ast_create_ex(ZEND_AST_TRAIT_ALIAS, modifiers, $1, $4);
 			  /* identifier nonterminal can cause allocations, so we need to free the node */
 			  if (!modifiers) { zend_ast_destroy($$); YYERROR; } }
 	|	trait_method_reference T_AS member_modifier
 			{ uint32_t modifiers = zend_modifier_token_to_flag(ZEND_MODIFIER_TARGET_METHOD, $3);
+			  if ($3 == T_MUTATING) {
+				  zend_throw_exception(zend_ce_compile_error,
+					  "Cannot use \"mutating\" as method modifier in trait alias", 0);
+				  modifiers = 0;
+			  }
 			  $$ = zend_ast_create_ex(ZEND_AST_TRAIT_ALIAS, modifiers, $1, NULL);
 			  /* identifier nonterminal can cause allocations, so we need to free the node */
 			  if (!modifiers) { zend_ast_destroy($$); YYERROR; } }
@@ -1142,6 +1159,7 @@ member_modifier:
 	|	T_ABSTRACT				{ $$ = T_ABSTRACT; }
 	|	T_FINAL					{ $$ = T_FINAL; }
 	|	T_READONLY				{ $$ = T_READONLY; }
+	|	T_MUTATING				{ $$ = T_MUTATING; }
 ;
 
 property_list:
@@ -1476,6 +1494,11 @@ function_call:
 		name argument_list
 			{ $$ = zend_ast_create(ZEND_AST_CALL, $1, $2); }
 	|	T_READONLY argument_list {
+			zval zv;
+			if (zend_lex_tstring(&zv, $1) == FAILURE) { YYABORT; }
+			$$ = zend_ast_create(ZEND_AST_CALL, zend_ast_create_zval(&zv), $2);
+		}
+	|	T_MUTATING argument_list {
 			zval zv;
 			if (zend_lex_tstring(&zv, $1) == FAILURE) { YYABORT; }
 			$$ = zend_ast_create(ZEND_AST_CALL, zend_ast_create_zval(&zv), $2);

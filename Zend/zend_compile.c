@@ -887,6 +887,8 @@ static const char *zend_modifier_token_to_string(uint32_t token)
 			return "final";
 		case T_READONLY:
 			return "readonly";
+		case T_MUTATING:
+			return "mutating";
 		case T_ABSTRACT:
 			return "abstract";
 		case T_PUBLIC_SET:
@@ -920,6 +922,11 @@ uint32_t zend_modifier_token_to_flag(zend_modifier_target target, uint32_t token
 		case T_READONLY:
 			if (target == ZEND_MODIFIER_TARGET_PROPERTY || target == ZEND_MODIFIER_TARGET_CPP) {
 				return ZEND_ACC_READONLY;
+			}
+			break;
+		case T_MUTATING:
+			if (target == ZEND_MODIFIER_TARGET_METHOD) {
+				return ZEND_ACC_MUTATING;
 			}
 			break;
 		case T_ABSTRACT:
@@ -8587,6 +8594,35 @@ static zend_string *zend_begin_method_decl(zend_op_array *op_array, zend_string 
 		zend_error(E_COMPILE_ERROR, "Cannot use 'readonly' as method modifier");
 	}
 
+	if (fn_flags & ZEND_ACC_MUTATING) {
+		/* Traits cannot be checked here: whether the consumer is a struct is
+		 * only known at flattening (zend_add_trait_method). */
+		if (!(ce->ce_flags2 & ZEND_ACC2_VALUE_CLASS) && !(ce->ce_flags & ZEND_ACC_TRAIT)) {
+			zend_error_noreturn(E_COMPILE_ERROR,
+				"Cannot declare mutating method %s::%s() outside a struct",
+				ZSTR_VAL(ce->name), ZSTR_VAL(name));
+		}
+		if (fn_flags & ZEND_ACC_STATIC) {
+			zend_error_noreturn(E_COMPILE_ERROR,
+				"Mutating method %s::%s() cannot be static",
+				ZSTR_VAL(ce->name), ZSTR_VAL(name));
+		}
+		/* Magic methods dispatch through routes that never pass
+		 * ZEND_INIT_METHOD_CALL's receiver validation (get_closure for
+		 * __invoke, string casts for __toString, trampolines for __call),
+		 * so their pure-read by-value binding is not negotiable. The
+		 * constructor is the one built-in mutating member; `mutating` on it
+		 * is accepted as redundant documentation. */
+		if (ZSTR_LEN(name) > 2 && ZSTR_VAL(name)[0] == '_' && ZSTR_VAL(name)[1] == '_'
+		 && !zend_string_equals_literal_ci(name, ZEND_CONSTRUCTOR_FUNC_NAME)) {
+			zend_error_noreturn(E_COMPILE_ERROR,
+				"Cannot declare magic method %s::%s() mutating",
+				ZSTR_VAL(ce->name), ZSTR_VAL(name));
+		}
+		op_array->fn_flags &= ~ZEND_ACC_MUTATING;
+		op_array->fn_flags2 |= ZEND_ACC2_MUTATING;
+	}
+
 	if ((fn_flags & ZEND_ACC_PRIVATE) && (fn_flags & ZEND_ACC_FINAL) && !zend_is_constructor(name)) {
 		zend_error(E_COMPILE_WARNING, "Private methods cannot be final as they are never overridden by other classes");
 	}
@@ -9356,6 +9392,8 @@ static void zend_check_trait_alias_modifiers(uint32_t attr) /* {{{ */
 	} else if (attr & ZEND_ACC_ABSTRACT) {
 		zend_error_noreturn(E_COMPILE_ERROR, "Cannot use \"abstract\" as method modifier in trait alias");
 	}
+	/* T_MUTATING is rejected in the trait_alias grammar action: ZEND_ACC_MUTATING
+	 * does not fit the 16-bit ast attr this function receives. */
 }
 /* }}} */
 

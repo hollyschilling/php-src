@@ -2368,6 +2368,14 @@ static void zend_add_trait_method(zend_class_entry *ce, zend_string *name, zend_
 	zend_function *existing_fn = NULL;
 	zend_function *new_fn;
 
+	if (UNEXPECTED((fn->common.fn_flags2 & ZEND_ACC2_MUTATING)
+	 && !(ce->ce_flags2 & ZEND_ACC2_VALUE_CLASS))) {
+		zend_error_noreturn(E_COMPILE_ERROR,
+			"%s %s cannot use mutating method %s::%s(); mutating methods require a struct",
+			zend_get_object_type_case(ce, true), ZSTR_VAL(ce->name),
+			ZSTR_VAL(fn->common.scope->name), ZSTR_VAL(fn->common.function_name));
+	}
+
 	if ((existing_fn = zend_hash_find_ptr(&ce->function_table, key)) != NULL) {
 		/* if it is the same function with the same visibility and has not been assigned a class scope yet, regardless
 		 * of where it is coming from there is no conflict and we do not need to add it again */
@@ -3071,6 +3079,28 @@ static void zend_verify_value_class(const zend_class_entry *ce) /* {{{ */
 				ZSTR_VAL(ce->name), ZSTR_VAL(func->common.function_name));
 		}
 	} ZEND_HASH_FOREACH_END();
+
+	/* Effect variance: a mutating implementation cannot satisfy an interface
+	 * requirement — interface callers must never face the mutating call's
+	 * receiver restrictions. The constructor is exempt: its mutating role is
+	 * reachable only through object creation, never through the interface. */
+	if (ce->num_interfaces) {
+		ZEND_HASH_MAP_FOREACH_STR_KEY_PTR(&ce->function_table, lcname, func) {
+			if (lcname == NULL
+			 || !(func->common.fn_flags2 & ZEND_ACC2_MUTATING)
+			 || (func->common.fn_flags & ZEND_ACC_CTOR)) {
+				continue;
+			}
+			for (uint32_t i = 0; i < ce->num_interfaces; i++) {
+				if (zend_hash_exists(&ce->interfaces[i]->function_table, lcname)) {
+					zend_error_noreturn(E_COMPILE_ERROR,
+						"Mutating method %s::%s() cannot satisfy the non-mutating requirement %s::%s()",
+						ZSTR_VAL(ce->name), ZSTR_VAL(func->common.function_name),
+						ZSTR_VAL(ce->interfaces[i]->name), ZSTR_VAL(func->common.function_name));
+				}
+			}
+		} ZEND_HASH_FOREACH_END();
+	}
 }
 /* }}} */
 
