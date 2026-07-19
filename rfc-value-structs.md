@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| **Version** | 0.19 |
+| **Version** | 0.20 |
 | **Date** | 2026-07-14 |
 | **Author** | Holly Schilling, holly.a.schilling@outlook.com |
 | **Status** | Draft |
@@ -89,7 +89,7 @@ The return type remains as optional as on any method — the colon belongs to th
 
 That position is chosen because it is **unambiguous**: after a parameter list, no identifier can otherwise appear, so `mutating` parses contextually — case-insensitively, like every keyword — and **reserves nothing**. Functions, classes, methods, constants, and types named `mutating` all continue to work; there is no backward-compatibility surface at all. A misspelling gets a targeted compile-time diagnostic ("expecting `mutating`"), and the marker in any other position (modifier lists, plain functions, closures) is an ordinary parse error. The declaration-side marker also means every call site reads as a plain method call — no call-site sigil — which is what allows the engine to prepare the receiver *after* resolving the callee (see Mutating methods and the scoped borrow).
 
-`mutating` is permitted only in structs and in traits (validated when the trait flattens into a consumer; a class consuming a trait's mutating method is a link-time error). `__construct` is implicitly mutating — the marker on it is accepted as documentation — and **set hooks are implicitly mutating with no syntax at all**: a setter mutates by definition (see Property hooks and `$this`).
+`mutating` is permitted in structs, in traits (validated when the trait flattens into a consumer; a class consuming a trait's *concrete* mutating method is a link-time error, while an *abstract* colored requirement is valid anywhere), and on **interface requirements**, where it declares permission rather than obligation (see the effect-variance rules in Mutating methods and the scoped borrow). `__construct` is implicitly mutating — the marker on it is accepted as documentation — and **set hooks are implicitly mutating with no syntax at all**: a setter mutates by definition (see Property hooks and `$this`).
 
 #### Magic methods
 
@@ -223,7 +223,13 @@ Chains follow from the anchor rule: `$app->svc->list->append(...)` works when th
 
 **Routes that cannot lend a receiver are closed, loudly.** Callables hold their own handle to the receiver — there is no caller slot for a later invocation to separate — so `call_user_func([$s, 'append'])`, `Closure::fromCallable`, array-callable invocation, and first-class callables of mutating methods all throw (and `is_callable` reports `false`). Reflection's `invoke` passes the receiver as an argument, which shares it, so the exclusivity gate rejects it. These are not arbitrary bans: each is the statement that a mutating method's receiver must be storage the call can prepare, and a callable is precisely a call whose receiver was captured earlier.
 
-**Effect variance.** A `mutating` method cannot satisfy an interface requirement: interface callers dispatch without knowing the receiver rules, and an effect may be weakened, never strengthened. This is a link-time error (the constructor is exempt — interfaces may require `__construct`, which is unreachable through interface dispatch). Declaring mutation intent *on the interface side* is Future Scope; today's rule keeps every interface contract satisfiable by classes and structs alike, with identical observable behavior.
+**Effect variance: one rule on every edge.** Interfaces (and traits' abstract members) may declare a requirement `mutating` — permission, not obligation. The whole system is a single rule, enforced at link time on every subtyping edge (`implements`, interface extending interface, trait abstract requirements): **along an edge, `mutating` may be removed, never added.** Spelled out:
+
+1. Class methods are always uncolored (a reference receiver is always writable; the marker would be meaningless).
+1. An **uncolored requirement** is a guarantee, satisfiable only by uncolored implementations — a mutating implementation under it is a link-time error (the constructor is exempt: interfaces may require `__construct`, which is unreachable through interface dispatch).
+1. A **colored requirement** is permission, satisfiable by anything: a mutating struct method that uses it, an uncolored struct method that declines it, or any class method.
+
+The payoff is that **retrofitting existing interfaces is backward-compatible by construction**: color `Iterator::next()` and every existing class implementation — uncolored, by the first rule — continues to satisfy it, unchanged and unrecompiled. Dispatch needs nothing new either: the receiver rules follow the *resolved* callee, and the dominant interface-typed receiver shapes (parameters, properties) are precisely the lendable ones. The honest residue is stated in Interfaces: behind one colored contract, a class implementer's mutations are visible to every alias of the receiver and a struct implementer's only to the caller's copy — the value/reference distinction is polymorphism-visible, exactly as in Swift — and an *unlendable* receiver errors only when the runtime type turns out to be a struct.
 
 **In the engine**, the marker travels as a function flag; mutating callees are excluded from the method inline caches so no cached fast path can bypass receiver validation; and the receiver-position property read compiles to a dedicated opcode that yields the slot for lendable struct values and behaves as a plain read otherwise — measured at parity with the ordinary read for class-typed values, interpreted and JIT-compiled alike. The one added cost anywhere is a single flag test per resolved method call.
 
@@ -240,7 +246,23 @@ A struct may declare `implements`. Every requirement a struct implements is sati
 
 What this serves well: value-shaped contracts. `Countable` and `JsonSerializable` are pure reads; `IteratorAggregate` works *correctly* (the returned iterator is a separate object — the struct is never mutated); userland reader/calculator interfaces compose naturally.
 
-The honest limit: PHP's existing interfaces are **uncolored** — nothing in `interface Iterator { public function next(): void; }` declares that `next()` is only meaningful when it mutates the receiver. A struct can implement such an interface; its `next()` must be uncolored (variance), so it will type-check, run, and discard its writes — and a `foreach` over it will never advance. This is the same policy boundary as get-hook caching: the engine keeps one uniform rule (*an uncolored call never mutates a value*), and semantic mismatch between a contract's intent and value semantics is static-analysis territory — "struct implements a known receiver-mutating interface" is a trivial, complete lint for the engine interfaces. Whether `Iterator` and `ArrayAccess` specifically deserve a hard link-time ban is an Open Issue. When interface-side `mutating` declarations land (Future Scope), intent becomes declarable and this enforcement moves fully into the type system.
+Interfaces may declare **mutating requirements** (see Mutating methods and the scoped borrow), and this proposal colors the first core interface: **`Iterator::next()` and `Iterator::rewind()` are mutating requirements.** Every existing class implementation is uncolored and continues to satisfy them — the retrofit changes nothing for classes — while a struct may now implement `Iterator` with mutating advances, and `foreach` works:
+
+```php
+struct Range implements Iterator {
+    public function __construct(private int $pos = 0, private int $end = 3) {}
+    public function current(): mixed { return $this->pos; }
+    public function key(): mixed     { return $this->pos; }
+    public function next() mutating: void   { $this->pos++; }
+    public function rewind() mutating: void { $this->pos = 0; }
+    public function valid(): bool    { return $this->pos < $this->end; }
+}
+foreach (new Range() as $v) { /* advances */ }
+```
+
+**`foreach` iterates its own copy of a struct iterator.** The loop machinery holds the iterator in engine-owned storage with no caller slot to lend, so it takes the value route: at loop entry the struct is copied into exclusively-held iterator state, the mutating advances write in place there, and the caller's value is never consumed — iterating `$it` twice yields the same sequence twice, deterministically, shared or not. That is value semantics being *more* predictable than references, not a restriction. A manual `while ($it->valid()) { ...; $it->next(); }` loop, by contrast, drives the caller's copy through ordinary mutating calls — both idioms compose.
+
+The residue is small and author-visible: a struct may still (legally — variance permits declining permission) implement `Iterator` with an *uncolored* `next()`, which type-checks, discards its writes, and never advances. The colored interface makes the fix declarable and the mistake lintable. `ArrayAccess` remains uncolored for now: its write half rides dimension-write syntax whose separation protocol is Future Scope, and coloring it before that protocol exists would advertise capability the engine does not yet deliver.
 
 Identity-keyed use of interface-typed values (`WeakMap` keys, `spl_object_id`) continues to **throw** for structs: the failure stays loud, never silent.
 
@@ -331,7 +353,7 @@ The design principle throughout: **value semantics live entirely in the calling 
 - `var_export()` round-trip: emit `new StructName(...)` (requires positional/named mapping) or a `__set_state`-like form?
 - Serialization wire format: plain object `O:` payload, or a distinct tag so `unserialize()` can reject shape drift?
 - Whether class constants pull their weight in v1 or should be dropped for minimality.
-- Whether `struct implements Iterator`/`ArrayAccess` — engine interfaces whose contracts are receiver-mutating — should be a link-time `Error` or remain linter territory (the draft's default, consistent with the get-hook policy).
+- Whether `struct implements ArrayAccess` should be a link-time `Error` until dimension-write separation exists, or remain linter territory (`Iterator` is resolved by coloring; see Interfaces).
 - Keyword choice: `struct` vs `record` (the [Records RFC](https://wiki.php.net/rfc/records) uses the latter; see References for how the proposals differ).
 
 ## Unaffected PHP Functionality
@@ -340,8 +362,8 @@ Classes, interfaces, enums, traits, arrays, references, and existing copy/assign
 
 ## Future Scope
 
-- **Interface-side `mutating` declarations.** With the method color in scope, the remaining half is declarable mutation intent on interfaces: `interface Collection { public function append(mixed $v) mutating: void; }`. Effect variance then completes: a `mutating` requirement is satisfiable by a `mutating` struct method or by any class method (a reference receiver is always writable); an uncolored requirement keeps today's rule. The receiver restriction survives polymorphism because interface-typed *parameters* are plain variables — always lendable. What must be argued honestly in that proposal: behind one colored interface, an object implementer's mutations are caller-visible and a struct implementer's are not — the value/reference distinction becomes polymorphism-visible, exactly as in Swift.
-- **More lendable receiver shapes.** Two deliberate v1 restrictions have known designs: array-element receivers (`$this->lists['en']->append(...)` — the same slot-lending applied to `FETCH_DIM`) and chains through *exclusively held* struct middles (a forward-carried exclusivity walk). Both extend the anchor rule without changing it.
+- **Coloring further core and SPL interfaces.** `Iterator` ships colored; `ArrayAccess` (`offsetSet`/`offsetUnset`) follows once dimension-write separation exists (below), and the SPL iterator hierarchy after that. Each retrofit is backward-compatible by construction under the edge rule.
+- **More lendable receiver shapes.** Three deliberate v1 restrictions have known designs: array-element receivers (`$this->lists['en']->append(...)` — the same slot-lending applied to `FETCH_DIM`), dimension-*write* separation for `ArrayAccess` structs (`$s[0] = $v` routing through an exclusive `offsetSet`), and chains through *exclusively held* struct middles (a forward-carried exclusivity walk). Each extends the anchor rule without changing it.
 - **Anonymous/positional tuples** — `(int, string)`. These are structs minus names, but their *types* are parameterized (no class entry to hang field types on), which requires recursive `zend_type` machinery: the first step toward generics, and deliberately excluded here.
 - **Destructuring / pattern matching** over struct shapes — shape-based polymorphism over values, complementing the interface-based kind now in scope.
 
@@ -359,7 +381,7 @@ Classes, interfaces, enums, traits, arrays, references, and existing copy/assign
 Two votes, each 2/3 majority required:
 
 1. **Accept structs as described?** (primary)
-1. **Accept `mutating` methods and the scoped borrow as described?** (secondary; counted only if the primary passes)
+1. **Accept `mutating` methods, the scoped borrow, and interface coloring (including the `Iterator` retrofit) as described?** (secondary; counted only if the primary passes)
 
 The secondary is severable by construction: without it, every struct method is uncolored, updates are the wither idiom and by-ref parameters, and no other section changes. With it, in-place collection updates (`$this->list->append(...)`) are first-class.
 
@@ -378,6 +400,7 @@ tbd
 
 ## Changelog
 
+- 0.20 (2026-07-19): **Interface coloring folded into the proposal** (same severable secondary vote). Interfaces and trait abstract members may declare `mutating` requirements; the entire variance system is one rule enforced on every subtyping edge — `mutating` may be removed along an edge, never added — making retrofits backward-compatible by construction (class methods are always uncolored and satisfy colored requirements untouched). `Iterator::next()`/`rewind()` ship colored, and `foreach` gains the value route: a struct iterator is copied into exclusively-held loop state, advances mutate in place there, and iteration never consumes the caller's value. `ArrayAccess` coloring deferred behind dimension-write separation (Future Scope); the `Iterator`-lint Open Issue resolved by the retrofit. Implemented and green (interpreter, both JITs; SPL suite untouched).
 - 0.19 (2026-07-19): **Mutating methods promoted from Future Scope into the proposal**, as a severable secondary vote. Syntax: a postfix signature marker (`function m() mutating: T`) in a position where no identifier can otherwise appear — contextual, case-insensitive, reserving nothing (zero BC surface). Semantics: the *scoped borrow* — the call site resolves the callee, separates the receiver in its own slot, and lends the exclusive value to the frame; the one `$this` rule is unchanged, exclusivity is manufactured rather than asserted. Receiver rules: variables and `$this`-in-mutating-contexts lend; property receivers lend via a dedicated receiver-position read when the slot is set-visible, non-readonly, and anchored (class containers anywhere; struct containers only as exclusively held writable roots); everything else errors with "assign it to a variable first". Routes that cannot lend (callables, FCCs, dynamic array-calls, reflection on shared receivers) throw at their own chokepoints; mutating callees are excluded from method inline caches. Effect variance enforced at link time (a mutating method cannot satisfy an interface requirement; constructor exempt); interface-side coloring stays Future Scope. `__construct` reframed as the built-in mutating method — explicit `$s->__construct()` is now a legal mutating call; set hooks are implicitly mutating with no syntax and may make nested mutating calls. **Escape policy finalized**: `$this` may escape every mutating context *except* `new`-borne construction (the one transactional context); the escapee becomes an ordinary shared value severed at the next write — method-return enforcement was rejected as half-transactional. Traits carry the color; a class consuming a mutating trait method is a link-time error. The call-site marker and eager write-mode receivers moved to Rejected Features with the deferral argument. All of the above is implemented and green in the prototype (interpreter, function JIT, tracing JIT), with the class-receiver paths measured at parity.
 - 0.18 (2026-07-18): Corrected an introduction overclaim: `readonly` does not make a struct "a value all the way down" (a held object's interior remains mutable through the shared handle, per shallow-freeze); its function is stated precisely — frozen slots, constructor invariants held for the value's lifetime, and copies that never physically separate. Deep value-ness requires value-typed properties, with or without `readonly`.
 - 0.17 (2026-07-18): Magic methods reclassified by the value model (resolving the `__toString` open issue): the pure reads — `__toString` (unlocking `Stringable`), `__invoke`, `__debugInfo`, `__call`, `__callStatic` — are permitted and bind `$this` by value; `__construct` is identified as the mutating member, reachable only through object creation (explicit re-invocation deferred with `mutating` methods); `__serialize`/`__unserialize` deferred with the wire-format open issue (`__unserialize` is a mutating initializer); `__set_state` deferred with `var_export()`. New Magic methods section; implemented in the prototype.
