@@ -357,7 +357,7 @@ typedef struct _zend_oparray_context {
 /* translated to (and replaced by) ZEND_ACC2_MUTATING in  |     |     |     */
 /* zend_begin_method_decl, so bit 30 never appears on a   |     |     |     */
 /* finished op_array.                                     |     |     |     */
-#define ZEND_ACC_MUTATING                (1 << 30) /*     |  X  |     |     */
+#define ZEND_ACC_MUTATING                (1U << 31) /*     |  X  |     |     */
 /*                                                        |     |     |     */
 /* Function returning by reference                        |     |     |     */
 #define ZEND_ACC_RETURN_REFERENCE        (1 << 12) /*     |  X  |     |     */
