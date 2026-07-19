@@ -30,6 +30,7 @@
 #include "zend_exceptions.h"
 #include "zend_closures.h"
 #include "zend_generators.h"
+#include "zend_generics.h"
 #include "zend_vm.h"
 #include "zend_float.h"
 #include "zend_fibers.h"
@@ -1238,6 +1239,22 @@ ZEND_API zend_class_entry *zend_lookup_class_ex(zend_string *name, zend_string *
 		 * The class may be freed while persisting. */
 		if (ce_cache &&
 				(!CG(in_compilation) || (ce->ce_flags & ZEND_ACC_IMMUTABLE))) {
+			SET_CE_CACHE(ce_cache, ce);
+		}
+		return ce;
+	}
+
+	/* Mangled generic names miss the class table until their instantiation is
+	 * stamped from the template. Stamping may itself load classes, so it is
+	 * only attempted at run-time. */
+	if (UNEXPECTED(memchr(ZSTR_VAL(lc_name), '<', ZSTR_LEN(lc_name)) != NULL)
+			&& !zend_is_compiling()) {
+		ce = zend_generics_stamp_instantiation(name, lc_name,
+			!(flags & ZEND_FETCH_CLASS_NO_AUTOLOAD));
+		if (!key) {
+			zend_string_release_ex(lc_name, 0);
+		}
+		if (ce && ce_cache) {
 			SET_CE_CACHE(ce_cache, ce);
 		}
 		return ce;

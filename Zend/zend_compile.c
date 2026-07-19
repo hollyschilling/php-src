@@ -2106,6 +2106,7 @@ ZEND_API void zend_initialize_class_data(zend_class_entry *ce, bool nullify_hand
 	ce->enum_backing_type = IS_UNDEF;
 	ce->backed_enum_table = NULL;
 	ce->generic_params = NULL;
+	ce->generic_binding = NULL;
 
 	if (nullify_handlers) {
 		ce->constructor = NULL;

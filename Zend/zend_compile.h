@@ -419,7 +419,14 @@ typedef struct _zend_oparray_context {
 /* op_array uses strict mode types                        |     |     |     */
 #define ZEND_ACC_STRICT_TYPES            (1U << 31) /*    |  X  |     |     */
 /*                                                        |     |     |     */
-/* Function Flags 2 (fn_flags2) (unused: 1-31)            |     |     |     */
+/* op_array carries an arena-allocated, type-substituted  |     |     |     */
+/* arg_info (generic instantiation); the shared original  |     |     |     */
+/* is stored one pointer before the arena block and is    |     |     |     */
+/* restored by destroy_op_array before the final free     |     |     |     */
+#define ZEND_ACC2_GENERIC_SUBST_ARG_INFO (1 << 3)  /*     |  X  |     |     */
+/*                                                        |     |     |     */
+/* Function Flags 2 (fn_flags2) (unused: 1-2 [claimed on  |     |     |     */
+/* other roadmap branches], 4-31)                         |     |     |     */
 /* ============================                           |     |     |     */
 /*                                                        |     |     |     */
 /* Function forbids dynamic calls                         |     |     |     */

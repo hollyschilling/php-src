@@ -163,6 +163,14 @@ typedef struct _zend_generic_params {
 	zend_generic_param params[1];
 } zend_generic_params;
 
+/* Binding of a stamped instantiation (ZEND_ACC2_GENERIC_INSTANCE) back to
+ * its template: args[i] is the substituted type for template param i. */
+typedef struct _zend_generic_binding {
+	zend_class_entry *template_ce;
+	uint32_t num_args;
+	zend_type args[1];
+} zend_generic_binding;
+
 struct _zend_class_entry {
 	zend_class_type type;
 	zend_string *name;
@@ -243,6 +251,8 @@ struct _zend_class_entry {
 
 	/* allocated only for generic templates (ZEND_ACC2_GENERIC_TEMPLATE) */
 	zend_generic_params *generic_params;
+	/* allocated only for stamped instantiations (ZEND_ACC2_GENERIC_INSTANCE) */
+	zend_generic_binding *generic_binding;
 
 	zend_string *doc_comment;
 
