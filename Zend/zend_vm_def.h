@@ -2253,6 +2253,94 @@ ZEND_VM_C_LABEL(fetch_obj_r_finish):
 	ZEND_VM_NEXT_OPCODE_CHECK_EXCEPTION();
 }
 
+ZEND_VM_HANDLER(215, ZEND_FETCH_OBJ_RECEIVER, TMPVAR|UNUSED|THIS|CV, CONST, CACHE_SLOT)
+{
+	/* A property read in method-receiver position (`$c->list->append(...)`,
+	 * always immediately followed by its ZEND_INIT_METHOD_CALL). When the
+	 * value is a struct in a lendable slot, hand INIT the slot itself
+	 * (IS_INDIRECT) so a mutating callee can separate and write the caller's
+	 * storage -- the scoped borrow. Everything else reads exactly like
+	 * ZEND_FETCH_OBJ_R. */
+	USE_OPLINE
+	zval *container;
+	void **cache_slot;
+
+	SAVE_OPLINE();
+	container = GET_OP1_OBJ_ZVAL_PTR_UNDEF(BP_VAR_R);
+
+	if ((OP1_TYPE & IS_CV) && UNEXPECTED(Z_ISREF_P(container))) {
+		container = Z_REFVAL_P(container);
+	}
+	if (OP1_TYPE == IS_UNUSED || EXPECTED(Z_TYPE_P(container) == IS_OBJECT)) {
+		zend_object *zobj = Z_OBJ_P(container);
+		uintptr_t prop_offset;
+
+		cache_slot = CACHE_ADDR(opline->extended_value);
+		if (EXPECTED(zobj->ce == CACHED_PTR_EX(cache_slot))) {
+			prop_offset = (uintptr_t)CACHED_PTR_EX(cache_slot + 1);
+		} else {
+			/* Cold cache: resolve here, so the first mutating call can
+			 * already borrow (the plain-read fallback would only warm the
+			 * cache after INIT rejected the receiver). */
+			const zend_property_info *info = zend_get_property_info(
+				zobj->ce, Z_STR_P(RT_CONSTANT(opline, opline->op2)), 1);
+
+			if (info == NULL || info == ZEND_WRONG_PROPERTY_INFO
+			 || (info->flags & ZEND_ACC_STATIC) || info->hooks) {
+				ZEND_VM_C_GOTO(fetch_obj_receiver_plain);
+			}
+			prop_offset = info->offset;
+			CACHE_PTR_EX(cache_slot, zobj->ce);
+			CACHE_PTR_EX(cache_slot + 1, (void*)prop_offset);
+		}
+		{
+			if (EXPECTED(IS_VALID_PROPERTY_OFFSET(prop_offset))) {
+				zval *slot = OBJ_PROP(zobj, prop_offset);
+
+				if (EXPECTED(Z_TYPE_P(slot) == IS_OBJECT)
+				 && EXPECTED(!(Z_OBJ_P(slot)->ce->ce_flags2 & ZEND_ACC2_VALUE_CLASS))) {
+					/* The overwhelmingly common case -- a class-typed
+					 * receiver -- completes here rather than re-running the
+					 * whole lookup through the fallback. INIT loads this
+					 * object's ce next, so the flags test above prefetches
+					 * for free. */
+					ZVAL_COPY(EX_VAR(opline->result.var), slot);
+					FREE_OP1();
+					ZEND_VM_NEXT_OPCODE();
+				}
+				if (EXPECTED(Z_TYPE_P(slot) == IS_OBJECT)) {
+					bool anchored = true;
+					bool container_is_root;
+
+					if (OP1_TYPE == IS_UNUSED) {
+						container_is_root =
+							(EX(func)->common.fn_flags2 & ZEND_ACC2_MUTATING) != 0;
+					} else if (OP1_TYPE == IS_CV) {
+						container_is_root = GC_REFCOUNT(zobj) == 1;
+					} else {
+						/* A temporary container is freed below; the slot only
+						 * stays anchored if a co-owner keeps the container
+						 * alive through the adjacent INIT (nothing can run in
+						 * between, and after INIT separates, the slot pointer
+						 * is never consulted again). */
+						container_is_root = false;
+						anchored = GC_REFCOUNT(zobj) >= 2;
+					}
+					if (anchored
+					 && zend_receiver_slot_is_lendable(zobj, slot, container_is_root)) {
+						ZVAL_INDIRECT(EX_VAR(opline->result.var), slot);
+						FREE_OP1();
+						ZEND_VM_NEXT_OPCODE();
+					}
+				}
+			}
+		}
+	}
+ZEND_VM_C_LABEL(fetch_obj_receiver_plain): ;
+	/* Not a borrowable struct slot: an ordinary property read. */
+	ZEND_VM_DISPATCH_TO_HANDLER(ZEND_FETCH_OBJ_R);
+}
+
 ZEND_VM_HANDLER(85, ZEND_FETCH_OBJ_W, VAR|UNUSED|THIS|CV, CONST|TMP|CV, FETCH_REF|DIM_WRITE|CACHE_SLOT)
 {
 	USE_OPLINE
@@ -3647,12 +3735,14 @@ ZEND_VM_HOT_OBJ_HANDLER(112, ZEND_INIT_METHOD_CALL, CONST|TMP|UNUSED|THIS|CV, CO
 	USE_OPLINE
 	zval *function_name;
 	zval *object;
+	zval *recv_slot = NULL;
 	zend_function *fbc;
 	zend_class_entry *called_scope;
 	zend_object *obj;
 	zend_execute_data *call;
 	uint32_t call_info;
 
+	(void)recv_slot;
 	SAVE_OPLINE();
 
 	object = GET_OP1_OBJ_ZVAL_PTR_UNDEF(BP_VAR_R);
@@ -3690,6 +3780,17 @@ ZEND_VM_HOT_OBJ_HANDLER(112, ZEND_INIT_METHOD_CALL, CONST|TMP|UNUSED|THIS|CV, CO
 			if (OP1_TYPE != IS_CONST && EXPECTED(Z_TYPE_P(object) == IS_OBJECT)) {
 				obj = Z_OBJ_P(object);
 			} else {
+				if ((OP1_TYPE & (IS_VAR|IS_TMP_VAR))
+				 && EXPECTED(Z_TYPE_P(object) == IS_INDIRECT)) {
+					/* Scoped borrow from ZEND_FETCH_OBJ_RECEIVER: op1 is the
+					 * caller's property slot, holding an object by
+					 * construction. Own a reference like any fetched
+					 * receiver; a mutating callee separates the slot below. */
+					recv_slot = Z_INDIRECT_P(object);
+					obj = Z_OBJ_P(recv_slot);
+					GC_ADDREF(obj);
+					break;
+				}
 				if ((OP1_TYPE & (IS_VAR|IS_CV)) && EXPECTED(Z_ISREF_P(object))) {
 					zend_reference *ref = Z_REF_P(object);
 
@@ -3789,9 +3890,16 @@ ZEND_VM_HOT_OBJ_HANDLER(112, ZEND_INIT_METHOD_CALL, CONST|TMP|UNUSED|THIS|CV, CO
 					ZSTR_VAL(obj->ce->name), ZSTR_VAL(fbc->common.function_name));
 				HANDLE_EXCEPTION();
 			}
+		} else if ((OP1_TYPE & (IS_VAR|IS_TMP_VAR)) && EXPECTED(recv_slot != NULL)) {
+			/* Borrowed property slot: separate the value in the caller's
+			 * storage. Drop the frame's reference around the separation so
+			 * the refcount it reads reflects the slot alone. */
+			GC_DELREF(obj);
+			obj = zend_value_class_separate_container(recv_slot);
+			GC_ADDREF(obj);
 		} else {
 			zend_throw_error(NULL,
-				"Cannot call mutating method %s::%s() on a temporary value",
+				"Cannot call mutating method %s::%s() on this receiver; assign it to a variable first",
 				ZSTR_VAL(obj->ce->name), ZSTR_VAL(fbc->common.function_name));
 			if (OP1_TYPE & (IS_VAR|IS_TMP_VAR)) {
 				if (GC_DELREF(obj) == 0) {

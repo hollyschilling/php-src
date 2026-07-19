@@ -490,6 +490,7 @@ ZEND_API void zend_fetch_dimension_const(zval *result, const zval *container, zv
  * *container before a write. The caller must have verified the instance is a
  * value class. Cannot throw (struct __clone is banned). */
 ZEND_API zend_object* ZEND_FASTCALL zend_value_class_separate_container(zval *container);
+ZEND_API bool ZEND_FASTCALL zend_receiver_slot_is_lendable(zend_object *container, zval *slot, bool container_is_root);
 /* Throws if a value-class constructor let $this escape; run at ctor return,
  * gated on ZEND_CALL_HAS_THIS without ZEND_CALL_RELEASE_THIS. */
 ZEND_API void ZEND_FASTCALL zend_check_value_class_this_escape(zend_execute_data *execute_data);

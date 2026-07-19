@@ -1232,6 +1232,35 @@ ZEND_API void ZEND_FASTCALL zend_check_value_class_this_escape(zend_execute_data
 	}
 }
 
+/* Scoped borrow (ZEND_FETCH_OBJ_RECEIVER): may ZEND_INIT_METHOD_CALL lend
+ * this property slot to a mutating callee? The mutation is a write to the
+ * container's property, so the slot must be writable from the current scope,
+ * and it must be anchored: inside a class instance (reference semantics
+ * above the value boundary), or inside a struct that is itself an
+ * exclusively held, writable root ($this in a mutating frame, or a variable
+ * holding the sole reference). Unlendable slots simply yield a plain copy --
+ * reads never notice; a mutating call errors at INIT. */
+ZEND_API bool ZEND_FASTCALL zend_receiver_slot_is_lendable(
+		zend_object *container, zval *slot, bool container_is_root)
+{
+	const zend_property_info *prop_info =
+		zend_get_property_info_for_slot(container, slot);
+
+	if (EXPECTED(prop_info != NULL)) {
+		if (prop_info->flags & ZEND_ACC_READONLY) {
+			return false;
+		}
+		if ((prop_info->flags & ZEND_ACC_PPP_SET_MASK)
+		 && !zend_asymmetric_property_has_set_access(prop_info)) {
+			return false;
+		}
+	}
+	if (UNEXPECTED(container->ce->ce_flags2 & ZEND_ACC2_VALUE_CLASS)) {
+		return container_is_root;
+	}
+	return true;
+}
+
 static zend_always_inline bool zend_value_instanceof_static(const zval *zv) {
 	if (Z_TYPE_P(zv) != IS_OBJECT) {
 		return 0;

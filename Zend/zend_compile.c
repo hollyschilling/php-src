@@ -5536,6 +5536,23 @@ static void zend_compile_method_call(znode *result, zend_ast *ast, uint32_t type
 	} else {
 		zend_short_circuiting_mark_inner(obj_ast);
 		zend_compile_expr(&obj_node, obj_ast);
+		if (!nullsafe
+		 && (obj_node.op_type & (IS_VAR|IS_TMP_VAR))
+		 && method_ast->kind == ZEND_AST_ZVAL
+		 && Z_TYPE_P(zend_ast_get_zval(method_ast)) == IS_STRING) {
+			zend_op *fetch = &CG(active_op_array)->opcodes[CG(active_op_array)->last - 1];
+
+			if (fetch->opcode == ZEND_FETCH_OBJ_R
+			 && fetch->result_type == obj_node.op_type
+			 && fetch->result.var == obj_node.u.op.var
+			 && fetch->op1_type != IS_CONST
+			 && fetch->op2_type == IS_CONST) {
+				/* A property read in receiver position, adjacent to its INIT
+				 * (a literal method name compiles no code in between): let it
+				 * lend the slot to a mutating callee (the scoped borrow). */
+				fetch->opcode = ZEND_FETCH_OBJ_RECEIVER;
+			}
+		}
 		if (nullsafe) {
 			zend_emit_jmp_null(&obj_node, type);
 		}

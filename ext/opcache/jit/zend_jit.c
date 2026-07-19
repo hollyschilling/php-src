@@ -2664,6 +2664,12 @@ static int zend_jit(const zend_op_array *op_array, zend_ssa *ssa, const zend_op 
 								}
 							}
 						}
+						if (UNEXPECTED(op1_info & MAY_BE_INDIRECT)) {
+							/* A scoped-borrow receiver (ZEND_FETCH_OBJ_RECEIVER)
+							 * may deliver an IS_INDIRECT slot; the emission does
+							 * not model that yet, so use the VM handler. */
+							break;
+						}
 						if (!zend_jit_init_method_call(&ctx, opline, b, op_array, ssa, ssa_op, call_level,
 								op1_info, op1_addr, ce, ce_is_instanceof, on_this, 0, NULL,
 								NULL, 0,

@@ -3782,6 +3782,9 @@ static zend_always_inline zend_result _zend_update_type_info(
 		case ZEND_FETCH_OBJ_W:
 		case ZEND_FETCH_OBJ_UNSET:
 		case ZEND_FETCH_OBJ_FUNC_ARG:
+		case ZEND_FETCH_OBJ_RECEIVER:
+			/* RECEIVER reads like _R but may yield IS_INDIRECT for a struct
+			 * in a lendable slot; it takes the conservative branch below. */
 			if (ssa_op->result_def >= 0) {
 				uint32_t tmp = 0;
 				ce = NULL;
