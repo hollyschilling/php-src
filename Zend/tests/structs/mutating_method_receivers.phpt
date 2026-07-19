@@ -22,11 +22,11 @@ try { (new Counter())->inc(); } catch (Error $e) { echo $e->getMessage(), "\n"; 
 try { $c->tryIndirect(); } catch (Error $e) { echo $e->getMessage(), "\n"; }
 try { $c->tryIndirectStatic(); } catch (Error $e) { echo $e->getMessage(), "\n"; }
 
-// A struct-typed property is not yet a lendable receiver (scoped-borrow
-// receiver fetches are the next tier); today it reads as a temporary.
+// A struct-typed property is a lendable receiver: the fetch hands INIT the
+// slot (the scoped borrow) and the write lands in the holder's storage.
 class Holder { public function __construct(public Counter $counter) {} }
 $h = new Holder(new Counter(5));
-try { $h->counter->inc(); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+$h->counter->inc();
 var_dump($h->counter->n);
 
 // No banned attempt mutated anything.
@@ -34,10 +34,9 @@ var_dump($c->n);
 
 ?>
 --EXPECT--
-Cannot call mutating method Counter::inc() on a temporary value
-Cannot call mutating method Counter::inc() on a temporary value
+Cannot call mutating method Counter::inc() on this receiver; assign it to a variable first
+Cannot call mutating method Counter::inc() on this receiver; assign it to a variable first
 Cannot call mutating method Counter::inc() on $this in a non-mutating method
 Cannot call mutating method Counter::inc() on $this in a non-mutating method
-Cannot call mutating method Counter::inc() on a temporary value
-int(5)
+int(6)
 int(0)

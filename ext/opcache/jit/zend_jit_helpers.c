@@ -181,7 +181,7 @@ static zend_function* ZEND_FASTCALL zend_jit_find_method_helper(zend_object *obj
 			return NULL;
 		}
 		zend_throw_error(NULL,
-			"Cannot call mutating method %s::%s() on a temporary value",
+			"Cannot call mutating method %s::%s() on this receiver; assign it to a variable first",
 			ZSTR_VAL(obj->ce->name), ZSTR_VAL(fbc->common.function_name));
 		return NULL;
 	}
