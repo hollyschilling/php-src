@@ -3006,6 +3006,14 @@ static void zend_do_traits_property_binding(zend_class_entry *ce, zend_class_ent
 						new_fn->op_array.fn_flags &= ~ZEND_ACC_IMMUTABLE;
 						new_fn->common.fn_flags |= ZEND_ACC_TRAIT_CLONE;
 						new_fn->common.prop_info = new_prop;
+						if (j == ZEND_PROPERTY_HOOK_SET
+						 && (ce->ce_flags2 & ZEND_ACC2_VALUE_CLASS)) {
+							/* A struct's set hook is implicitly mutating; the
+							 * flag lives on the consumer's copy because the
+							 * same trait may serve classes. See
+							 * zend_compile_property_hooks(). */
+							new_fn->common.fn_flags2 |= ZEND_ACC2_MUTATING;
+						}
 						function_add_ref(new_fn);
 
 						zend_fixup_trait_method(new_fn, ce);

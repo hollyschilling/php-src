@@ -14375,7 +14375,7 @@ static int zend_jit_func_arg_by_ref_guard(zend_jit_ctx *jit, const zend_op *opli
  *   runtime-cache compare skip a reload.
  * The helper cannot throw (struct __clone is banned), so call sites need no
  * opline sync or exception check. Returns the possibly-updated object ref. */
-static ir_ref jit_value_class_separation(zend_jit_ctx *jit, ir_ref obj_ref, bool on_this, zend_jit_addr op1_addr, const zend_class_entry *ce, ir_ref *obj_ce_ref)
+static ir_ref jit_value_class_separation(zend_jit_ctx *jit, const zend_op_array *op_array, ir_ref obj_ref, bool on_this, zend_jit_addr op1_addr, const zend_class_entry *ce, ir_ref *obj_ce_ref)
 {
 	zend_jit_addr container_addr = on_this
 		? ZEND_ADDR_MEM_ZVAL(ZREG_FP, offsetof(zend_execute_data, This))
@@ -14385,6 +14385,14 @@ static ir_ref jit_value_class_separation(zend_jit_ctx *jit, ir_ref obj_ref, bool
 
 	if (obj_ce_ref) {
 		*obj_ce_ref = IR_UNUSED;
+	}
+
+	if (on_this && UNEXPECTED(op_array->fn_flags & ZEND_ACC_TRAIT_CLONE)) {
+		/* Trait clones share one opcode array across every consumer, and a
+		 * trace root planted in those opcodes runs for all of them: a struct
+		 * consumer's copy must not bake its value-class-ness into code a
+		 * class consumer's copy will execute. Use the runtime flag test. */
+		ce = NULL;
 	}
 
 	if (ce && !(ce->ce_flags & ZEND_ACC_INTERFACE)) {
@@ -14554,7 +14562,7 @@ static int zend_jit_fetch_obj(zend_jit_ctx         *jit,
 		 * the access path, so separate a shared struct before the property
 		 * address is computed -- exactly as nested array writes separate each
 		 * level. */
-		obj_ref = jit_value_class_separation(jit, obj_ref, on_this, op1_addr, ce, &obj_ce_ref);
+		obj_ref = jit_value_class_separation(jit, op_array, obj_ref, on_this, op1_addr, ce, &obj_ce_ref);
 	}
 
 	if (!prop_info) {
@@ -15125,7 +15133,7 @@ static int zend_jit_assign_obj(zend_jit_ctx         *jit,
 	/* Value-class copy-on-write: separate a shared struct before the write,
 	 * ahead of any property address computation. */
 	ir_ref obj_ce_ref;
-	obj_ref = jit_value_class_separation(jit, obj_ref, on_this, op1_addr, ce, &obj_ce_ref);
+	obj_ref = jit_value_class_separation(jit, op_array, obj_ref, on_this, op1_addr, ce, &obj_ce_ref);
 
 	if (!prop_info) {
 		ir_ref run_time_cache = ir_LOAD_A(jit_EX(run_time_cache));
@@ -15489,7 +15497,7 @@ static int zend_jit_assign_obj_op(zend_jit_ctx         *jit,
 	/* Value-class copy-on-write: separate a shared struct before the write,
 	 * ahead of any property address computation. */
 	ir_ref obj_ce_ref;
-	obj_ref = jit_value_class_separation(jit, obj_ref, on_this, op1_addr, ce, &obj_ce_ref);
+	obj_ref = jit_value_class_separation(jit, op_array, obj_ref, on_this, op1_addr, ce, &obj_ce_ref);
 
 	if (!prop_info) {
 		ir_ref run_time_cache = ir_LOAD_A(jit_EX(run_time_cache));
@@ -15918,7 +15926,7 @@ static int zend_jit_incdec_obj(zend_jit_ctx         *jit,
 	/* Value-class copy-on-write: separate a shared struct before the write,
 	 * ahead of any property address computation. */
 	ir_ref obj_ce_ref;
-	obj_ref = jit_value_class_separation(jit, obj_ref, on_this, op1_addr, ce, &obj_ce_ref);
+	obj_ref = jit_value_class_separation(jit, op_array, obj_ref, on_this, op1_addr, ce, &obj_ce_ref);
 
 	if (!prop_info) {
 		ir_ref run_time_cache = ir_LOAD_A(jit_EX(run_time_cache));

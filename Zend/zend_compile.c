@@ -9171,6 +9171,16 @@ static void zend_compile_property_hooks(
 		}
 		prop_info->hooks[hook_kind] = func;
 
+		if (hook_kind == ZEND_PROPERTY_HOOK_SET
+		 && (ce->ce_flags2 & ZEND_ACC2_VALUE_CLASS)) {
+			/* A struct's set hook is implicitly mutating -- it already binds
+			 * $this borrowed-exclusive; the flag lets it make nested mutating
+			 * calls. No syntax: setters mutate by definition. Trait-provided
+			 * hooks are stamped at flattening (the trait itself is not a
+			 * value class, and the same trait may serve classes). */
+			func->common.fn_flags2 |= ZEND_ACC2_MUTATING;
+		}
+
 		if (hook_kind == ZEND_PROPERTY_HOOK_SET) {
 			switch (zend_verify_property_hook_variance(prop_info, func)) {
 				case INHERITANCE_SUCCESS:
