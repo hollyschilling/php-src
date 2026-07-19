@@ -9542,7 +9542,9 @@ static void zend_compile_method_ref(const zend_ast *ast, zend_trait_method_refer
 	method_ref->method_name = zend_string_copy(zend_ast_get_str(method_ast));
 
 	if (class_ast) {
-		method_ref->class_name = zend_resolve_const_class_name_reference(class_ast, "trait name");
+		method_ref->class_name = class_ast->kind == ZEND_AST_GENERIC_TYPE
+			? zend_resolve_class_name_ast(class_ast)
+			: zend_resolve_const_class_name_reference(class_ast, "trait name");
 	} else {
 		method_ref->class_name = NULL;
 	}
@@ -9562,8 +9564,9 @@ static void zend_compile_trait_precedence(const zend_ast *ast) /* {{{ */
 
 	for (i = 0; i < insteadof_list->children; ++i) {
 		zend_ast *name_ast = insteadof_list->child[i];
-		precedence->exclude_class_names[i] =
-			zend_resolve_const_class_name_reference(name_ast, "trait name");
+		precedence->exclude_class_names[i] = name_ast->kind == ZEND_AST_GENERIC_TYPE
+			? zend_resolve_class_name_ast(name_ast)
+			: zend_resolve_const_class_name_reference(name_ast, "trait name");
 	}
 
 	zend_add_to_list(&CG(active_class_entry)->trait_precedences, precedence);
@@ -9607,13 +9610,19 @@ static void zend_compile_use_trait(const zend_ast *ast) /* {{{ */
 		zend_ast *trait_ast = traits->child[i];
 
 		if (ce->ce_flags & ZEND_ACC_INTERFACE) {
-			zend_string *name = zend_ast_get_str(trait_ast);
+			zend_string *name = zend_ast_get_str(
+				trait_ast->kind == ZEND_AST_GENERIC_TYPE ? trait_ast->child[0] : trait_ast);
 			zend_error_noreturn(E_COMPILE_ERROR, "Cannot use traits inside of interfaces. "
 				"%s is used in %s", ZSTR_VAL(name), ZSTR_VAL(ce->name));
 		}
 
+		/* A generic trait reference stores its mangled name; link-time trait
+		 * fetching then stamps the instantiation through the ordinary
+		 * class-table miss path. */
 		ce->trait_names[ce->num_traits].name =
-			zend_resolve_const_class_name_reference(trait_ast, "trait name");
+			trait_ast->kind == ZEND_AST_GENERIC_TYPE
+				? zend_resolve_class_name_ast(trait_ast)
+				: zend_resolve_const_class_name_reference(trait_ast, "trait name");
 		ce->trait_names[ce->num_traits].lc_name = zend_string_tolower(ce->trait_names[ce->num_traits].name);
 		ce->num_traits++;
 	}

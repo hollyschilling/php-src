@@ -3529,6 +3529,12 @@ ZEND_API zend_class_entry *zend_do_link_class(zend_class_entry *ce, zend_string 
 				free_alloca(traits_and_interfaces, use_heap);
 				return NULL;
 			}
+			if (UNEXPECTED(trait->ce_flags2 & ZEND_ACC2_GENERIC_TEMPLATE)) {
+				zend_throw_error(NULL, "%s cannot use generic trait %s without type arguments",
+					ZSTR_VAL(ce->name), ZSTR_VAL(trait->name));
+				free_alloca(traits_and_interfaces, use_heap);
+				return NULL;
+			}
 			if (UNEXPECTED(trait->ce_flags & ZEND_ACC_DEPRECATED)) {
 				zend_use_of_deprecated_trait(trait, ce->name);
 				if (UNEXPECTED(EG(exception))) {
