@@ -1137,6 +1137,17 @@ ZEND_API zend_object* ZEND_FASTCALL zend_value_class_separate_container(zval *co
 		zend_object *separated;
 
 		if (UNEXPECTED(container == &ex->This)
+		 && UNEXPECTED(ex->func->common.fn_flags2 & ZEND_ACC2_MUTATING)) {
+			/* A mutating frame writes $this in place by definition. For a
+			 * mutating method the receiver slot and the frame legitimately
+			 * hold two references, and the slot must observe every write.
+			 * For a constructor a shared $this means it escaped: separating
+			 * would send the remaining writes into a discarded copy and mask
+			 * the escape from the return-time check. Either way, never
+			 * separate -- an illegitimate elevation throws at return. */
+			return zobj;
+		}
+		if (UNEXPECTED(container == &ex->This)
 		 && !(ZEND_CALL_INFO(ex) & ZEND_CALL_RELEASE_THIS)) {
 			/* The write target is a $this that the frame holds *borrowed* -- a
 			 * by-value receiver whose reference is owned elsewhere (a closure's
@@ -1144,20 +1155,8 @@ ZEND_API zend_object* ZEND_FASTCALL zend_value_class_separate_container(zval *co
 			 * refcount we do not own, so instead of releasing the original we
 			 * take ownership of the fresh copy: flag the frame RELEASE_THIS so
 			 * teardown frees it. The original's other holders are untouched.
-			 * (The constructor and set hooks also borrow $this, but hold them
-			 * exclusively, so refcount 1 keeps them off this path -- unless
-			 * $this has already escaped.) */
-			if (UNEXPECTED(ex->func->common.fn_flags2 & ZEND_ACC2_MUTATING)) {
-				/* A shared $this in a mutating frame (today: a value class's
-				 * constructor) means $this already escaped. Separating would
-				 * send the remaining writes into a discarded copy and mask
-				 * the escape from the return-time check (taking ownership
-				 * sets RELEASE_THIS, which that check reads as a frame that
-				 * owns its receiver). Mutating writes land in place by
-				 * definition; keep doing that -- the refcount stays elevated
-				 * and the escape check throws at return. */
-				return zobj;
-			}
+			 * (Set hooks also borrow $this, but hold it exclusively, so
+			 * refcount 1 keeps them off this path.) */
 			separated = zobj->handlers->clone_obj(zobj);
 			ZEND_ADD_CALL_FLAG(ex, ZEND_CALL_RELEASE_THIS);
 		} else {
@@ -1207,8 +1206,27 @@ ZEND_API ZEND_COLD void ZEND_FASTCALL zend_throw_struct_this_escape(const zend_c
 
 ZEND_API void ZEND_FASTCALL zend_check_value_class_this_escape(zend_execute_data *execute_data)
 {
-	if ((EX(func)->common.fn_flags2 & ZEND_ACC2_MUTATING)
-	 && GC_REFCOUNT(Z_OBJ(EX(This))) > 1) {
+	uint32_t expected;
+
+	if (!(EX(func)->common.fn_flags2 & ZEND_ACC2_MUTATING)) {
+		return;
+	}
+	if (ZEND_CALL_INFO(execute_data) & ZEND_CALL_RELEASE_THIS) {
+		/* Owned receiver (a CV mutating call, or a constructor whose $this
+		 * escaped and was then reclaimed by ownership-taking separation):
+		 * the receiver slot and the frame legitimately hold two references. */
+		expected = 2;
+	} else if (EX(func)->common.fn_flags & ZEND_ACC_CTOR) {
+		/* Borrowed-exclusive fresh instance. */
+		expected = 1;
+	} else {
+		/* A nested $this->m() borrow: the baseline is unknowable (receiver
+		 * slot plus every outer mutating frame). Any escape reference that
+		 * survives is caught when the outermost owned or constructor frame
+		 * leaves. */
+		return;
+	}
+	if (GC_REFCOUNT(Z_OBJ(EX(This))) > expected) {
 		zend_throw_struct_this_escape(EX(func)->common.scope,
 			(EX(func)->common.fn_flags & ZEND_ACC_CTOR) ? "the constructor" : "a mutating method");
 	}
@@ -4942,7 +4960,11 @@ static void cleanup_unfinished_calls(zend_execute_data *execute_data, uint32_t o
 			opline->opcode == ZEND_INIT_METHOD_CALL ||
 			opline->opcode == ZEND_INIT_STATIC_METHOD_CALL ||
 			opline->opcode == ZEND_INIT_PARENT_PROPERTY_HOOK_CALL ||
-			opline->opcode == ZEND_NEW)) {
+			opline->opcode == ZEND_NEW ||
+			/* Throwing CALLABLE_CONVERT (a mutating-method FCC): the scan
+			 * below counts it as a completed inner call and walks past this
+			 * frame's own INIT into the void. Its frame never has args. */
+			opline->opcode == ZEND_CALLABLE_CONVERT)) {
 			ZEND_ASSERT(op_num);
 			opline--;
 		}
@@ -5438,6 +5460,15 @@ static zend_never_inline zend_execute_data *zend_init_dynamic_call_array(const z
 				if (EXPECTED(!EG(exception))) {
 					zend_undefined_method(object->ce, Z_STR_P(method));
 				}
+				return NULL;
+			}
+
+			if (UNEXPECTED(fbc->common.fn_flags2 & ZEND_ACC2_MUTATING)) {
+				/* The array holds its own handle to the receiver; there is no
+				 * caller slot to separate, so in-place writes could never
+				 * reach one. Only ZEND_INIT_METHOD_CALL can lend a receiver. */
+				zend_throw_error(NULL, "Cannot call mutating method %s::%s() through a callable",
+					ZSTR_VAL(object->ce->name), ZSTR_VAL(fbc->common.function_name));
 				return NULL;
 			}
 

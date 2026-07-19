@@ -684,6 +684,12 @@ static int zend_jit_trace_record_fake_init_call_ex(zend_execute_data *call, zend
 			}
 		}
 
+		if (UNEXPECTED((call->func->common.fn_flags2 & ZEND_ACC2_MUTATING)
+		 && !(call->func->common.fn_flags & ZEND_ACC_CTOR))) {
+			/* A pending mutating method call: not traceable yet (see the
+			 * INIT_CALL recording site). Refuse the trace. */
+			return -1;
+		}
 		if (!func
 		 || (func->common.fn_flags & ZEND_ACC_CALL_VIA_TRAMPOLINE)
 		 || (func->common.fn_flags & ZEND_ACC_NEVER_CACHE)
@@ -1286,6 +1292,16 @@ zend_jit_trace_stop ZEND_FASTCALL zend_jit_trace_execute(zend_execute_data  *ex,
 					}
 				}
 
+				if (UNEXPECTED((EX(call)->func->common.fn_flags2 & ZEND_ACC2_MUTATING)
+				 && !(EX(call)->func->common.fn_flags & ZEND_ACC_CTOR))) {
+					/* A mutating method call: neither specialization nor the
+					 * despecialized TSSA call bookkeeping model its borrowed
+					 * receiver yet. End the trace before the call; the site
+					 * runs interpreted. (Constructor frames come from NEW,
+					 * whose borrowed binding the JIT already handles.) */
+					stop = ZEND_JIT_TRACE_STOP_INTERPRETER;
+					break;
+				}
 				if (!func
 				 || (func->common.fn_flags & ZEND_ACC_CALL_VIA_TRAMPOLINE)
 				 || (func->common.fn_flags & ZEND_ACC_NEVER_CACHE)

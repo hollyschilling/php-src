@@ -3752,7 +3752,11 @@ ZEND_VM_HOT_OBJ_HANDLER(112, ZEND_INIT_METHOD_CALL, CONST|TMP|UNUSED|THIS|CV, CO
 		}
 		if (OP2_TYPE == IS_CONST &&
 		    EXPECTED(!(fbc->common.fn_flags & (ZEND_ACC_CALL_VIA_TRAMPOLINE|ZEND_ACC_NEVER_CACHE))) &&
+		    EXPECTED(!(fbc->common.fn_flags2 & ZEND_ACC2_MUTATING)) &&
 		    EXPECTED(obj == orig_obj)) {
+			/* Mutating callees stay out of the inline cache so no cache-hit
+			 * fast path (VM or JIT) can push their frame without the
+			 * receiver validation below. */
 			CACHE_POLYMORPHIC_PTR(opline->result.num, called_scope, fbc);
 		}
 		if ((OP1_TYPE & (IS_VAR|IS_TMP_VAR)) && UNEXPECTED(obj != orig_obj)) {
@@ -3768,6 +3772,34 @@ ZEND_VM_HOT_OBJ_HANDLER(112, ZEND_INIT_METHOD_CALL, CONST|TMP|UNUSED|THIS|CV, CO
 
 	if (OP2_TYPE != IS_CONST) {
 		FREE_OP2();
+	}
+
+	if (UNEXPECTED(fbc->common.fn_flags2 & ZEND_ACC2_MUTATING)) {
+		/* A mutating callee writes its receiver in place, so the receiver
+		 * must be a slot this call site can lend exclusively. Separate a
+		 * variable receiver before the frame takes its reference; $this
+		 * chains stay borrowed (already exclusive in a mutating frame, and
+		 * the outermost frame's escape check covers the whole chain). */
+		if (OP1_TYPE == IS_CV) {
+			obj = zend_value_class_separate_container(object);
+		} else if (OP1_TYPE == IS_UNUSED) {
+			if (UNEXPECTED(!(EX(func)->common.fn_flags2 & ZEND_ACC2_MUTATING))) {
+				zend_throw_error(NULL,
+					"Cannot call mutating method %s::%s() on $this in a non-mutating method",
+					ZSTR_VAL(obj->ce->name), ZSTR_VAL(fbc->common.function_name));
+				HANDLE_EXCEPTION();
+			}
+		} else {
+			zend_throw_error(NULL,
+				"Cannot call mutating method %s::%s() on a temporary value",
+				ZSTR_VAL(obj->ce->name), ZSTR_VAL(fbc->common.function_name));
+			if (OP1_TYPE & (IS_VAR|IS_TMP_VAR)) {
+				if (GC_DELREF(obj) == 0) {
+					zend_objects_store_del(obj);
+				}
+			}
+			HANDLE_EXCEPTION();
+		}
 	}
 
 	call_info = ZEND_CALL_NESTED_FUNCTION | ZEND_CALL_HAS_THIS;
@@ -3876,7 +3908,10 @@ ZEND_VM_HANDLER(113, ZEND_INIT_STATIC_METHOD_CALL, UNUSED|CLASS_FETCH|CONST|VAR,
 		}
 		if (OP2_TYPE == IS_CONST &&
 		    EXPECTED(!(fbc->common.fn_flags & (ZEND_ACC_CALL_VIA_TRAMPOLINE|ZEND_ACC_NEVER_CACHE))) &&
+		    EXPECTED(!(fbc->common.fn_flags2 & ZEND_ACC2_MUTATING)) &&
 			EXPECTED(!(fbc->common.scope->ce_flags & ZEND_ACC_TRAIT))) {
+			/* Mutating callees stay out of the inline cache: see
+			 * ZEND_INIT_METHOD_CALL. */
 			CACHE_POLYMORPHIC_PTR(opline->result.num, ce, fbc);
 		}
 		if (EXPECTED(fbc->type == ZEND_USER_FUNCTION) && UNEXPECTED(!RUN_TIME_CACHE(&fbc->op_array))) {
@@ -3902,6 +3937,14 @@ ZEND_VM_HANDLER(113, ZEND_INIT_STATIC_METHOD_CALL, UNUSED|CLASS_FETCH|CONST|VAR,
 
 	if (!(fbc->common.fn_flags & ZEND_ACC_STATIC)) {
 		if (Z_TYPE(EX(This)) == IS_OBJECT && instanceof_function(Z_OBJCE(EX(This)), ce)) {
+			if (UNEXPECTED(fbc->common.fn_flags2 & ZEND_ACC2_MUTATING)
+			 && UNEXPECTED(!(EX(func)->common.fn_flags2 & ZEND_ACC2_MUTATING))) {
+				/* self::m() binds $this: same rule as $this->m(). */
+				zend_throw_error(NULL,
+					"Cannot call mutating method %s::%s() on $this in a non-mutating method",
+					ZSTR_VAL(Z_OBJ(EX(This))->ce->name), ZSTR_VAL(fbc->common.function_name));
+				HANDLE_EXCEPTION();
+			}
 			ce = (zend_class_entry*)Z_OBJ(EX(This));
 			call_info = ZEND_CALL_NESTED_FUNCTION | ZEND_CALL_HAS_THIS;
 		} else {
@@ -9893,6 +9936,23 @@ ZEND_VM_HANDLER(202, ZEND_CALLABLE_CONVERT, UNUSED, UNUSED, NUM|CACHE_SLOT)
 {
 	USE_OPLINE
 	zend_execute_data *call = EX(call);
+
+	if (UNEXPECTED(call->func->common.fn_flags2 & ZEND_ACC2_MUTATING)) {
+		/* A closure would hold its own handle to the receiver; there is no
+		 * caller slot for a later invocation to separate and write. The
+		 * pending frame is NOT freed here: the exception unwinder discovers
+		 * it from the opline position and releases it (freeing it twice
+		 * corrupts the VM stack). The result slot must be UNDEF'd: this
+		 * opcode never threw before, and ZEND_HANDLE_EXCEPTION dtors the
+		 * faulting opline's result, which still holds stale bytes from an
+		 * earlier user of the temporary. */
+		SAVE_OPLINE();
+		ZVAL_UNDEF(EX_VAR(opline->result.var));
+		zend_throw_error(NULL, "Cannot create a first-class callable of mutating method %s::%s()",
+			ZSTR_VAL(call->func->common.scope->name),
+			ZSTR_VAL(call->func->common.function_name));
+		HANDLE_EXCEPTION();
+	}
 
 	if (opline->extended_value != (uint32_t)-1) {
 		zend_object *closure = CACHED_PTR(opline->extended_value);

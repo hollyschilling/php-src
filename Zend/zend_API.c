@@ -4048,15 +4048,19 @@ get_function_via_handler:
 				}
 			} else if ((fcc->function_handler->common.fn_flags2 & ZEND_ACC2_MUTATING)
 			 && fcc->object) {
-				/* A mutating callee (today: a struct's constructor) is not
-				 * reachable through callables; its receiver must be lent by a
-				 * call site that can separate it in place. This resolver backs
-				 * every callable consumer (call_user_func,
-				 * Closure::fromCallable, INIT_USER_CALL, array_map, ...), and
-				 * reporting through *error keeps is_callable() non-throwing. */
+				/* A mutating callee is not reachable through callables; its
+				 * receiver must be lent by a call site that can separate it
+				 * in place (ZEND_INIT_METHOD_CALL). This resolver backs every
+				 * callable consumer (call_user_func, Closure::fromCallable,
+				 * INIT_USER_CALL, array_map, ...), and reporting through
+				 * *error keeps is_callable() non-throwing. */
 				retval = false;
 				if (error) {
-					zend_spprintf(error, 0, "cannot call the constructor of struct %s explicitly", ZSTR_VAL(fcc->object->ce->name));
+					if (fcc->function_handler->common.fn_flags & ZEND_ACC_CTOR) {
+						zend_spprintf(error, 0, "cannot call the constructor of struct %s explicitly", ZSTR_VAL(fcc->object->ce->name));
+					} else {
+						zend_spprintf(error, 0, "cannot call mutating method %s::%s() through a callable", ZSTR_VAL(fcc->object->ce->name), ZSTR_VAL(fcc->function_handler->common.function_name));
+					}
 				}
 			} else if (!fcc->object && !(fcc->function_handler->common.fn_flags & ZEND_ACC_STATIC)) {
 				retval = false;

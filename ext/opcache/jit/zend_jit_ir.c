@@ -9023,6 +9023,15 @@ static int zend_jit_init_method_call(zend_jit_ctx         *jit,
 		}
 	}
 
+	if (func && (func->common.fn_flags2 & ZEND_ACC2_MUTATING)) {
+		/* Never specialize on a mutating callee: known-callee emission would
+		 * push the frame without the receiver validation/separation
+		 * ZEND_INIT_METHOD_CALL performs. The generic emission is covered --
+		 * mutating callees never enter the inline cache, and
+		 * zend_jit_find_method_helper enforces VM parity. */
+		func = NULL;
+	}
+
 	if (polymorphic_side_trace) {
 		/* function is passed from parent snapshot */
 		ZEND_ASSERT(func_ref != IR_UNUSED && this_ref != IR_UNUSED);
@@ -9161,7 +9170,9 @@ static int zend_jit_init_method_call(zend_jit_ctx         *jit,
 	if ((!func || zend_jit_may_be_modified(func, op_array))
 	 && trace
 	 && trace->op == ZEND_JIT_TRACE_INIT_CALL
-	 && trace->func) {
+	 && trace->func
+	 && !(trace->func->common.fn_flags2 & ZEND_ACC2_MUTATING)) {
+		/* (mutating trace callees skip specialization: see above) */
 		int32_t exit_point;
 		const void *exit_addr;
 
@@ -9274,6 +9285,13 @@ static int zend_jit_init_static_method_call(zend_jit_ctx         *jit,
 		}
 	}
 
+	if (func && (func->common.fn_flags2 & ZEND_ACC2_MUTATING)) {
+		/* Never specialize on a mutating callee: the generic emission's
+		 * resolver (zend_jit_find_static_method_helper) enforces the $this
+		 * rule. */
+		func = NULL;
+	}
+
 	ce = zend_get_known_class(op_array, opline, opline->op1_type, opline->op1);
 	if (!func && ce && (opline->op1_type == IS_CONST || !(ce->ce_flags & ZEND_ACC_TRAIT))) {
 		zval *zv = RT_CONSTANT(opline, opline->op2);
@@ -9285,11 +9303,14 @@ static int zend_jit_init_static_method_call(zend_jit_ctx         *jit,
 		if (zv) {
 			zend_function *fn = Z_PTR_P(zv);
 
-			if (fn->common.scope == op_array->scope
+			if ((fn->common.scope == op_array->scope
 			 || (fn->common.fn_flags & ZEND_ACC_PUBLIC)
 			 || ((fn->common.fn_flags & ZEND_ACC_PROTECTED)
 			  && op_array->scope
-			  && instanceof_function_slow(op_array->scope, fn->common.scope))) {
+			  && instanceof_function_slow(op_array->scope, fn->common.scope)))
+			 && !(fn->common.fn_flags2 & ZEND_ACC2_MUTATING)) {
+				/* (mutating callees skip specialization: the generic
+				 * emission's resolver enforces the $this rule) */
 				func = fn;
 			}
 		}
