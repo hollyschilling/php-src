@@ -18360,7 +18360,7 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_FUNC_CCONV ZEND_FETCH_CLASS_N
 		HANDLE_EXCEPTION();
 	}
 
-	switch (fetch_type) {
+	switch (fetch_type & ZEND_FETCH_CLASS_MASK) {
 		case ZEND_FETCH_CLASS_SELF:
 			ZVAL_STR_COPY(EX_VAR(opline->result.var), scope->name);
 			break;
@@ -18382,6 +18382,23 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_FUNC_CCONV ZEND_FETCH_CLASS_N
 			}
 			ZVAL_STR_COPY(EX_VAR(opline->result.var), called_scope->name);
 			break;
+		case ZEND_FETCH_CLASS_TYPE_PARAM: {
+			if (UNEXPECTED(!scope->generic_binding)) {
+				SAVE_OPLINE();
+				zend_throw_error(NULL,
+					"Cannot resolve a type parameter when no generic binding is in scope");
+				ZVAL_UNDEF(EX_VAR(opline->result.var));
+				HANDLE_EXCEPTION();
+			}
+			uint32_t param_idx = fetch_type >> ZEND_FETCH_CLASS_TYPE_PARAM_SHIFT;
+			zend_type type_arg = scope->generic_binding->args[param_idx];
+			if (ZEND_TYPE_HAS_NAME(type_arg)) {
+				ZVAL_STR_COPY(EX_VAR(opline->result.var), ZEND_TYPE_NAME(type_arg));
+			} else {
+				ZVAL_STR(EX_VAR(opline->result.var), zend_type_to_string(type_arg));
+			}
+			break;
+		}
 		default: ZEND_UNREACHABLE();
 	}
 	ZEND_VM_NEXT_OPCODE();
@@ -33004,7 +33021,7 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_FUNC_CCONV ZEND_FETCH_CLASS_N
 		HANDLE_EXCEPTION();
 	}
 
-	switch (fetch_type) {
+	switch (fetch_type & ZEND_FETCH_CLASS_MASK) {
 		case ZEND_FETCH_CLASS_SELF:
 			ZVAL_STR_COPY(EX_VAR(opline->result.var), scope->name);
 			break;
@@ -33026,6 +33043,23 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_FUNC_CCONV ZEND_FETCH_CLASS_N
 			}
 			ZVAL_STR_COPY(EX_VAR(opline->result.var), called_scope->name);
 			break;
+		case ZEND_FETCH_CLASS_TYPE_PARAM: {
+			if (UNEXPECTED(!scope->generic_binding)) {
+				SAVE_OPLINE();
+				zend_throw_error(NULL,
+					"Cannot resolve a type parameter when no generic binding is in scope");
+				ZVAL_UNDEF(EX_VAR(opline->result.var));
+				HANDLE_EXCEPTION();
+			}
+			uint32_t param_idx = fetch_type >> ZEND_FETCH_CLASS_TYPE_PARAM_SHIFT;
+			zend_type type_arg = scope->generic_binding->args[param_idx];
+			if (ZEND_TYPE_HAS_NAME(type_arg)) {
+				ZVAL_STR_COPY(EX_VAR(opline->result.var), ZEND_TYPE_NAME(type_arg));
+			} else {
+				ZVAL_STR(EX_VAR(opline->result.var), zend_type_to_string(type_arg));
+			}
+			break;
+		}
 		default: ZEND_UNREACHABLE();
 	}
 	ZEND_VM_NEXT_OPCODE();
@@ -41061,7 +41095,7 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_FUNC_CCONV ZEND_FETCH_CLASS_N
 		HANDLE_EXCEPTION();
 	}
 
-	switch (fetch_type) {
+	switch (fetch_type & ZEND_FETCH_CLASS_MASK) {
 		case ZEND_FETCH_CLASS_SELF:
 			ZVAL_STR_COPY(EX_VAR(opline->result.var), scope->name);
 			break;
@@ -41083,6 +41117,23 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_FUNC_CCONV ZEND_FETCH_CLASS_N
 			}
 			ZVAL_STR_COPY(EX_VAR(opline->result.var), called_scope->name);
 			break;
+		case ZEND_FETCH_CLASS_TYPE_PARAM: {
+			if (UNEXPECTED(!scope->generic_binding)) {
+				SAVE_OPLINE();
+				zend_throw_error(NULL,
+					"Cannot resolve a type parameter when no generic binding is in scope");
+				ZVAL_UNDEF(EX_VAR(opline->result.var));
+				HANDLE_EXCEPTION();
+			}
+			uint32_t param_idx = fetch_type >> ZEND_FETCH_CLASS_TYPE_PARAM_SHIFT;
+			zend_type type_arg = scope->generic_binding->args[param_idx];
+			if (ZEND_TYPE_HAS_NAME(type_arg)) {
+				ZVAL_STR_COPY(EX_VAR(opline->result.var), ZEND_TYPE_NAME(type_arg));
+			} else {
+				ZVAL_STR(EX_VAR(opline->result.var), zend_type_to_string(type_arg));
+			}
+			break;
+		}
 		default: ZEND_UNREACHABLE();
 	}
 	ZEND_VM_NEXT_OPCODE();
@@ -71137,7 +71188,7 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_CCONV ZEND_FETCH_CLASS_NAME_S
 		HANDLE_EXCEPTION();
 	}
 
-	switch (fetch_type) {
+	switch (fetch_type & ZEND_FETCH_CLASS_MASK) {
 		case ZEND_FETCH_CLASS_SELF:
 			ZVAL_STR_COPY(EX_VAR(opline->result.var), scope->name);
 			break;
@@ -71159,6 +71210,23 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_CCONV ZEND_FETCH_CLASS_NAME_S
 			}
 			ZVAL_STR_COPY(EX_VAR(opline->result.var), called_scope->name);
 			break;
+		case ZEND_FETCH_CLASS_TYPE_PARAM: {
+			if (UNEXPECTED(!scope->generic_binding)) {
+				SAVE_OPLINE();
+				zend_throw_error(NULL,
+					"Cannot resolve a type parameter when no generic binding is in scope");
+				ZVAL_UNDEF(EX_VAR(opline->result.var));
+				HANDLE_EXCEPTION();
+			}
+			uint32_t param_idx = fetch_type >> ZEND_FETCH_CLASS_TYPE_PARAM_SHIFT;
+			zend_type type_arg = scope->generic_binding->args[param_idx];
+			if (ZEND_TYPE_HAS_NAME(type_arg)) {
+				ZVAL_STR_COPY(EX_VAR(opline->result.var), ZEND_TYPE_NAME(type_arg));
+			} else {
+				ZVAL_STR(EX_VAR(opline->result.var), zend_type_to_string(type_arg));
+			}
+			break;
+		}
 		default: ZEND_UNREACHABLE();
 	}
 	ZEND_VM_NEXT_OPCODE();
@@ -85681,7 +85749,7 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_CCONV ZEND_FETCH_CLASS_NAME_S
 		HANDLE_EXCEPTION();
 	}
 
-	switch (fetch_type) {
+	switch (fetch_type & ZEND_FETCH_CLASS_MASK) {
 		case ZEND_FETCH_CLASS_SELF:
 			ZVAL_STR_COPY(EX_VAR(opline->result.var), scope->name);
 			break;
@@ -85703,6 +85771,23 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_CCONV ZEND_FETCH_CLASS_NAME_S
 			}
 			ZVAL_STR_COPY(EX_VAR(opline->result.var), called_scope->name);
 			break;
+		case ZEND_FETCH_CLASS_TYPE_PARAM: {
+			if (UNEXPECTED(!scope->generic_binding)) {
+				SAVE_OPLINE();
+				zend_throw_error(NULL,
+					"Cannot resolve a type parameter when no generic binding is in scope");
+				ZVAL_UNDEF(EX_VAR(opline->result.var));
+				HANDLE_EXCEPTION();
+			}
+			uint32_t param_idx = fetch_type >> ZEND_FETCH_CLASS_TYPE_PARAM_SHIFT;
+			zend_type type_arg = scope->generic_binding->args[param_idx];
+			if (ZEND_TYPE_HAS_NAME(type_arg)) {
+				ZVAL_STR_COPY(EX_VAR(opline->result.var), ZEND_TYPE_NAME(type_arg));
+			} else {
+				ZVAL_STR(EX_VAR(opline->result.var), zend_type_to_string(type_arg));
+			}
+			break;
+		}
 		default: ZEND_UNREACHABLE();
 	}
 	ZEND_VM_NEXT_OPCODE();
@@ -93738,7 +93823,7 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_CCONV ZEND_FETCH_CLASS_NAME_S
 		HANDLE_EXCEPTION();
 	}
 
-	switch (fetch_type) {
+	switch (fetch_type & ZEND_FETCH_CLASS_MASK) {
 		case ZEND_FETCH_CLASS_SELF:
 			ZVAL_STR_COPY(EX_VAR(opline->result.var), scope->name);
 			break;
@@ -93760,6 +93845,23 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_CCONV ZEND_FETCH_CLASS_NAME_S
 			}
 			ZVAL_STR_COPY(EX_VAR(opline->result.var), called_scope->name);
 			break;
+		case ZEND_FETCH_CLASS_TYPE_PARAM: {
+			if (UNEXPECTED(!scope->generic_binding)) {
+				SAVE_OPLINE();
+				zend_throw_error(NULL,
+					"Cannot resolve a type parameter when no generic binding is in scope");
+				ZVAL_UNDEF(EX_VAR(opline->result.var));
+				HANDLE_EXCEPTION();
+			}
+			uint32_t param_idx = fetch_type >> ZEND_FETCH_CLASS_TYPE_PARAM_SHIFT;
+			zend_type type_arg = scope->generic_binding->args[param_idx];
+			if (ZEND_TYPE_HAS_NAME(type_arg)) {
+				ZVAL_STR_COPY(EX_VAR(opline->result.var), ZEND_TYPE_NAME(type_arg));
+			} else {
+				ZVAL_STR(EX_VAR(opline->result.var), zend_type_to_string(type_arg));
+			}
+			break;
+		}
 		default: ZEND_UNREACHABLE();
 	}
 	ZEND_VM_NEXT_OPCODE();
