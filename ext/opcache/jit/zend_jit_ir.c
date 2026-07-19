@@ -11233,11 +11233,10 @@ static int zend_jit_leave_func(zend_jit_ctx         *jit,
 		ir_MERGE_WITH(fast_path);
 		may_throw = 1;
 	} else if (op_array->fn_flags2 & ZEND_ACC2_MUTATING) {
-		/* Mutating callee (today: a value class's constructor): $this is
-		 * borrowed and exclusive, so there is normally no receiver to
-		 * release -- but $this must not have escaped. Mirror the VM's leave
-		 * order exactly (release an owned receiver, otherwise escape-check)
-		 * so any frame shape the VM can produce behaves identically here. */
+		/* Mutating callee: an owned receiver (explicit call, CV mutating
+		 * call) is released; a borrowed one is checked for escape only in
+		 * `new`-borne construction -- everywhere else $this may escape and
+		 * becomes an ordinary shared value. Mirror the VM's leave order. */
 		ir_ref if_release, fast_path;
 
 		if (!left_frame) {
@@ -11254,7 +11253,9 @@ static int zend_jit_leave_func(zend_jit_ctx         *jit,
 		jit_OBJ_RELEASE(jit, ir_LOAD_A(jit_EX(This.value.obj)));
 		fast_path = ir_END();
 		ir_IF_FALSE(if_release);
-		ir_CALL_1(IR_VOID, ir_CONST_FC_FUNC(zend_jit_value_class_this_escape), jit_FP(jit));
+		if (op_array->fn_flags & ZEND_ACC_CTOR) {
+			ir_CALL_1(IR_VOID, ir_CONST_FC_FUNC(zend_jit_value_class_this_escape), jit_FP(jit));
+		}
 		ir_MERGE_WITH(fast_path);
 		may_throw = 1;
 	} else if (may_need_release_this) {

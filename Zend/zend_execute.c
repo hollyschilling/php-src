@@ -1206,29 +1206,20 @@ ZEND_API ZEND_COLD void ZEND_FASTCALL zend_throw_struct_this_escape(const zend_c
 
 ZEND_API void ZEND_FASTCALL zend_check_value_class_this_escape(zend_execute_data *execute_data)
 {
-	uint32_t expected;
-
-	if (!(EX(func)->common.fn_flags2 & ZEND_ACC2_MUTATING)) {
-		return;
-	}
-	if (ZEND_CALL_INFO(execute_data) & ZEND_CALL_RELEASE_THIS) {
-		/* Owned receiver (a CV mutating call, or a constructor whose $this
-		 * escaped and was then reclaimed by ownership-taking separation):
-		 * the receiver slot and the frame legitimately hold two references. */
-		expected = 2;
-	} else if (EX(func)->common.fn_flags & ZEND_ACC_CTOR) {
-		/* Borrowed-exclusive fresh instance. */
-		expected = 1;
-	} else {
-		/* A nested $this->m() borrow: the baseline is unknowable (receiver
-		 * slot plus every outer mutating frame). Any escape reference that
-		 * survives is caught when the outermost owned or constructor frame
-		 * leaves. */
-		return;
-	}
-	if (GC_REFCOUNT(Z_OBJ(EX(This))) > expected) {
-		zend_throw_struct_this_escape(EX(func)->common.scope,
-			(EX(func)->common.fn_flags & ZEND_ACC_CTOR) ? "the constructor" : "a mutating method");
+	/* Only `new`-borne construction enforces non-escape: the frame holds
+	 * $this borrowed-exclusive (refcount 1 at entry), and the instance is
+	 * discarded when this throws, so the check is transactional -- no
+	 * half-mutated state is ever observable. Every other mutating context
+	 * (methods, explicit re-initialization, set hooks) may export $this:
+	 * the escapee becomes an ordinary shared value, separated from the
+	 * receiver at the next write, exactly as if it had been assigned after
+	 * the call. (The RELEASE_THIS test excludes the owned explicit-call
+	 * route, which follows method semantics.) */
+	if ((EX(func)->common.fn_flags2 & ZEND_ACC2_MUTATING)
+	 && (EX(func)->common.fn_flags & ZEND_ACC_CTOR)
+	 && !(ZEND_CALL_INFO(execute_data) & ZEND_CALL_RELEASE_THIS)
+	 && GC_REFCOUNT(Z_OBJ(EX(This))) > 1) {
+		zend_throw_struct_this_escape(EX(func)->common.scope, "the constructor");
 	}
 }
 

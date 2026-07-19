@@ -1269,17 +1269,10 @@ found:;
 			 * the hook separate and silently discard its writes. The container
 			 * already keeps the instance alive across the call.
 			 *
-			 * As in the constructor, $this must not escape: if the hook stored
-			 * it somewhere, an alias would observe the in-place writes. The
-			 * borrowed binding leaves the refcount untouched, so a growth across
-			 * the call is exactly an escape. */
-			uint32_t refcount_before = GC_REFCOUNT(zobj);
+			 * $this may escape: like every mutating context except `new`-borne
+			 * construction, the escapee becomes an ordinary shared value,
+			 * separated from the receiver at the next write. */
 			zend_call_known_instance_method_with_1_params(set, zobj, NULL, value);
-			if (UNEXPECTED(GC_REFCOUNT(zobj) > refcount_before) && !EG(exception)) {
-				zend_throw_struct_this_escape(zobj->ce, "a set hook");
-				variable_ptr = &EG(error_zval);
-				goto exit;
-			}
 		} else {
 			GC_ADDREF(zobj);
 			zend_call_known_instance_method_with_1_params(set, zobj, NULL, value);
