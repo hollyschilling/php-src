@@ -1,5 +1,5 @@
 --TEST--
-Structs: a set hook that exports $this throws
+Structs: a set hook may export $this; the escapee becomes an ordinary shared value
 --FILE--
 <?php
 
@@ -14,13 +14,24 @@ struct S {
 }
 
 $s = new S();
-try {
-    $s->y = 5;
-    echo "no error\n";
-} catch (\Error $e) {
-    echo $e->getMessage(), "\n";
-}
+$s->y = 5;
+
+// After the call the escapee aliases the receiver's value -- exactly as if
+// it had been assigned after the write.
+var_dump($s->x, Registry::$held->x);
+
+// The alias is severed by the next write to either side (copy-on-write).
+$s->x = 9;
+var_dump($s->x, Registry::$held->x);
+
+Registry::$held->x = 40;
+var_dump($s->x, Registry::$held->x);
 
 ?>
---EXPECTF--
-Cannot export $this from a set hook of struct S
+--EXPECT--
+int(5)
+int(5)
+int(9)
+int(5)
+int(9)
+int(40)
