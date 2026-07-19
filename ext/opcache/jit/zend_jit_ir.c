@@ -9061,6 +9061,21 @@ static int zend_jit_init_method_call(zend_jit_ctx         *jit,
 					ir_MERGE_WITH_EMPTY_FALSE(if_ref);
 				}
 			}
+			ir_ref indirect_path = IR_UNUSED, indirect_obj = IR_UNUSED;
+
+			if (op1_info & MAY_BE_INDIRECT) {
+				/* Scoped-borrow receiver (ZEND_FETCH_OBJ_RECEIVER): deref the
+				 * slot and own the object, mirroring the VM's INIT. A
+				 * mutating callee re-derives the slot in
+				 * zend_jit_find_method_helper. */
+				ir_ref if_ind = jit_if_Z_TYPE(jit, op1_addr, IS_INDIRECT);
+				ir_IF_TRUE(if_ind);
+				indirect_obj = ir_LOAD_A(jit_Z_PTR(jit, op1_addr));
+				jit_GC_ADDREF(jit, indirect_obj);
+				indirect_path = ir_END();
+				ir_IF_FALSE(if_ind);
+			}
+
 			if (op1_info & ((MAY_BE_UNDEF|MAY_BE_ANY)- MAY_BE_OBJECT)) {
 				if (JIT_G(trigger) == ZEND_JIT_ON_HOT_TRACE) {
 					int32_t exit_point = zend_jit_trace_get_exit_point(opline, ZEND_JIT_EXIT_TO_VM);
@@ -9090,6 +9105,10 @@ static int zend_jit_init_method_call(zend_jit_ctx         *jit,
 			}
 
 			this_ref = jit_Z_PTR(jit, op1_addr);
+			if (indirect_path != IR_UNUSED) {
+				ir_MERGE_WITH(indirect_path);
+				this_ref = ir_PHI_2(IR_ADDR, this_ref, indirect_obj);
+			}
 		}
 
 		if (jit->delayed_call_level) {
@@ -14421,6 +14440,131 @@ static ir_ref jit_value_class_separation(zend_jit_ctx *jit, const zend_op_array 
 		inner_ref = ir_PHI_2(IR_ADDR, inner_ref, obj_ref);
 	}
 	return inner_ref;
+}
+
+/* Scoped-borrow receiver fetch (ZEND_FETCH_OBJ_RECEIVER) for traces.
+ * Compile-time facts do most of the work: the recorded container class gives
+ * a constant property offset, hook-ness, and the visibility half of the
+ * lendability rule; only the exclusive-root checks stay runtime. Returns
+ * 1 = emitted, 0 = failure, -1 = not emittable (caller uses the VM handler). */
+static int zend_jit_fetch_obj_receiver(zend_jit_ctx        *jit,
+                                       const zend_op       *opline,
+                                       const zend_op_array *op_array,
+                                       uint32_t             op1_info,
+                                       zend_jit_addr        op1_addr,
+                                       bool                 on_this,
+                                       zend_class_entry    *ce,
+                                       zend_jit_addr        res_addr)
+{
+	const zend_property_info *prop_info;
+	ir_ref obj_ref, slot_ptr, end_inputs = IR_UNUSED;
+	zend_jit_addr slot_addr;
+	int32_t exit_point;
+	const void *exit_addr;
+	bool lendable_static;
+
+	ZEND_ASSERT(JIT_G(trigger) == ZEND_JIT_ON_HOT_TRACE);
+	ZEND_ASSERT(opline->op2_type == IS_CONST);
+
+	prop_info = zend_get_known_property_info(op_array, ce,
+		Z_STR_P(RT_CONSTANT(opline, opline->op2)), on_this, op_array->filename);
+	if (!prop_info
+	 || prop_info->hooks
+	 || (prop_info->flags & ZEND_ACC_STATIC)
+	 || !IS_VALID_PROPERTY_OFFSET(prop_info->offset)) {
+		return -1;
+	}
+
+	/* The set-visibility half of zend_receiver_slot_is_lendable(), decided
+	 * statically: the running scope is this op_array's scope. */
+	lendable_static = !(prop_info->flags & ZEND_ACC_READONLY);
+	if (lendable_static && (prop_info->flags & ZEND_ACC_PPP_SET_MASK)) {
+		if (prop_info->flags & ZEND_ACC_PUBLIC_SET) {
+			/* lendable */
+		} else if (prop_info->flags & ZEND_ACC_PRIVATE_SET) {
+			lendable_static = op_array->scope == prop_info->ce;
+		} else {
+			lendable_static = op_array->scope
+				&& instanceof_function_slow(op_array->scope, prop_info->ce);
+		}
+	}
+
+	exit_point = zend_jit_trace_get_exit_point(opline, ZEND_JIT_EXIT_TO_VM);
+	exit_addr = zend_jit_trace_get_exit_addr(exit_point);
+	if (!exit_addr) {
+		return 0;
+	}
+
+	if (on_this) {
+		zend_jit_addr this_addr = ZEND_ADDR_MEM_ZVAL(ZREG_FP, offsetof(zend_execute_data, This));
+		obj_ref = jit_Z_PTR(jit, this_addr);
+	} else {
+		if (op1_info & MAY_BE_REF) {
+			ir_ref ref = jit_ZVAL_ADDR(jit, op1_addr);
+			ref = jit_ZVAL_DEREF_ref(jit, ref);
+			op1_addr = ZEND_ADDR_REF_ZVAL(ref);
+		}
+		if (op1_info & ((MAY_BE_UNDEF|MAY_BE_ANY) - MAY_BE_OBJECT)) {
+			ir_GUARD(ir_EQ(jit_Z_TYPE(jit, op1_addr), ir_CONST_U8(IS_OBJECT)),
+				ir_CONST_ADDR(exit_addr));
+		}
+		obj_ref = jit_Z_PTR(jit, op1_addr);
+	}
+
+	/* Structs cannot be subclassed and a final scope pins $this exactly;
+	 * everything else guards the container class (a mismatch deoptimizes). */
+	if (!(on_this
+	 && ((ce->ce_flags & ZEND_ACC_FINAL) || (ce->ce_flags2 & ZEND_ACC2_VALUE_CLASS)))) {
+		ir_GUARD(ir_EQ(
+			ir_LOAD_A(ir_ADD_OFFSET(obj_ref, offsetof(zend_object, ce))),
+			ir_CONST_ADDR(ce)), ir_CONST_ADDR(exit_addr));
+	}
+
+	slot_ptr = ir_ADD_OFFSET(obj_ref, prop_info->offset);
+	slot_addr = ZEND_ADDR_REF_ZVAL(slot_ptr);
+
+	/* Non-object slot values (typed scalars, UNDEF, null) read via the VM. */
+	ir_GUARD(ir_EQ(jit_Z_TYPE(jit, slot_addr), ir_CONST_U8(IS_OBJECT)),
+		ir_CONST_ADDR(exit_addr));
+
+	if (lendable_static
+	 && (!on_this || (op_array->fn_flags2 & ZEND_ACC2_MUTATING)
+	  || !(ce->ce_flags2 & ZEND_ACC2_VALUE_CLASS))) {
+		/* A borrow is possible: struct value + exclusive root yields the
+		 * slot itself; everything else is a plain read. */
+		ir_ref if_vc;
+
+		if_vc = ir_IF(ir_AND_U32(
+			ir_LOAD_U32(ir_ADD_OFFSET(
+				ir_LOAD_A(ir_ADD_OFFSET(jit_Z_PTR(jit, slot_addr), offsetof(zend_object, ce))),
+				offsetof(zend_class_entry, ce_flags2))),
+			ir_CONST_U32(ZEND_ACC2_VALUE_CLASS)));
+		ir_IF_TRUE(if_vc);
+
+		if (!on_this && (ce->ce_flags2 & ZEND_ACC2_VALUE_CLASS)) {
+			/* CV struct container: root only while exclusively held. */
+			ir_ref if_rc1 = ir_IF(ir_EQ(jit_GC_REFCOUNT(jit, obj_ref), ir_CONST_U32(1)));
+			ir_IF_FALSE(if_rc1);
+			jit_ZVAL_COPY(jit, res_addr, -1, slot_addr, MAY_BE_OBJECT|MAY_BE_RC1|MAY_BE_RCN, 1);
+			ir_END_list(end_inputs);
+			ir_IF_TRUE(if_rc1);
+		}
+		/* The borrow: result = IS_INDIRECT pointing at the slot. */
+		jit_set_Z_PTR(jit, res_addr, slot_ptr);
+		jit_set_Z_TYPE_INFO(jit, res_addr, IS_INDIRECT);
+		ir_END_list(end_inputs);
+
+		ir_IF_FALSE(if_vc);
+		jit_ZVAL_COPY(jit, res_addr, -1, slot_addr, MAY_BE_OBJECT|MAY_BE_RC1|MAY_BE_RCN, 1);
+		ir_END_list(end_inputs);
+
+		ir_MERGE_list(end_inputs);
+	} else {
+		/* Never lendable here: an ordinary guarded property read. */
+		jit_ZVAL_COPY(jit, res_addr, -1, slot_addr, MAY_BE_OBJECT|MAY_BE_RC1|MAY_BE_RCN, 1);
+	}
+
+	return 1;
 }
 
 static int zend_jit_fetch_obj(zend_jit_ctx         *jit,

@@ -6134,6 +6134,64 @@ static zend_vm_opcode_handler_t zend_jit_trace(zend_jit_trace_rec *trace_buffer,
 							goto jit_failure;
 						}
 						goto done;
+					case ZEND_FETCH_OBJ_RECEIVER:
+						/* Scoped-borrow receiver fetch: emit for $this/CV
+						 * containers with a known class; other shapes run the
+						 * VM handler via the generic fallback. */
+						on_this = 0;
+						ce = NULL;
+						if (opline->op1_type == IS_UNUSED) {
+							op1_info = MAY_BE_OBJECT|MAY_BE_RC1|MAY_BE_RCN;
+							op1_addr = 0;
+							ce = op_array->scope;
+							on_this = 1;
+						} else if (opline->op1_type == IS_CV) {
+							op1_info = OP1_INFO();
+							if (!(op1_info & MAY_BE_OBJECT)) {
+								break;
+							}
+							op1_addr = OP1_REG_ADDR();
+							if (orig_op1_type != IS_UNKNOWN
+							 && (orig_op1_type & IS_TRACE_REFERENCE)) {
+								if (!zend_jit_fetch_reference(&ctx, opline, orig_op1_type, &op1_info, &op1_addr,
+										!ssa->var_info[ssa_op->op1_use].guarded_reference, 1)) {
+									goto jit_failure;
+								}
+								if (ssa->vars[ssa_op->op1_use].alias == NO_ALIAS) {
+									ssa->var_info[ssa_op->op1_def >= 0 ? ssa_op->op1_def : ssa_op->op1_use].guarded_reference = 1;
+								}
+							} else {
+								CHECK_OP1_TRACE_TYPE();
+							}
+							if (!(op1_info & MAY_BE_OBJECT)) {
+								break;
+							}
+							if (ssa->var_info && ssa->ops && ssa_op->op1_use >= 0) {
+								zend_ssa_var_info *op1_ssa = ssa->var_info + ssa_op->op1_use;
+								if (op1_ssa->ce && !op1_ssa->ce->create_object) {
+									ce = op1_ssa->ce;
+								}
+							}
+							if (!ce && op1_ce && !op1_ce->create_object) {
+								ce = op1_ce;
+							}
+						} else {
+							break;
+						}
+						if (!ce) {
+							break;
+						}
+						{
+							int r = zend_jit_fetch_obj_receiver(&ctx, opline, op_array,
+								op1_info, op1_addr, on_this, ce, RES_REG_ADDR());
+							if (r < 0) {
+								break;
+							}
+							if (!r) {
+								goto jit_failure;
+							}
+						}
+						goto done;
 					case ZEND_FETCH_STATIC_PROP_FUNC_ARG:
 						if (!JIT_G(current_frame)
 						 || !JIT_G(current_frame)->call
