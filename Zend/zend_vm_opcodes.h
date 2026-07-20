@@ -333,7 +333,9 @@ END_EXTERN_C()
 #define ZEND_TYPE_ASSERT                    211
 #define ZEND_BIND_EXTENSION                 212
 #define ZEND_RECV_RECEIVER                  213
+#define ZEND_REGISTER_MODULE                214
+#define ZEND_FETCH_OBJ_RECEIVER             215
 
-#define ZEND_VM_LAST_OPCODE                 213
+#define ZEND_VM_LAST_OPCODE                 215
 
 #endif

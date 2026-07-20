@@ -34,6 +34,11 @@ const T_NAME_RELATIVE = UNKNOWN;
 const T_NAME_QUALIFIED = UNKNOWN;
 /**
  * @var int
+ * @cvalue T_NAME_MODULE
+ */
+const T_NAME_MODULE = UNKNOWN;
+/**
+ * @var int
  * @cvalue T_VARIABLE
  */
 const T_VARIABLE = UNKNOWN;
@@ -417,6 +422,16 @@ const T_ENUM = UNKNOWN;
  * @cvalue T_STRUCT
  */
 const T_STRUCT = UNKNOWN;
+/**
+ * @var int
+ * @cvalue T_MODULE
+ */
+const T_MODULE = UNKNOWN;
+/**
+ * @var int
+ * @cvalue T_INTERNAL
+ */
+const T_INTERNAL = UNKNOWN;
 /**
  * @var int
  * @cvalue T_EXTENDS
