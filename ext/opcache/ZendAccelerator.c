@@ -33,6 +33,7 @@
 #include "zend_vm.h"
 #include "zend_inheritance.h"
 #include "zend_exceptions.h"
+#include "zend_generics.h"
 #include "zend_mmap.h"
 #include "zend_observer.h"
 #include "main/php_main.h"
@@ -4388,9 +4389,71 @@ static void preload_fix_trait_op_array(zend_op_array *op_array)
 	op_array->prop_info = prop_info;
 }
 
+/* Re-sync a stamped generic instantiation's method header from its
+ * (now optimized) template original, preserving the per-clone fields --
+ * including a substituted arg_info, which trait fixing would clobber. */
+static void preload_fix_generic_op_array(zend_op_array *op_array)
+{
+	if (op_array->type != ZEND_USER_FUNCTION) {
+		return;
+	}
+
+	const zend_op_array *orig_op_array = zend_shared_alloc_get_xlat_entry(op_array->refcount);
+	ZEND_ASSERT(orig_op_array && "Template op_array must be in xlat table");
+
+	zend_string *function_name = op_array->function_name;
+	zend_class_entry *scope = op_array->scope;
+	uint32_t fn_flags = op_array->fn_flags;
+	uint32_t fn_flags2 = op_array->fn_flags2;
+	zend_function *prototype = op_array->prototype;
+	HashTable *ht = op_array->static_variables;
+	const zend_property_info *prop_info = op_array->prop_info;
+	zend_arg_info *arg_info = op_array->arg_info;
+	*op_array = *orig_op_array;
+	op_array->function_name = function_name;
+	op_array->scope = scope;
+	op_array->fn_flags = fn_flags;
+	op_array->fn_flags2 = fn_flags2;
+	op_array->prototype = prototype;
+	op_array->static_variables = ht;
+	op_array->prop_info = prop_info;
+	if (fn_flags2 & ZEND_ACC2_GENERIC_SUBST_ARG_INFO) {
+		op_array->arg_info = arg_info;
+	}
+	ZEND_MAP_PTR_INIT(op_array->run_time_cache, NULL);
+	ZEND_MAP_PTR_INIT(op_array->static_variables_ptr, NULL);
+}
+
+static void preload_fix_generic_methods(const zend_class_entry *ce)
+{
+	zend_op_array *op_array;
+
+	ZEND_HASH_MAP_FOREACH_PTR(&ce->function_table, op_array) {
+		preload_fix_generic_op_array(op_array);
+	} ZEND_HASH_FOREACH_END();
+
+	if (ce->num_hooked_props > 0) {
+		zend_property_info *info;
+		ZEND_HASH_MAP_FOREACH_PTR(&ce->properties_info, info) {
+			if (info->ce == ce && info->hooks) {
+				for (uint32_t i = 0; i < ZEND_PROPERTY_HOOK_COUNT; i++) {
+					if (info->hooks[i]) {
+						preload_fix_generic_op_array(&info->hooks[i]->op_array);
+					}
+				}
+			}
+		} ZEND_HASH_FOREACH_END();
+	}
+}
+
 static void preload_fix_trait_methods(const zend_class_entry *ce)
 {
 	zend_op_array *op_array;
+
+	if (ce->ce_flags2 & ZEND_ACC2_GENERIC_INSTANCE) {
+		preload_fix_generic_methods(ce);
+		return;
+	}
 
 	ZEND_HASH_MAP_FOREACH_PTR(&ce->function_table, op_array) {
 		preload_fix_trait_op_array(op_array);
@@ -4419,14 +4482,16 @@ static void preload_optimize(zend_persistent_script *script)
 	zend_shared_alloc_init_xlat_table();
 
 	ZEND_HASH_MAP_FOREACH_PTR(&script->script.class_table, ce) {
-		if (ce->ce_flags & ZEND_ACC_TRAIT) {
+		if ((ce->ce_flags & ZEND_ACC_TRAIT)
+		 || (ce->ce_flags2 & ZEND_ACC2_GENERIC_TEMPLATE)) {
 			preload_register_trait_methods(ce);
 		}
 	} ZEND_HASH_FOREACH_END();
 
 	ZEND_HASH_MAP_FOREACH_PTR(preload_scripts, tmp_script) {
 		ZEND_HASH_MAP_FOREACH_PTR(&tmp_script->script.class_table, ce) {
-			if (ce->ce_flags & ZEND_ACC_TRAIT) {
+			if ((ce->ce_flags & ZEND_ACC_TRAIT)
+			 || (ce->ce_flags2 & ZEND_ACC2_GENERIC_TEMPLATE)) {
 				preload_register_trait_methods(ce);
 			}
 		} ZEND_HASH_FOREACH_END();
@@ -4744,6 +4809,7 @@ static zend_result accel_preload(const char *config, bool in_child)
 		/* Inheritance errors may be thrown during linking */
 		zend_try {
 			preload_link();
+			zend_generics_preload_stamp_all();
 		} zend_catch {
 			CG(map_ptr_last) = orig_map_ptr_last;
 			ret = FAILURE;

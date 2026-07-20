@@ -1544,6 +1544,12 @@ void zend_foreach_op_array(zend_script *script, zend_op_array_func_t func, void 
 			continue;
 		}
 		const zend_class_entry *ce = Z_CE_P(zv);
+		if (UNEXPECTED(ce->ce_flags2 & ZEND_ACC2_GENERIC_INSTANCE)) {
+			/* Stamped instantiations share their op_array bodies with the
+			 * template; the bodies are optimized once via the template and
+			 * the instance headers are re-synced afterwards. */
+			continue;
+		}
 		ZEND_HASH_MAP_FOREACH_PTR(&ce->function_table, op_array) {
 			if (op_array->scope == ce
 					&& op_array->type == ZEND_USER_FUNCTION

@@ -23,6 +23,10 @@ BEGIN_EXTERN_C()
 ZEND_API zend_class_entry *zend_generics_stamp_instantiation(
 		zend_string *name, zend_string *lc_name, bool use_autoload);
 
+/* Preload: stamp every generic instantiation reachable from preloaded code
+ * (transitive closure), so the stamped classes persist into SHM. */
+ZEND_API void zend_generics_preload_stamp_all(void);
+
 END_EXTERN_C()
 
 #endif /* ZEND_GENERICS_H */
