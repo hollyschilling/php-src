@@ -2370,8 +2370,12 @@ static void zend_add_trait_method(zend_class_entry *ce, zend_string *name, zend_
 
 	if ((existing_fn = zend_hash_find_ptr(&ce->function_table, key)) != NULL) {
 		/* if it is the same function with the same visibility and has not been assigned a class scope yet, regardless
-		 * of where it is coming from there is no conflict and we do not need to add it again */
+		 * of where it is coming from there is no conflict and we do not need to add it again.
+		 * The signature must match too: clones of one generic trait method share
+		 * their body across instantiations but carry substituted arg_info, and
+		 * e.g. Cache<int>::remember vs Cache<string>::remember must collide. */
 		if (existing_fn->op_array.opcodes == fn->op_array.opcodes &&
+			existing_fn->op_array.arg_info == fn->op_array.arg_info &&
 			(existing_fn->common.fn_flags & ZEND_ACC_PPP_MASK) == (fn->common.fn_flags & ZEND_ACC_PPP_MASK) &&
 			(existing_fn->common.scope->ce_flags & ZEND_ACC_TRAIT)) {
 			return;
