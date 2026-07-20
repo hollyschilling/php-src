@@ -375,6 +375,19 @@ ZEND_API void destroy_zend_class(zval *zv)
 				if (ce->num_traits > 0) {
 					_destroy_zend_class_traits_info(ce);
 				}
+
+				if (ce->generic_params) {
+					/* Release is a no-op for the (usual) interned case. */
+					for (uint32_t i = 0; i < ce->generic_params->num_params; i++) {
+						zend_string_release_ex(ce->generic_params->params[i].name, 0);
+						if (ce->generic_params->params[i].bound_name) {
+							zend_string_release_ex(ce->generic_params->params[i].bound_name, 0);
+						}
+					}
+					for (uint32_t i = 0; i < ce->generic_params->num_deferred_interfaces; i++) {
+						zend_string_release_ex(ce->generic_params->deferred_interfaces[i], 0);
+					}
+				}
 			}
 
 			if (ce->default_properties_table) {

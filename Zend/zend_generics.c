@@ -22,6 +22,12 @@
 #include "zend_inheritance.h"
 #include "zend_interfaces.h"
 #include "zend_operators.h"
+#include "zend_smart_str.h"
+#include "zend_exceptions.h"
+
+#ifndef EMPTY_SWITCH_DEFAULT_CASE
+# define EMPTY_SWITCH_DEFAULT_CASE() default: ZEND_UNREACHABLE();
+#endif
 
 #define ZEND_GENERICS_MAX_ARGS 64
 
@@ -719,7 +725,144 @@ ZEND_API void zend_generics_preload_stamp_all(void)
 	zend_hash_destroy(&attempted);
 }
 
-ZEND_API zend_class_entry *zend_generics_stamp_instantiation(
+static const char *zend_generics_scalar_type_name(uint32_t type_mask)
+{
+	switch (type_mask) {
+		case MAY_BE_LONG:   return "int";
+		case MAY_BE_DOUBLE: return "float";
+		case MAY_BE_STRING: return "string";
+		case MAY_BE_BOOL:   return "bool";
+		EMPTY_SWITCH_DEFAULT_CASE()
+	}
+}
+
+/* Substitute this instantiation's type arguments into a deferred interface
+ * reference such as "App\Collection<T>". Args are bare (params or concrete)
+ * by construction, so substitution depth cannot grow. Returns an owned,
+ * non-interned string. */
+static zend_string *zend_generics_substitute_deferred_ref(
+		zend_string *ref, const zend_class_entry *template_ce,
+		const zend_generic_binding *binding)
+{
+	zend_generic_name_slice base_slice;
+	zend_generic_name_slice arg_slices[ZEND_GENERICS_MAX_ARGS];
+	uint32_t num_args;
+	bool ok = zend_generics_parse_name(ref, &base_slice, arg_slices, &num_args);
+	ZEND_ASSERT(ok && "deferred refs are compiler-generated");
+	const zend_generic_params *gp = template_ce->generic_params;
+
+	smart_str buf = {0};
+	smart_str_appendl(&buf, base_slice.start, base_slice.len);
+	smart_str_appendc(&buf, '<');
+	for (uint32_t i = 0; i < num_args; i++) {
+		if (i) {
+			smart_str_appendc(&buf, ',');
+		}
+		const zend_generic_name_slice *slice = &arg_slices[i];
+		uint32_t param_idx = (uint32_t) -1;
+		if (!memchr(slice->start, '\\', slice->len) && !memchr(slice->start, '<', slice->len)) {
+			for (uint32_t j = 0; j < gp->num_params; j++) {
+				if (zend_binary_strcasecmp(slice->start, slice->len,
+						ZSTR_VAL(gp->params[j].name), ZSTR_LEN(gp->params[j].name)) == 0) {
+					param_idx = j;
+					break;
+				}
+			}
+		}
+		if (param_idx != (uint32_t) -1) {
+			const zend_type arg = binding->args[param_idx];
+			if (ZEND_TYPE_HAS_NAME(arg)) {
+				smart_str_append(&buf, ZEND_TYPE_NAME(arg));
+			} else {
+				smart_str_appends(&buf,
+					zend_generics_scalar_type_name(ZEND_TYPE_PURE_MASK(arg)));
+			}
+		} else {
+			smart_str_appendl(&buf, slice->start, slice->len);
+		}
+	}
+	smart_str_appendc(&buf, '>');
+	return smart_str_extract(&buf);
+}
+
+static bool zend_generics_ce_implements_ptr(
+		const zend_class_entry *ce, const zend_class_entry *iface)
+{
+	for (uint32_t i = 0; i < ce->num_interfaces; i++) {
+		if (ce->interfaces[i] == iface) {
+			return true;
+		}
+	}
+	return false;
+}
+
+/* Resolve the template's param-dependent implements/extends-interface
+ * references for this instantiation: substitute, stamp the interface
+ * instantiation, and add the edges (flattened, deduped -- deduping ourselves
+ * because zend_do_implement_interface treats duplicates as fatal, and a
+ * diamond via a concrete interface is legitimate here). Method satisfaction
+ * and variance are checked per instantiation by the ordinary machinery. */
+static bool zend_generics_resolve_deferred_interfaces(
+		zend_class_entry *ce, const zend_class_entry *template_ce,
+		const zend_generic_binding *binding, bool use_autoload)
+{
+	const zend_generic_params *gp = template_ce->generic_params;
+
+	/* Set before appending: destroy_zend_class reads the interfaces union by
+	 * this flag, and a failure below abandons a partially-edged instance. */
+	ce->ce_flags |= ZEND_ACC_RESOLVED_INTERFACES;
+
+	for (uint32_t i = 0; i < gp->num_deferred_interfaces; i++) {
+		zend_string *sub = zend_generics_substitute_deferred_ref(
+			gp->deferred_interfaces[i], template_ce, binding);
+		zend_class_entry *iface = zend_lookup_class_ex(sub, NULL,
+			use_autoload ? 0 : ZEND_FETCH_CLASS_NO_AUTOLOAD);
+		if (!iface) {
+			if (!EG(exception)) {
+				zend_throw_error(NULL, "Interface %s required by %s was not found",
+					ZSTR_VAL(sub), ZSTR_VAL(ce->name));
+			}
+			zend_string_release(sub);
+			return false;
+		}
+		if (!(iface->ce_flags & ZEND_ACC_INTERFACE)) {
+			zend_throw_error(NULL, "%s cannot implement %s - it is not an interface",
+				ZSTR_VAL(ce->name), ZSTR_VAL(sub));
+			zend_string_release(sub);
+			return false;
+		}
+		zend_string_release(sub);
+
+		/* Flatten: the interface's transitive interfaces first, then itself. */
+		for (uint32_t j = 0; j < iface->num_interfaces; j++) {
+			if (!zend_generics_ce_implements_ptr(ce, iface->interfaces[j])) {
+				zend_do_implement_interface(ce, iface->interfaces[j]);
+				if (UNEXPECTED(EG(exception))) {
+					return false;
+				}
+			}
+		}
+		if (!zend_generics_ce_implements_ptr(ce, iface)) {
+			zend_do_implement_interface(ce, iface);
+			if (UNEXPECTED(EG(exception))) {
+				return false;
+			}
+		}
+	}
+
+	if ((ce->ce_flags & ZEND_ACC_IMPLICIT_ABSTRACT_CLASS)
+			&& !(ce->ce_flags & (ZEND_ACC_INTERFACE | ZEND_ACC_EXPLICIT_ABSTRACT_CLASS))
+			&& !(template_ce->ce_flags & ZEND_ACC_IMPLICIT_ABSTRACT_CLASS)) {
+		/* The template is missing interface members: report which. */
+		zend_verify_abstract_class(ce);
+		if (UNEXPECTED(EG(exception))) {
+			return false;
+		}
+	}
+	return true;
+}
+
+static zend_class_entry *zend_generics_stamp_instantiation_impl(
 		zend_string *name, zend_string *lc_name, bool use_autoload)
 {
 	zend_generic_name_slice base_slice;
@@ -795,6 +938,18 @@ ZEND_API zend_class_entry *zend_generics_stamp_instantiation(
 		return NULL;
 	}
 
+	if (template_ce->generic_params->num_deferred_interfaces
+			&& !zend_generics_resolve_deferred_interfaces(ce, template_ce, binding, use_autoload)) {
+		/* The clone is fully built at this point, so it can be destroyed
+		 * properly instead of leaking with the request arena. */
+		zval zv_ce;
+		ZVAL_PTR(&zv_ce, ce);
+		destroy_zend_class(&zv_ce);
+		zend_string_release(display);
+		zend_string_release(lc_key);
+		return NULL;
+	}
+
 	zv = zend_hash_add_ptr(EG(class_table), lc_key, ce);
 	ZEND_ASSERT(zv && "mangled key cannot already be present");
 
@@ -802,5 +957,23 @@ ZEND_API zend_class_entry *zend_generics_stamp_instantiation(
 	zend_string_release(display);
 	zend_string_release(lc_key);
 
+	return ce;
+}
+
+ZEND_API zend_class_entry *zend_generics_stamp_instantiation(
+		zend_string *name, zend_string *lc_name, bool use_autoload)
+{
+	if (!EG(generics_stamping)) {
+		ALLOC_HASHTABLE(EG(generics_stamping));
+		zend_hash_init(EG(generics_stamping), 8, NULL, NULL, 0);
+	}
+	if (zend_hash_add_empty_element(EG(generics_stamping), lc_name) == NULL) {
+		zend_throw_error(NULL, "Circular generic instantiation involving %s", ZSTR_VAL(name));
+		return NULL;
+	}
+
+	zend_class_entry *ce = zend_generics_stamp_instantiation_impl(name, lc_name, use_autoload);
+
+	zend_hash_del(EG(generics_stamping), lc_name);
 	return ce;
 }
