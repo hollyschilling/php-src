@@ -246,6 +246,59 @@ static bool zend_generics_substitute_type(
 	return true;
 }
 
+/* Substitute a stamped scope's type arguments into a freshly created
+ * closure's own op_array copy. Closure bodies (and their declared arg_info)
+ * are shared with the template through dynamic_func_defs, so a signature
+ * mentioning a type parameter would otherwise be enforced against a class
+ * literally named "T". The substituted array uses the same hidden-original
+ * discipline as method clones and is handled by destroy_op_array's restore. */
+ZEND_API void zend_generics_substitute_closure_signature(
+		zend_op_array *op_array, const zend_class_entry *scope)
+{
+	if (op_array->type != ZEND_USER_FUNCTION || !op_array->arg_info
+			|| !scope || !scope->generic_binding
+			|| !scope->generic_binding->template_ce->generic_params) {
+		return;
+	}
+	const zend_class_entry *template_ce = scope->generic_binding->template_ce;
+
+	uint32_t total = op_array->num_args;
+	uint32_t has_ret = (op_array->fn_flags & ZEND_ACC_HAS_RETURN_TYPE) ? 1 : 0;
+	zend_arg_info *base = op_array->arg_info - has_ret;
+	total += has_ret;
+	if (op_array->fn_flags & ZEND_ACC_VARIADIC) {
+		total++;
+	}
+
+	bool uses_params = false;
+	for (uint32_t i = 0; i < total; i++) {
+		if (zend_generics_type_uses_params(base[i].type, template_ce)) {
+			uses_params = true;
+			break;
+		}
+	}
+	if (!uses_params) {
+		/* Includes fake closures over stamped methods: already substituted. */
+		return;
+	}
+
+	char *block = zend_arena_alloc(&CG(arena),
+		sizeof(zend_arg_info *) + total * sizeof(zend_arg_info));
+	*(zend_arg_info **) block = op_array->arg_info;
+	zend_arg_info *entries = (zend_arg_info *) (block + sizeof(zend_arg_info *));
+	memcpy(entries, base, total * sizeof(zend_arg_info));
+	for (uint32_t i = 0; i < total; i++) {
+		if (!zend_generics_substitute_type(&entries[i].type, template_ce,
+				scope->generic_binding, scope->name, /* take_refs */ false)) {
+			/* Substitution threw (scalar arg inside a composite type); keep
+			 * the original signature and let the Error propagate. */
+			return;
+		}
+	}
+	op_array->arg_info = entries + has_ret;
+	op_array->fn_flags2 |= ZEND_ACC2_GENERIC_SUBST_ARG_INFO;
+}
+
 static zend_op_array *zend_generics_clone_method(
 		zend_op_array *tpl_fn, zend_class_entry *ce,
 		const zend_class_entry *template_ce, const zend_generic_binding *binding,
