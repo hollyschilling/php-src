@@ -352,13 +352,6 @@ typedef struct _zend_oparray_context {
 /* Function Flags (unused: 30)                            |     |     |     */
 /* ==============                                         |     |     |     */
 /*                                                        |     |     |     */
-/* `mutating` receiver marker (`function m() mutating:    |     |     |     */
-/* T`). Transport only: set by the signature parser,      |     |     |     */
-/* translated to (and replaced by) ZEND_ACC2_MUTATING in  |     |     |     */
-/* zend_begin_method_decl, so bit 30 never appears on a   |     |     |     */
-/* finished op_array.                                     |     |     |     */
-#define ZEND_ACC_MUTATING                (1U << 31) /*     |  X  |     |     */
-/*                                                        |     |     |     */
 /* Function returning by reference                        |     |     |     */
 #define ZEND_ACC_RETURN_REFERENCE        (1 << 12) /*     |  X  |     |     */
 /*                                                        |     |     |     */
@@ -1245,6 +1238,12 @@ static zend_always_inline bool zend_check_arg_send_type(const zend_function *zf,
  * cannot travel in zend_ast_decl.flags, which is OR'd wholesale into ce_flags;
  * it becomes ZEND_ACC2_VALUE_CLASS in ce_flags2 at compile time. */
 #define ZEND_CLASS_IS_VALUE_CLASS 1
+
+/* Marks a ZEND_AST_METHOD decl carrying the postfix `mutating` receiver
+ * marker. Travels on the decl attr because fn_flags has no free bits
+ * (bit 31 is ZEND_ACC_STRICT_TYPES); it becomes ZEND_ACC2_MUTATING in
+ * fn_flags2 at compile time. */
+#define ZEND_FN_IS_MUTATING (1 << 1)
 
 /* extended_value of ZEND_FETCH_THIS when its result is the container of a
  * property write (BP_VAR_W/RW/UNSET). Only then may the handler produce an

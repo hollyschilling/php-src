@@ -1024,8 +1024,9 @@ attributed_class_statement:
 			  $$->attr = $1; }
 	|	method_modifiers function returns_ref identifier backup_doc_comment '(' parameter_list ')'
 		optional_receiver_modifier return_type backup_fn_flags method_body backup_fn_flags
-			{ $$ = zend_ast_create_decl(ZEND_AST_METHOD, $3 | $1 | $9 | $13, $2, $5,
-				  zend_ast_get_str($4), $7, NULL, $12, $10, NULL); CG(extra_fn_flags) = $11; }
+			{ $$ = zend_ast_create_decl(ZEND_AST_METHOD, $3 | $1 | $13, $2, $5,
+				  zend_ast_get_str($4), $7, NULL, $12, $10, NULL); CG(extra_fn_flags) = $11;
+			  if ($9) { $$->attr |= ZEND_FN_IS_MUTATING; } }
 	|	enum_case { $$ = $1; }
 ;
 
@@ -1132,7 +1133,7 @@ optional_receiver_modifier:
 			}
 			zend_ast_destroy($1);
 			if (!ok) { YYERROR; }
-			$$ = ZEND_ACC_MUTATING;
+			$$ = 1;
 		}
 ;
 

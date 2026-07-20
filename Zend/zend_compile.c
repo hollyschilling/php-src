@@ -8604,7 +8604,7 @@ static zend_string *zend_begin_method_decl(zend_op_array *op_array, zend_string 
 		zend_error(E_COMPILE_ERROR, "Cannot use 'readonly' as method modifier");
 	}
 
-	if (fn_flags & ZEND_ACC_MUTATING) {
+	if (op_array->fn_flags2 & ZEND_ACC2_MUTATING) {
 		/* Structs declare mutating implementations; interfaces declare
 		 * mutating requirements (permission, not obligation -- see the
 		 * effect-variance rule in do_inheritance_check_on_method). Traits
@@ -8633,8 +8633,6 @@ static zend_string *zend_begin_method_decl(zend_op_array *op_array, zend_string 
 				"Cannot declare magic method %s::%s() mutating",
 				ZSTR_VAL(ce->name), ZSTR_VAL(name));
 		}
-		op_array->fn_flags &= ~ZEND_ACC_MUTATING;
-		op_array->fn_flags2 |= ZEND_ACC2_MUTATING;
 	}
 
 	if ((fn_flags & ZEND_ACC_PRIVATE) && (fn_flags & ZEND_ACC_FINAL) && !zend_is_constructor(name)) {
@@ -8871,6 +8869,11 @@ static zend_op_array *zend_compile_func_decl_ex(
 		op_array->function_name = zend_string_copy(decl->name);
 	} else if (is_method) {
 		bool has_body = stmt_ast != NULL;
+		/* The postfix `mutating` marker travels on the decl attr (fn_flags
+		 * has no free bits; bit 31 is ZEND_ACC_STRICT_TYPES). */
+		if (decl->attr & ZEND_FN_IS_MUTATING) {
+			op_array->fn_flags2 |= ZEND_ACC2_MUTATING;
+		}
 		lcname = zend_begin_method_decl(op_array, decl->name, has_body);
 	} else {
 		lcname = zend_begin_func_decl(result, op_array, decl, level);
