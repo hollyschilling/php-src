@@ -7644,12 +7644,17 @@ static ZEND_VM_COLD ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_FUNC_CCONV ZEND_
 
 	}
 
-	if (UNEXPECTED(fbc->common.fn_flags2 & ZEND_ACC2_MUTATING)) {
+	if (UNEXPECTED(fbc->common.fn_flags2 & ZEND_ACC2_MUTATING)
+	 && (obj->ce->ce_flags2 & ZEND_ACC2_VALUE_CLASS)) {
 		/* A mutating callee writes its receiver in place, so the receiver
 		 * must be a slot this call site can lend exclusively. Separate a
 		 * variable receiver before the frame takes its reference; $this
 		 * chains stay borrowed (already exclusive in a mutating frame, and
-		 * the outermost frame's escape check covers the whole chain). */
+		 * the outermost frame's escape check covers the whole chain).
+		 * On a plain class receiver (possible only through interface- or
+		 * class-targeted mutating extension methods) the marker is inert:
+		 * reference semantics make every method effectively mutating, the
+		 * same rule traits apply to class consumers. */
 		if (IS_CONST == IS_CV) {
 			obj = zend_value_class_separate_container(object);
 		} else if (IS_CONST == IS_UNUSED) {
@@ -7820,8 +7825,10 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_FUNC_CCONV ZEND_INIT_STATIC_M
 	if (!(fbc->common.fn_flags & ZEND_ACC_STATIC)) {
 		if (Z_TYPE(EX(This)) == IS_OBJECT && instanceof_function(Z_OBJCE(EX(This)), ce)) {
 			if (UNEXPECTED(fbc->common.fn_flags2 & ZEND_ACC2_MUTATING)
+			 && (Z_OBJCE(EX(This))->ce_flags2 & ZEND_ACC2_VALUE_CLASS)
 			 && UNEXPECTED(!(EX(func)->common.fn_flags2 & ZEND_ACC2_MUTATING))) {
-				/* self::m() binds $this: same rule as $this->m(). */
+				/* self::m() binds $this: same rule as $this->m(). Inert on
+				 * plain class receivers (mutating extension methods). */
 				zend_throw_error(NULL,
 					"Cannot call mutating method %s::%s() on $this in a non-mutating method",
 					ZSTR_VAL(Z_OBJ(EX(This))->ce->name), ZSTR_VAL(fbc->common.function_name));
@@ -10600,12 +10607,17 @@ static ZEND_VM_COLD ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_FUNC_CCONV ZEND_
 		zval_ptr_dtor_nogc(EX_VAR(opline->op2.var));
 	}
 
-	if (UNEXPECTED(fbc->common.fn_flags2 & ZEND_ACC2_MUTATING)) {
+	if (UNEXPECTED(fbc->common.fn_flags2 & ZEND_ACC2_MUTATING)
+	 && (obj->ce->ce_flags2 & ZEND_ACC2_VALUE_CLASS)) {
 		/* A mutating callee writes its receiver in place, so the receiver
 		 * must be a slot this call site can lend exclusively. Separate a
 		 * variable receiver before the frame takes its reference; $this
 		 * chains stay borrowed (already exclusive in a mutating frame, and
-		 * the outermost frame's escape check covers the whole chain). */
+		 * the outermost frame's escape check covers the whole chain).
+		 * On a plain class receiver (possible only through interface- or
+		 * class-targeted mutating extension methods) the marker is inert:
+		 * reference semantics make every method effectively mutating, the
+		 * same rule traits apply to class consumers. */
 		if (IS_CONST == IS_CV) {
 			obj = zend_value_class_separate_container(object);
 		} else if (IS_CONST == IS_UNUSED) {
@@ -10771,8 +10783,10 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_FUNC_CCONV ZEND_INIT_STATIC_M
 	if (!(fbc->common.fn_flags & ZEND_ACC_STATIC)) {
 		if (Z_TYPE(EX(This)) == IS_OBJECT && instanceof_function(Z_OBJCE(EX(This)), ce)) {
 			if (UNEXPECTED(fbc->common.fn_flags2 & ZEND_ACC2_MUTATING)
+			 && (Z_OBJCE(EX(This))->ce_flags2 & ZEND_ACC2_VALUE_CLASS)
 			 && UNEXPECTED(!(EX(func)->common.fn_flags2 & ZEND_ACC2_MUTATING))) {
-				/* self::m() binds $this: same rule as $this->m(). */
+				/* self::m() binds $this: same rule as $this->m(). Inert on
+				 * plain class receivers (mutating extension methods). */
 				zend_throw_error(NULL,
 					"Cannot call mutating method %s::%s() on $this in a non-mutating method",
 					ZSTR_VAL(Z_OBJ(EX(This))->ce->name), ZSTR_VAL(fbc->common.function_name));
@@ -11585,8 +11599,10 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_FUNC_CCONV ZEND_INIT_STATIC_M
 	if (!(fbc->common.fn_flags & ZEND_ACC_STATIC)) {
 		if (Z_TYPE(EX(This)) == IS_OBJECT && instanceof_function(Z_OBJCE(EX(This)), ce)) {
 			if (UNEXPECTED(fbc->common.fn_flags2 & ZEND_ACC2_MUTATING)
+			 && (Z_OBJCE(EX(This))->ce_flags2 & ZEND_ACC2_VALUE_CLASS)
 			 && UNEXPECTED(!(EX(func)->common.fn_flags2 & ZEND_ACC2_MUTATING))) {
-				/* self::m() binds $this: same rule as $this->m(). */
+				/* self::m() binds $this: same rule as $this->m(). Inert on
+				 * plain class receivers (mutating extension methods). */
 				zend_throw_error(NULL,
 					"Cannot call mutating method %s::%s() on $this in a non-mutating method",
 					ZSTR_VAL(Z_OBJ(EX(This))->ce->name), ZSTR_VAL(fbc->common.function_name));
@@ -13417,12 +13433,17 @@ static ZEND_VM_COLD ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_FUNC_CCONV ZEND_
 
 	}
 
-	if (UNEXPECTED(fbc->common.fn_flags2 & ZEND_ACC2_MUTATING)) {
+	if (UNEXPECTED(fbc->common.fn_flags2 & ZEND_ACC2_MUTATING)
+	 && (obj->ce->ce_flags2 & ZEND_ACC2_VALUE_CLASS)) {
 		/* A mutating callee writes its receiver in place, so the receiver
 		 * must be a slot this call site can lend exclusively. Separate a
 		 * variable receiver before the frame takes its reference; $this
 		 * chains stay borrowed (already exclusive in a mutating frame, and
-		 * the outermost frame's escape check covers the whole chain). */
+		 * the outermost frame's escape check covers the whole chain).
+		 * On a plain class receiver (possible only through interface- or
+		 * class-targeted mutating extension methods) the marker is inert:
+		 * reference semantics make every method effectively mutating, the
+		 * same rule traits apply to class consumers. */
 		if (IS_CONST == IS_CV) {
 			obj = zend_value_class_separate_container(object);
 		} else if (IS_CONST == IS_UNUSED) {
@@ -13593,8 +13614,10 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_FUNC_CCONV ZEND_INIT_STATIC_M
 	if (!(fbc->common.fn_flags & ZEND_ACC_STATIC)) {
 		if (Z_TYPE(EX(This)) == IS_OBJECT && instanceof_function(Z_OBJCE(EX(This)), ce)) {
 			if (UNEXPECTED(fbc->common.fn_flags2 & ZEND_ACC2_MUTATING)
+			 && (Z_OBJCE(EX(This))->ce_flags2 & ZEND_ACC2_VALUE_CLASS)
 			 && UNEXPECTED(!(EX(func)->common.fn_flags2 & ZEND_ACC2_MUTATING))) {
-				/* self::m() binds $this: same rule as $this->m(). */
+				/* self::m() binds $this: same rule as $this->m(). Inert on
+				 * plain class receivers (mutating extension methods). */
 				zend_throw_error(NULL,
 					"Cannot call mutating method %s::%s() on $this in a non-mutating method",
 					ZSTR_VAL(Z_OBJ(EX(This))->ce->name), ZSTR_VAL(fbc->common.function_name));
@@ -20048,12 +20071,17 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_FUNC_CCONV ZEND_INIT_METHOD_C
 
 	}
 
-	if (UNEXPECTED(fbc->common.fn_flags2 & ZEND_ACC2_MUTATING)) {
+	if (UNEXPECTED(fbc->common.fn_flags2 & ZEND_ACC2_MUTATING)
+	 && (obj->ce->ce_flags2 & ZEND_ACC2_VALUE_CLASS)) {
 		/* A mutating callee writes its receiver in place, so the receiver
 		 * must be a slot this call site can lend exclusively. Separate a
 		 * variable receiver before the frame takes its reference; $this
 		 * chains stay borrowed (already exclusive in a mutating frame, and
-		 * the outermost frame's escape check covers the whole chain). */
+		 * the outermost frame's escape check covers the whole chain).
+		 * On a plain class receiver (possible only through interface- or
+		 * class-targeted mutating extension methods) the marker is inert:
+		 * reference semantics make every method effectively mutating, the
+		 * same rule traits apply to class consumers. */
 		if (IS_TMP_VAR == IS_CV) {
 			obj = zend_value_class_separate_container(object);
 		} else if (IS_TMP_VAR == IS_UNUSED) {
@@ -21727,12 +21755,17 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_FUNC_CCONV ZEND_INIT_METHOD_C
 		zval_ptr_dtor_nogc(EX_VAR(opline->op2.var));
 	}
 
-	if (UNEXPECTED(fbc->common.fn_flags2 & ZEND_ACC2_MUTATING)) {
+	if (UNEXPECTED(fbc->common.fn_flags2 & ZEND_ACC2_MUTATING)
+	 && (obj->ce->ce_flags2 & ZEND_ACC2_VALUE_CLASS)) {
 		/* A mutating callee writes its receiver in place, so the receiver
 		 * must be a slot this call site can lend exclusively. Separate a
 		 * variable receiver before the frame takes its reference; $this
 		 * chains stay borrowed (already exclusive in a mutating frame, and
-		 * the outermost frame's escape check covers the whole chain). */
+		 * the outermost frame's escape check covers the whole chain).
+		 * On a plain class receiver (possible only through interface- or
+		 * class-targeted mutating extension methods) the marker is inert:
+		 * reference semantics make every method effectively mutating, the
+		 * same rule traits apply to class consumers. */
 		if (IS_TMP_VAR == IS_CV) {
 			obj = zend_value_class_separate_container(object);
 		} else if (IS_TMP_VAR == IS_UNUSED) {
@@ -23711,12 +23744,17 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_FUNC_CCONV ZEND_INIT_METHOD_C
 
 	}
 
-	if (UNEXPECTED(fbc->common.fn_flags2 & ZEND_ACC2_MUTATING)) {
+	if (UNEXPECTED(fbc->common.fn_flags2 & ZEND_ACC2_MUTATING)
+	 && (obj->ce->ce_flags2 & ZEND_ACC2_VALUE_CLASS)) {
 		/* A mutating callee writes its receiver in place, so the receiver
 		 * must be a slot this call site can lend exclusively. Separate a
 		 * variable receiver before the frame takes its reference; $this
 		 * chains stay borrowed (already exclusive in a mutating frame, and
-		 * the outermost frame's escape check covers the whole chain). */
+		 * the outermost frame's escape check covers the whole chain).
+		 * On a plain class receiver (possible only through interface- or
+		 * class-targeted mutating extension methods) the marker is inert:
+		 * reference semantics make every method effectively mutating, the
+		 * same rule traits apply to class consumers. */
 		if (IS_TMP_VAR == IS_CV) {
 			obj = zend_value_class_separate_container(object);
 		} else if (IS_TMP_VAR == IS_UNUSED) {
@@ -26765,8 +26803,10 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_FUNC_CCONV ZEND_INIT_STATIC_M
 	if (!(fbc->common.fn_flags & ZEND_ACC_STATIC)) {
 		if (Z_TYPE(EX(This)) == IS_OBJECT && instanceof_function(Z_OBJCE(EX(This)), ce)) {
 			if (UNEXPECTED(fbc->common.fn_flags2 & ZEND_ACC2_MUTATING)
+			 && (Z_OBJCE(EX(This))->ce_flags2 & ZEND_ACC2_VALUE_CLASS)
 			 && UNEXPECTED(!(EX(func)->common.fn_flags2 & ZEND_ACC2_MUTATING))) {
-				/* self::m() binds $this: same rule as $this->m(). */
+				/* self::m() binds $this: same rule as $this->m(). Inert on
+				 * plain class receivers (mutating extension methods). */
 				zend_throw_error(NULL,
 					"Cannot call mutating method %s::%s() on $this in a non-mutating method",
 					ZSTR_VAL(Z_OBJ(EX(This))->ce->name), ZSTR_VAL(fbc->common.function_name));
@@ -29504,8 +29544,10 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_FUNC_CCONV ZEND_INIT_STATIC_M
 	if (!(fbc->common.fn_flags & ZEND_ACC_STATIC)) {
 		if (Z_TYPE(EX(This)) == IS_OBJECT && instanceof_function(Z_OBJCE(EX(This)), ce)) {
 			if (UNEXPECTED(fbc->common.fn_flags2 & ZEND_ACC2_MUTATING)
+			 && (Z_OBJCE(EX(This))->ce_flags2 & ZEND_ACC2_VALUE_CLASS)
 			 && UNEXPECTED(!(EX(func)->common.fn_flags2 & ZEND_ACC2_MUTATING))) {
-				/* self::m() binds $this: same rule as $this->m(). */
+				/* self::m() binds $this: same rule as $this->m(). Inert on
+				 * plain class receivers (mutating extension methods). */
 				zend_throw_error(NULL,
 					"Cannot call mutating method %s::%s() on $this in a non-mutating method",
 					ZSTR_VAL(Z_OBJ(EX(This))->ce->name), ZSTR_VAL(fbc->common.function_name));
@@ -30720,8 +30762,10 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_FUNC_CCONV ZEND_INIT_STATIC_M
 	if (!(fbc->common.fn_flags & ZEND_ACC_STATIC)) {
 		if (Z_TYPE(EX(This)) == IS_OBJECT && instanceof_function(Z_OBJCE(EX(This)), ce)) {
 			if (UNEXPECTED(fbc->common.fn_flags2 & ZEND_ACC2_MUTATING)
+			 && (Z_OBJCE(EX(This))->ce_flags2 & ZEND_ACC2_VALUE_CLASS)
 			 && UNEXPECTED(!(EX(func)->common.fn_flags2 & ZEND_ACC2_MUTATING))) {
-				/* self::m() binds $this: same rule as $this->m(). */
+				/* self::m() binds $this: same rule as $this->m(). Inert on
+				 * plain class receivers (mutating extension methods). */
 				zend_throw_error(NULL,
 					"Cannot call mutating method %s::%s() on $this in a non-mutating method",
 					ZSTR_VAL(Z_OBJ(EX(This))->ce->name), ZSTR_VAL(fbc->common.function_name));
@@ -33421,8 +33465,10 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_FUNC_CCONV ZEND_INIT_STATIC_M
 	if (!(fbc->common.fn_flags & ZEND_ACC_STATIC)) {
 		if (Z_TYPE(EX(This)) == IS_OBJECT && instanceof_function(Z_OBJCE(EX(This)), ce)) {
 			if (UNEXPECTED(fbc->common.fn_flags2 & ZEND_ACC2_MUTATING)
+			 && (Z_OBJCE(EX(This))->ce_flags2 & ZEND_ACC2_VALUE_CLASS)
 			 && UNEXPECTED(!(EX(func)->common.fn_flags2 & ZEND_ACC2_MUTATING))) {
-				/* self::m() binds $this: same rule as $this->m(). */
+				/* self::m() binds $this: same rule as $this->m(). Inert on
+				 * plain class receivers (mutating extension methods). */
 				zend_throw_error(NULL,
 					"Cannot call mutating method %s::%s() on $this in a non-mutating method",
 					ZSTR_VAL(Z_OBJ(EX(This))->ce->name), ZSTR_VAL(fbc->common.function_name));
@@ -35732,12 +35778,17 @@ static ZEND_VM_HOT ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_FUNC_CCONV ZEND_I
 
 	}
 
-	if (UNEXPECTED(fbc->common.fn_flags2 & ZEND_ACC2_MUTATING)) {
+	if (UNEXPECTED(fbc->common.fn_flags2 & ZEND_ACC2_MUTATING)
+	 && (obj->ce->ce_flags2 & ZEND_ACC2_VALUE_CLASS)) {
 		/* A mutating callee writes its receiver in place, so the receiver
 		 * must be a slot this call site can lend exclusively. Separate a
 		 * variable receiver before the frame takes its reference; $this
 		 * chains stay borrowed (already exclusive in a mutating frame, and
-		 * the outermost frame's escape check covers the whole chain). */
+		 * the outermost frame's escape check covers the whole chain).
+		 * On a plain class receiver (possible only through interface- or
+		 * class-targeted mutating extension methods) the marker is inert:
+		 * reference semantics make every method effectively mutating, the
+		 * same rule traits apply to class consumers. */
 		if (IS_UNUSED == IS_CV) {
 			obj = zend_value_class_separate_container(object);
 		} else if (IS_UNUSED == IS_UNUSED) {
@@ -35908,8 +35959,10 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_FUNC_CCONV ZEND_INIT_STATIC_M
 	if (!(fbc->common.fn_flags & ZEND_ACC_STATIC)) {
 		if (Z_TYPE(EX(This)) == IS_OBJECT && instanceof_function(Z_OBJCE(EX(This)), ce)) {
 			if (UNEXPECTED(fbc->common.fn_flags2 & ZEND_ACC2_MUTATING)
+			 && (Z_OBJCE(EX(This))->ce_flags2 & ZEND_ACC2_VALUE_CLASS)
 			 && UNEXPECTED(!(EX(func)->common.fn_flags2 & ZEND_ACC2_MUTATING))) {
-				/* self::m() binds $this: same rule as $this->m(). */
+				/* self::m() binds $this: same rule as $this->m(). Inert on
+				 * plain class receivers (mutating extension methods). */
 				zend_throw_error(NULL,
 					"Cannot call mutating method %s::%s() on $this in a non-mutating method",
 					ZSTR_VAL(Z_OBJ(EX(This))->ce->name), ZSTR_VAL(fbc->common.function_name));
@@ -37979,12 +38032,17 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_FUNC_CCONV ZEND_INIT_METHOD_C
 		zval_ptr_dtor_nogc(EX_VAR(opline->op2.var));
 	}
 
-	if (UNEXPECTED(fbc->common.fn_flags2 & ZEND_ACC2_MUTATING)) {
+	if (UNEXPECTED(fbc->common.fn_flags2 & ZEND_ACC2_MUTATING)
+	 && (obj->ce->ce_flags2 & ZEND_ACC2_VALUE_CLASS)) {
 		/* A mutating callee writes its receiver in place, so the receiver
 		 * must be a slot this call site can lend exclusively. Separate a
 		 * variable receiver before the frame takes its reference; $this
 		 * chains stay borrowed (already exclusive in a mutating frame, and
-		 * the outermost frame's escape check covers the whole chain). */
+		 * the outermost frame's escape check covers the whole chain).
+		 * On a plain class receiver (possible only through interface- or
+		 * class-targeted mutating extension methods) the marker is inert:
+		 * reference semantics make every method effectively mutating, the
+		 * same rule traits apply to class consumers. */
 		if (IS_UNUSED == IS_CV) {
 			obj = zend_value_class_separate_container(object);
 		} else if (IS_UNUSED == IS_UNUSED) {
@@ -38150,8 +38208,10 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_FUNC_CCONV ZEND_INIT_STATIC_M
 	if (!(fbc->common.fn_flags & ZEND_ACC_STATIC)) {
 		if (Z_TYPE(EX(This)) == IS_OBJECT && instanceof_function(Z_OBJCE(EX(This)), ce)) {
 			if (UNEXPECTED(fbc->common.fn_flags2 & ZEND_ACC2_MUTATING)
+			 && (Z_OBJCE(EX(This))->ce_flags2 & ZEND_ACC2_VALUE_CLASS)
 			 && UNEXPECTED(!(EX(func)->common.fn_flags2 & ZEND_ACC2_MUTATING))) {
-				/* self::m() binds $this: same rule as $this->m(). */
+				/* self::m() binds $this: same rule as $this->m(). Inert on
+				 * plain class receivers (mutating extension methods). */
 				zend_throw_error(NULL,
 					"Cannot call mutating method %s::%s() on $this in a non-mutating method",
 					ZSTR_VAL(Z_OBJ(EX(This))->ce->name), ZSTR_VAL(fbc->common.function_name));
@@ -38583,8 +38643,10 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_FUNC_CCONV ZEND_INIT_STATIC_M
 	if (!(fbc->common.fn_flags & ZEND_ACC_STATIC)) {
 		if (Z_TYPE(EX(This)) == IS_OBJECT && instanceof_function(Z_OBJCE(EX(This)), ce)) {
 			if (UNEXPECTED(fbc->common.fn_flags2 & ZEND_ACC2_MUTATING)
+			 && (Z_OBJCE(EX(This))->ce_flags2 & ZEND_ACC2_VALUE_CLASS)
 			 && UNEXPECTED(!(EX(func)->common.fn_flags2 & ZEND_ACC2_MUTATING))) {
-				/* self::m() binds $this: same rule as $this->m(). */
+				/* self::m() binds $this: same rule as $this->m(). Inert on
+				 * plain class receivers (mutating extension methods). */
 				zend_throw_error(NULL,
 					"Cannot call mutating method %s::%s() on $this in a non-mutating method",
 					ZSTR_VAL(Z_OBJ(EX(This))->ce->name), ZSTR_VAL(fbc->common.function_name));
@@ -40770,12 +40832,17 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_FUNC_CCONV ZEND_INIT_METHOD_C
 
 	}
 
-	if (UNEXPECTED(fbc->common.fn_flags2 & ZEND_ACC2_MUTATING)) {
+	if (UNEXPECTED(fbc->common.fn_flags2 & ZEND_ACC2_MUTATING)
+	 && (obj->ce->ce_flags2 & ZEND_ACC2_VALUE_CLASS)) {
 		/* A mutating callee writes its receiver in place, so the receiver
 		 * must be a slot this call site can lend exclusively. Separate a
 		 * variable receiver before the frame takes its reference; $this
 		 * chains stay borrowed (already exclusive in a mutating frame, and
-		 * the outermost frame's escape check covers the whole chain). */
+		 * the outermost frame's escape check covers the whole chain).
+		 * On a plain class receiver (possible only through interface- or
+		 * class-targeted mutating extension methods) the marker is inert:
+		 * reference semantics make every method effectively mutating, the
+		 * same rule traits apply to class consumers. */
 		if (IS_UNUSED == IS_CV) {
 			obj = zend_value_class_separate_container(object);
 		} else if (IS_UNUSED == IS_UNUSED) {
@@ -40946,8 +41013,10 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_FUNC_CCONV ZEND_INIT_STATIC_M
 	if (!(fbc->common.fn_flags & ZEND_ACC_STATIC)) {
 		if (Z_TYPE(EX(This)) == IS_OBJECT && instanceof_function(Z_OBJCE(EX(This)), ce)) {
 			if (UNEXPECTED(fbc->common.fn_flags2 & ZEND_ACC2_MUTATING)
+			 && (Z_OBJCE(EX(This))->ce_flags2 & ZEND_ACC2_VALUE_CLASS)
 			 && UNEXPECTED(!(EX(func)->common.fn_flags2 & ZEND_ACC2_MUTATING))) {
-				/* self::m() binds $this: same rule as $this->m(). */
+				/* self::m() binds $this: same rule as $this->m(). Inert on
+				 * plain class receivers (mutating extension methods). */
 				zend_throw_error(NULL,
 					"Cannot call mutating method %s::%s() on $this in a non-mutating method",
 					ZSTR_VAL(Z_OBJ(EX(This))->ce->name), ZSTR_VAL(fbc->common.function_name));
@@ -45970,12 +46039,17 @@ static ZEND_VM_HOT ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_FUNC_CCONV ZEND_I
 
 	}
 
-	if (UNEXPECTED(fbc->common.fn_flags2 & ZEND_ACC2_MUTATING)) {
+	if (UNEXPECTED(fbc->common.fn_flags2 & ZEND_ACC2_MUTATING)
+	 && (obj->ce->ce_flags2 & ZEND_ACC2_VALUE_CLASS)) {
 		/* A mutating callee writes its receiver in place, so the receiver
 		 * must be a slot this call site can lend exclusively. Separate a
 		 * variable receiver before the frame takes its reference; $this
 		 * chains stay borrowed (already exclusive in a mutating frame, and
-		 * the outermost frame's escape check covers the whole chain). */
+		 * the outermost frame's escape check covers the whole chain).
+		 * On a plain class receiver (possible only through interface- or
+		 * class-targeted mutating extension methods) the marker is inert:
+		 * reference semantics make every method effectively mutating, the
+		 * same rule traits apply to class consumers. */
 		if (IS_CV == IS_CV) {
 			obj = zend_value_class_separate_container(object);
 		} else if (IS_CV == IS_UNUSED) {
@@ -49892,12 +49966,17 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_FUNC_CCONV ZEND_INIT_METHOD_C
 		zval_ptr_dtor_nogc(EX_VAR(opline->op2.var));
 	}
 
-	if (UNEXPECTED(fbc->common.fn_flags2 & ZEND_ACC2_MUTATING)) {
+	if (UNEXPECTED(fbc->common.fn_flags2 & ZEND_ACC2_MUTATING)
+	 && (obj->ce->ce_flags2 & ZEND_ACC2_VALUE_CLASS)) {
 		/* A mutating callee writes its receiver in place, so the receiver
 		 * must be a slot this call site can lend exclusively. Separate a
 		 * variable receiver before the frame takes its reference; $this
 		 * chains stay borrowed (already exclusive in a mutating frame, and
-		 * the outermost frame's escape check covers the whole chain). */
+		 * the outermost frame's escape check covers the whole chain).
+		 * On a plain class receiver (possible only through interface- or
+		 * class-targeted mutating extension methods) the marker is inert:
+		 * reference semantics make every method effectively mutating, the
+		 * same rule traits apply to class consumers. */
 		if (IS_CV == IS_CV) {
 			obj = zend_value_class_separate_container(object);
 		} else if (IS_CV == IS_UNUSED) {
@@ -55195,12 +55274,17 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_FUNC_CCONV ZEND_INIT_METHOD_C
 
 	}
 
-	if (UNEXPECTED(fbc->common.fn_flags2 & ZEND_ACC2_MUTATING)) {
+	if (UNEXPECTED(fbc->common.fn_flags2 & ZEND_ACC2_MUTATING)
+	 && (obj->ce->ce_flags2 & ZEND_ACC2_VALUE_CLASS)) {
 		/* A mutating callee writes its receiver in place, so the receiver
 		 * must be a slot this call site can lend exclusively. Separate a
 		 * variable receiver before the frame takes its reference; $this
 		 * chains stay borrowed (already exclusive in a mutating frame, and
-		 * the outermost frame's escape check covers the whole chain). */
+		 * the outermost frame's escape check covers the whole chain).
+		 * On a plain class receiver (possible only through interface- or
+		 * class-targeted mutating extension methods) the marker is inert:
+		 * reference semantics make every method effectively mutating, the
+		 * same rule traits apply to class consumers. */
 		if (IS_CV == IS_CV) {
 			obj = zend_value_class_separate_container(object);
 		} else if (IS_CV == IS_UNUSED) {
@@ -62688,12 +62772,17 @@ static ZEND_VM_COLD ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_CCONV ZEND_INIT_
 
 	}
 
-	if (UNEXPECTED(fbc->common.fn_flags2 & ZEND_ACC2_MUTATING)) {
+	if (UNEXPECTED(fbc->common.fn_flags2 & ZEND_ACC2_MUTATING)
+	 && (obj->ce->ce_flags2 & ZEND_ACC2_VALUE_CLASS)) {
 		/* A mutating callee writes its receiver in place, so the receiver
 		 * must be a slot this call site can lend exclusively. Separate a
 		 * variable receiver before the frame takes its reference; $this
 		 * chains stay borrowed (already exclusive in a mutating frame, and
-		 * the outermost frame's escape check covers the whole chain). */
+		 * the outermost frame's escape check covers the whole chain).
+		 * On a plain class receiver (possible only through interface- or
+		 * class-targeted mutating extension methods) the marker is inert:
+		 * reference semantics make every method effectively mutating, the
+		 * same rule traits apply to class consumers. */
 		if (IS_CONST == IS_CV) {
 			obj = zend_value_class_separate_container(object);
 		} else if (IS_CONST == IS_UNUSED) {
@@ -62864,8 +62953,10 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_CCONV ZEND_INIT_STATIC_METHOD
 	if (!(fbc->common.fn_flags & ZEND_ACC_STATIC)) {
 		if (Z_TYPE(EX(This)) == IS_OBJECT && instanceof_function(Z_OBJCE(EX(This)), ce)) {
 			if (UNEXPECTED(fbc->common.fn_flags2 & ZEND_ACC2_MUTATING)
+			 && (Z_OBJCE(EX(This))->ce_flags2 & ZEND_ACC2_VALUE_CLASS)
 			 && UNEXPECTED(!(EX(func)->common.fn_flags2 & ZEND_ACC2_MUTATING))) {
-				/* self::m() binds $this: same rule as $this->m(). */
+				/* self::m() binds $this: same rule as $this->m(). Inert on
+				 * plain class receivers (mutating extension methods). */
 				zend_throw_error(NULL,
 					"Cannot call mutating method %s::%s() on $this in a non-mutating method",
 					ZSTR_VAL(Z_OBJ(EX(This))->ce->name), ZSTR_VAL(fbc->common.function_name));
@@ -65644,12 +65735,17 @@ static ZEND_VM_COLD ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_CCONV ZEND_INIT_
 		zval_ptr_dtor_nogc(EX_VAR(opline->op2.var));
 	}
 
-	if (UNEXPECTED(fbc->common.fn_flags2 & ZEND_ACC2_MUTATING)) {
+	if (UNEXPECTED(fbc->common.fn_flags2 & ZEND_ACC2_MUTATING)
+	 && (obj->ce->ce_flags2 & ZEND_ACC2_VALUE_CLASS)) {
 		/* A mutating callee writes its receiver in place, so the receiver
 		 * must be a slot this call site can lend exclusively. Separate a
 		 * variable receiver before the frame takes its reference; $this
 		 * chains stay borrowed (already exclusive in a mutating frame, and
-		 * the outermost frame's escape check covers the whole chain). */
+		 * the outermost frame's escape check covers the whole chain).
+		 * On a plain class receiver (possible only through interface- or
+		 * class-targeted mutating extension methods) the marker is inert:
+		 * reference semantics make every method effectively mutating, the
+		 * same rule traits apply to class consumers. */
 		if (IS_CONST == IS_CV) {
 			obj = zend_value_class_separate_container(object);
 		} else if (IS_CONST == IS_UNUSED) {
@@ -65815,8 +65911,10 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_CCONV ZEND_INIT_STATIC_METHOD
 	if (!(fbc->common.fn_flags & ZEND_ACC_STATIC)) {
 		if (Z_TYPE(EX(This)) == IS_OBJECT && instanceof_function(Z_OBJCE(EX(This)), ce)) {
 			if (UNEXPECTED(fbc->common.fn_flags2 & ZEND_ACC2_MUTATING)
+			 && (Z_OBJCE(EX(This))->ce_flags2 & ZEND_ACC2_VALUE_CLASS)
 			 && UNEXPECTED(!(EX(func)->common.fn_flags2 & ZEND_ACC2_MUTATING))) {
-				/* self::m() binds $this: same rule as $this->m(). */
+				/* self::m() binds $this: same rule as $this->m(). Inert on
+				 * plain class receivers (mutating extension methods). */
 				zend_throw_error(NULL,
 					"Cannot call mutating method %s::%s() on $this in a non-mutating method",
 					ZSTR_VAL(Z_OBJ(EX(This))->ce->name), ZSTR_VAL(fbc->common.function_name));
@@ -66527,8 +66625,10 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_CCONV ZEND_INIT_STATIC_METHOD
 	if (!(fbc->common.fn_flags & ZEND_ACC_STATIC)) {
 		if (Z_TYPE(EX(This)) == IS_OBJECT && instanceof_function(Z_OBJCE(EX(This)), ce)) {
 			if (UNEXPECTED(fbc->common.fn_flags2 & ZEND_ACC2_MUTATING)
+			 && (Z_OBJCE(EX(This))->ce_flags2 & ZEND_ACC2_VALUE_CLASS)
 			 && UNEXPECTED(!(EX(func)->common.fn_flags2 & ZEND_ACC2_MUTATING))) {
-				/* self::m() binds $this: same rule as $this->m(). */
+				/* self::m() binds $this: same rule as $this->m(). Inert on
+				 * plain class receivers (mutating extension methods). */
 				zend_throw_error(NULL,
 					"Cannot call mutating method %s::%s() on $this in a non-mutating method",
 					ZSTR_VAL(Z_OBJ(EX(This))->ce->name), ZSTR_VAL(fbc->common.function_name));
@@ -68359,12 +68459,17 @@ static ZEND_VM_COLD ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_CCONV ZEND_INIT_
 
 	}
 
-	if (UNEXPECTED(fbc->common.fn_flags2 & ZEND_ACC2_MUTATING)) {
+	if (UNEXPECTED(fbc->common.fn_flags2 & ZEND_ACC2_MUTATING)
+	 && (obj->ce->ce_flags2 & ZEND_ACC2_VALUE_CLASS)) {
 		/* A mutating callee writes its receiver in place, so the receiver
 		 * must be a slot this call site can lend exclusively. Separate a
 		 * variable receiver before the frame takes its reference; $this
 		 * chains stay borrowed (already exclusive in a mutating frame, and
-		 * the outermost frame's escape check covers the whole chain). */
+		 * the outermost frame's escape check covers the whole chain).
+		 * On a plain class receiver (possible only through interface- or
+		 * class-targeted mutating extension methods) the marker is inert:
+		 * reference semantics make every method effectively mutating, the
+		 * same rule traits apply to class consumers. */
 		if (IS_CONST == IS_CV) {
 			obj = zend_value_class_separate_container(object);
 		} else if (IS_CONST == IS_UNUSED) {
@@ -68535,8 +68640,10 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_CCONV ZEND_INIT_STATIC_METHOD
 	if (!(fbc->common.fn_flags & ZEND_ACC_STATIC)) {
 		if (Z_TYPE(EX(This)) == IS_OBJECT && instanceof_function(Z_OBJCE(EX(This)), ce)) {
 			if (UNEXPECTED(fbc->common.fn_flags2 & ZEND_ACC2_MUTATING)
+			 && (Z_OBJCE(EX(This))->ce_flags2 & ZEND_ACC2_VALUE_CLASS)
 			 && UNEXPECTED(!(EX(func)->common.fn_flags2 & ZEND_ACC2_MUTATING))) {
-				/* self::m() binds $this: same rule as $this->m(). */
+				/* self::m() binds $this: same rule as $this->m(). Inert on
+				 * plain class receivers (mutating extension methods). */
 				zend_throw_error(NULL,
 					"Cannot call mutating method %s::%s() on $this in a non-mutating method",
 					ZSTR_VAL(Z_OBJ(EX(This))->ce->name), ZSTR_VAL(fbc->common.function_name));
@@ -74990,12 +75097,17 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_CCONV ZEND_INIT_METHOD_CALL_S
 
 	}
 
-	if (UNEXPECTED(fbc->common.fn_flags2 & ZEND_ACC2_MUTATING)) {
+	if (UNEXPECTED(fbc->common.fn_flags2 & ZEND_ACC2_MUTATING)
+	 && (obj->ce->ce_flags2 & ZEND_ACC2_VALUE_CLASS)) {
 		/* A mutating callee writes its receiver in place, so the receiver
 		 * must be a slot this call site can lend exclusively. Separate a
 		 * variable receiver before the frame takes its reference; $this
 		 * chains stay borrowed (already exclusive in a mutating frame, and
-		 * the outermost frame's escape check covers the whole chain). */
+		 * the outermost frame's escape check covers the whole chain).
+		 * On a plain class receiver (possible only through interface- or
+		 * class-targeted mutating extension methods) the marker is inert:
+		 * reference semantics make every method effectively mutating, the
+		 * same rule traits apply to class consumers. */
 		if (IS_TMP_VAR == IS_CV) {
 			obj = zend_value_class_separate_container(object);
 		} else if (IS_TMP_VAR == IS_UNUSED) {
@@ -76669,12 +76781,17 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_CCONV ZEND_INIT_METHOD_CALL_S
 		zval_ptr_dtor_nogc(EX_VAR(opline->op2.var));
 	}
 
-	if (UNEXPECTED(fbc->common.fn_flags2 & ZEND_ACC2_MUTATING)) {
+	if (UNEXPECTED(fbc->common.fn_flags2 & ZEND_ACC2_MUTATING)
+	 && (obj->ce->ce_flags2 & ZEND_ACC2_VALUE_CLASS)) {
 		/* A mutating callee writes its receiver in place, so the receiver
 		 * must be a slot this call site can lend exclusively. Separate a
 		 * variable receiver before the frame takes its reference; $this
 		 * chains stay borrowed (already exclusive in a mutating frame, and
-		 * the outermost frame's escape check covers the whole chain). */
+		 * the outermost frame's escape check covers the whole chain).
+		 * On a plain class receiver (possible only through interface- or
+		 * class-targeted mutating extension methods) the marker is inert:
+		 * reference semantics make every method effectively mutating, the
+		 * same rule traits apply to class consumers. */
 		if (IS_TMP_VAR == IS_CV) {
 			obj = zend_value_class_separate_container(object);
 		} else if (IS_TMP_VAR == IS_UNUSED) {
@@ -78553,12 +78670,17 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_CCONV ZEND_INIT_METHOD_CALL_S
 
 	}
 
-	if (UNEXPECTED(fbc->common.fn_flags2 & ZEND_ACC2_MUTATING)) {
+	if (UNEXPECTED(fbc->common.fn_flags2 & ZEND_ACC2_MUTATING)
+	 && (obj->ce->ce_flags2 & ZEND_ACC2_VALUE_CLASS)) {
 		/* A mutating callee writes its receiver in place, so the receiver
 		 * must be a slot this call site can lend exclusively. Separate a
 		 * variable receiver before the frame takes its reference; $this
 		 * chains stay borrowed (already exclusive in a mutating frame, and
-		 * the outermost frame's escape check covers the whole chain). */
+		 * the outermost frame's escape check covers the whole chain).
+		 * On a plain class receiver (possible only through interface- or
+		 * class-targeted mutating extension methods) the marker is inert:
+		 * reference semantics make every method effectively mutating, the
+		 * same rule traits apply to class consumers. */
 		if (IS_TMP_VAR == IS_CV) {
 			obj = zend_value_class_separate_container(object);
 		} else if (IS_TMP_VAR == IS_UNUSED) {
@@ -81607,8 +81729,10 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_CCONV ZEND_INIT_STATIC_METHOD
 	if (!(fbc->common.fn_flags & ZEND_ACC_STATIC)) {
 		if (Z_TYPE(EX(This)) == IS_OBJECT && instanceof_function(Z_OBJCE(EX(This)), ce)) {
 			if (UNEXPECTED(fbc->common.fn_flags2 & ZEND_ACC2_MUTATING)
+			 && (Z_OBJCE(EX(This))->ce_flags2 & ZEND_ACC2_VALUE_CLASS)
 			 && UNEXPECTED(!(EX(func)->common.fn_flags2 & ZEND_ACC2_MUTATING))) {
-				/* self::m() binds $this: same rule as $this->m(). */
+				/* self::m() binds $this: same rule as $this->m(). Inert on
+				 * plain class receivers (mutating extension methods). */
 				zend_throw_error(NULL,
 					"Cannot call mutating method %s::%s() on $this in a non-mutating method",
 					ZSTR_VAL(Z_OBJ(EX(This))->ce->name), ZSTR_VAL(fbc->common.function_name));
@@ -84346,8 +84470,10 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_CCONV ZEND_INIT_STATIC_METHOD
 	if (!(fbc->common.fn_flags & ZEND_ACC_STATIC)) {
 		if (Z_TYPE(EX(This)) == IS_OBJECT && instanceof_function(Z_OBJCE(EX(This)), ce)) {
 			if (UNEXPECTED(fbc->common.fn_flags2 & ZEND_ACC2_MUTATING)
+			 && (Z_OBJCE(EX(This))->ce_flags2 & ZEND_ACC2_VALUE_CLASS)
 			 && UNEXPECTED(!(EX(func)->common.fn_flags2 & ZEND_ACC2_MUTATING))) {
-				/* self::m() binds $this: same rule as $this->m(). */
+				/* self::m() binds $this: same rule as $this->m(). Inert on
+				 * plain class receivers (mutating extension methods). */
 				zend_throw_error(NULL,
 					"Cannot call mutating method %s::%s() on $this in a non-mutating method",
 					ZSTR_VAL(Z_OBJ(EX(This))->ce->name), ZSTR_VAL(fbc->common.function_name));
@@ -85562,8 +85688,10 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_CCONV ZEND_INIT_STATIC_METHOD
 	if (!(fbc->common.fn_flags & ZEND_ACC_STATIC)) {
 		if (Z_TYPE(EX(This)) == IS_OBJECT && instanceof_function(Z_OBJCE(EX(This)), ce)) {
 			if (UNEXPECTED(fbc->common.fn_flags2 & ZEND_ACC2_MUTATING)
+			 && (Z_OBJCE(EX(This))->ce_flags2 & ZEND_ACC2_VALUE_CLASS)
 			 && UNEXPECTED(!(EX(func)->common.fn_flags2 & ZEND_ACC2_MUTATING))) {
-				/* self::m() binds $this: same rule as $this->m(). */
+				/* self::m() binds $this: same rule as $this->m(). Inert on
+				 * plain class receivers (mutating extension methods). */
 				zend_throw_error(NULL,
 					"Cannot call mutating method %s::%s() on $this in a non-mutating method",
 					ZSTR_VAL(Z_OBJ(EX(This))->ce->name), ZSTR_VAL(fbc->common.function_name));
@@ -88263,8 +88391,10 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_CCONV ZEND_INIT_STATIC_METHOD
 	if (!(fbc->common.fn_flags & ZEND_ACC_STATIC)) {
 		if (Z_TYPE(EX(This)) == IS_OBJECT && instanceof_function(Z_OBJCE(EX(This)), ce)) {
 			if (UNEXPECTED(fbc->common.fn_flags2 & ZEND_ACC2_MUTATING)
+			 && (Z_OBJCE(EX(This))->ce_flags2 & ZEND_ACC2_VALUE_CLASS)
 			 && UNEXPECTED(!(EX(func)->common.fn_flags2 & ZEND_ACC2_MUTATING))) {
-				/* self::m() binds $this: same rule as $this->m(). */
+				/* self::m() binds $this: same rule as $this->m(). Inert on
+				 * plain class receivers (mutating extension methods). */
 				zend_throw_error(NULL,
 					"Cannot call mutating method %s::%s() on $this in a non-mutating method",
 					ZSTR_VAL(Z_OBJ(EX(This))->ce->name), ZSTR_VAL(fbc->common.function_name));
@@ -90574,12 +90704,17 @@ static ZEND_VM_HOT ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_CCONV ZEND_INIT_M
 
 	}
 
-	if (UNEXPECTED(fbc->common.fn_flags2 & ZEND_ACC2_MUTATING)) {
+	if (UNEXPECTED(fbc->common.fn_flags2 & ZEND_ACC2_MUTATING)
+	 && (obj->ce->ce_flags2 & ZEND_ACC2_VALUE_CLASS)) {
 		/* A mutating callee writes its receiver in place, so the receiver
 		 * must be a slot this call site can lend exclusively. Separate a
 		 * variable receiver before the frame takes its reference; $this
 		 * chains stay borrowed (already exclusive in a mutating frame, and
-		 * the outermost frame's escape check covers the whole chain). */
+		 * the outermost frame's escape check covers the whole chain).
+		 * On a plain class receiver (possible only through interface- or
+		 * class-targeted mutating extension methods) the marker is inert:
+		 * reference semantics make every method effectively mutating, the
+		 * same rule traits apply to class consumers. */
 		if (IS_UNUSED == IS_CV) {
 			obj = zend_value_class_separate_container(object);
 		} else if (IS_UNUSED == IS_UNUSED) {
@@ -90750,8 +90885,10 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_CCONV ZEND_INIT_STATIC_METHOD
 	if (!(fbc->common.fn_flags & ZEND_ACC_STATIC)) {
 		if (Z_TYPE(EX(This)) == IS_OBJECT && instanceof_function(Z_OBJCE(EX(This)), ce)) {
 			if (UNEXPECTED(fbc->common.fn_flags2 & ZEND_ACC2_MUTATING)
+			 && (Z_OBJCE(EX(This))->ce_flags2 & ZEND_ACC2_VALUE_CLASS)
 			 && UNEXPECTED(!(EX(func)->common.fn_flags2 & ZEND_ACC2_MUTATING))) {
-				/* self::m() binds $this: same rule as $this->m(). */
+				/* self::m() binds $this: same rule as $this->m(). Inert on
+				 * plain class receivers (mutating extension methods). */
 				zend_throw_error(NULL,
 					"Cannot call mutating method %s::%s() on $this in a non-mutating method",
 					ZSTR_VAL(Z_OBJ(EX(This))->ce->name), ZSTR_VAL(fbc->common.function_name));
@@ -92821,12 +92958,17 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_CCONV ZEND_INIT_METHOD_CALL_S
 		zval_ptr_dtor_nogc(EX_VAR(opline->op2.var));
 	}
 
-	if (UNEXPECTED(fbc->common.fn_flags2 & ZEND_ACC2_MUTATING)) {
+	if (UNEXPECTED(fbc->common.fn_flags2 & ZEND_ACC2_MUTATING)
+	 && (obj->ce->ce_flags2 & ZEND_ACC2_VALUE_CLASS)) {
 		/* A mutating callee writes its receiver in place, so the receiver
 		 * must be a slot this call site can lend exclusively. Separate a
 		 * variable receiver before the frame takes its reference; $this
 		 * chains stay borrowed (already exclusive in a mutating frame, and
-		 * the outermost frame's escape check covers the whole chain). */
+		 * the outermost frame's escape check covers the whole chain).
+		 * On a plain class receiver (possible only through interface- or
+		 * class-targeted mutating extension methods) the marker is inert:
+		 * reference semantics make every method effectively mutating, the
+		 * same rule traits apply to class consumers. */
 		if (IS_UNUSED == IS_CV) {
 			obj = zend_value_class_separate_container(object);
 		} else if (IS_UNUSED == IS_UNUSED) {
@@ -92992,8 +93134,10 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_CCONV ZEND_INIT_STATIC_METHOD
 	if (!(fbc->common.fn_flags & ZEND_ACC_STATIC)) {
 		if (Z_TYPE(EX(This)) == IS_OBJECT && instanceof_function(Z_OBJCE(EX(This)), ce)) {
 			if (UNEXPECTED(fbc->common.fn_flags2 & ZEND_ACC2_MUTATING)
+			 && (Z_OBJCE(EX(This))->ce_flags2 & ZEND_ACC2_VALUE_CLASS)
 			 && UNEXPECTED(!(EX(func)->common.fn_flags2 & ZEND_ACC2_MUTATING))) {
-				/* self::m() binds $this: same rule as $this->m(). */
+				/* self::m() binds $this: same rule as $this->m(). Inert on
+				 * plain class receivers (mutating extension methods). */
 				zend_throw_error(NULL,
 					"Cannot call mutating method %s::%s() on $this in a non-mutating method",
 					ZSTR_VAL(Z_OBJ(EX(This))->ce->name), ZSTR_VAL(fbc->common.function_name));
@@ -93425,8 +93569,10 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_CCONV ZEND_INIT_STATIC_METHOD
 	if (!(fbc->common.fn_flags & ZEND_ACC_STATIC)) {
 		if (Z_TYPE(EX(This)) == IS_OBJECT && instanceof_function(Z_OBJCE(EX(This)), ce)) {
 			if (UNEXPECTED(fbc->common.fn_flags2 & ZEND_ACC2_MUTATING)
+			 && (Z_OBJCE(EX(This))->ce_flags2 & ZEND_ACC2_VALUE_CLASS)
 			 && UNEXPECTED(!(EX(func)->common.fn_flags2 & ZEND_ACC2_MUTATING))) {
-				/* self::m() binds $this: same rule as $this->m(). */
+				/* self::m() binds $this: same rule as $this->m(). Inert on
+				 * plain class receivers (mutating extension methods). */
 				zend_throw_error(NULL,
 					"Cannot call mutating method %s::%s() on $this in a non-mutating method",
 					ZSTR_VAL(Z_OBJ(EX(This))->ce->name), ZSTR_VAL(fbc->common.function_name));
@@ -95612,12 +95758,17 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_CCONV ZEND_INIT_METHOD_CALL_S
 
 	}
 
-	if (UNEXPECTED(fbc->common.fn_flags2 & ZEND_ACC2_MUTATING)) {
+	if (UNEXPECTED(fbc->common.fn_flags2 & ZEND_ACC2_MUTATING)
+	 && (obj->ce->ce_flags2 & ZEND_ACC2_VALUE_CLASS)) {
 		/* A mutating callee writes its receiver in place, so the receiver
 		 * must be a slot this call site can lend exclusively. Separate a
 		 * variable receiver before the frame takes its reference; $this
 		 * chains stay borrowed (already exclusive in a mutating frame, and
-		 * the outermost frame's escape check covers the whole chain). */
+		 * the outermost frame's escape check covers the whole chain).
+		 * On a plain class receiver (possible only through interface- or
+		 * class-targeted mutating extension methods) the marker is inert:
+		 * reference semantics make every method effectively mutating, the
+		 * same rule traits apply to class consumers. */
 		if (IS_UNUSED == IS_CV) {
 			obj = zend_value_class_separate_container(object);
 		} else if (IS_UNUSED == IS_UNUSED) {
@@ -95788,8 +95939,10 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_CCONV ZEND_INIT_STATIC_METHOD
 	if (!(fbc->common.fn_flags & ZEND_ACC_STATIC)) {
 		if (Z_TYPE(EX(This)) == IS_OBJECT && instanceof_function(Z_OBJCE(EX(This)), ce)) {
 			if (UNEXPECTED(fbc->common.fn_flags2 & ZEND_ACC2_MUTATING)
+			 && (Z_OBJCE(EX(This))->ce_flags2 & ZEND_ACC2_VALUE_CLASS)
 			 && UNEXPECTED(!(EX(func)->common.fn_flags2 & ZEND_ACC2_MUTATING))) {
-				/* self::m() binds $this: same rule as $this->m(). */
+				/* self::m() binds $this: same rule as $this->m(). Inert on
+				 * plain class receivers (mutating extension methods). */
 				zend_throw_error(NULL,
 					"Cannot call mutating method %s::%s() on $this in a non-mutating method",
 					ZSTR_VAL(Z_OBJ(EX(This))->ce->name), ZSTR_VAL(fbc->common.function_name));
@@ -100812,12 +100965,17 @@ static ZEND_VM_HOT ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_CCONV ZEND_INIT_M
 
 	}
 
-	if (UNEXPECTED(fbc->common.fn_flags2 & ZEND_ACC2_MUTATING)) {
+	if (UNEXPECTED(fbc->common.fn_flags2 & ZEND_ACC2_MUTATING)
+	 && (obj->ce->ce_flags2 & ZEND_ACC2_VALUE_CLASS)) {
 		/* A mutating callee writes its receiver in place, so the receiver
 		 * must be a slot this call site can lend exclusively. Separate a
 		 * variable receiver before the frame takes its reference; $this
 		 * chains stay borrowed (already exclusive in a mutating frame, and
-		 * the outermost frame's escape check covers the whole chain). */
+		 * the outermost frame's escape check covers the whole chain).
+		 * On a plain class receiver (possible only through interface- or
+		 * class-targeted mutating extension methods) the marker is inert:
+		 * reference semantics make every method effectively mutating, the
+		 * same rule traits apply to class consumers. */
 		if (IS_CV == IS_CV) {
 			obj = zend_value_class_separate_container(object);
 		} else if (IS_CV == IS_UNUSED) {
@@ -104734,12 +104892,17 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_CCONV ZEND_INIT_METHOD_CALL_S
 		zval_ptr_dtor_nogc(EX_VAR(opline->op2.var));
 	}
 
-	if (UNEXPECTED(fbc->common.fn_flags2 & ZEND_ACC2_MUTATING)) {
+	if (UNEXPECTED(fbc->common.fn_flags2 & ZEND_ACC2_MUTATING)
+	 && (obj->ce->ce_flags2 & ZEND_ACC2_VALUE_CLASS)) {
 		/* A mutating callee writes its receiver in place, so the receiver
 		 * must be a slot this call site can lend exclusively. Separate a
 		 * variable receiver before the frame takes its reference; $this
 		 * chains stay borrowed (already exclusive in a mutating frame, and
-		 * the outermost frame's escape check covers the whole chain). */
+		 * the outermost frame's escape check covers the whole chain).
+		 * On a plain class receiver (possible only through interface- or
+		 * class-targeted mutating extension methods) the marker is inert:
+		 * reference semantics make every method effectively mutating, the
+		 * same rule traits apply to class consumers. */
 		if (IS_CV == IS_CV) {
 			obj = zend_value_class_separate_container(object);
 		} else if (IS_CV == IS_UNUSED) {
@@ -109935,12 +110098,17 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_CCONV ZEND_INIT_METHOD_CALL_S
 
 	}
 
-	if (UNEXPECTED(fbc->common.fn_flags2 & ZEND_ACC2_MUTATING)) {
+	if (UNEXPECTED(fbc->common.fn_flags2 & ZEND_ACC2_MUTATING)
+	 && (obj->ce->ce_flags2 & ZEND_ACC2_VALUE_CLASS)) {
 		/* A mutating callee writes its receiver in place, so the receiver
 		 * must be a slot this call site can lend exclusively. Separate a
 		 * variable receiver before the frame takes its reference; $this
 		 * chains stay borrowed (already exclusive in a mutating frame, and
-		 * the outermost frame's escape check covers the whole chain). */
+		 * the outermost frame's escape check covers the whole chain).
+		 * On a plain class receiver (possible only through interface- or
+		 * class-targeted mutating extension methods) the marker is inert:
+		 * reference semantics make every method effectively mutating, the
+		 * same rule traits apply to class consumers. */
 		if (IS_CV == IS_CV) {
 			obj = zend_value_class_separate_container(object);
 		} else if (IS_CV == IS_UNUSED) {
