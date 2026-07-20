@@ -331,6 +331,33 @@ static HashTable *zend_persist_attributes(HashTable *attributes)
 	return ptr;
 }
 
+static HashTable *zend_persist_extension_imports(HashTable *imports)
+{
+	zval *v;
+
+	if (!ZCG(current_persistent_script)->corrupted && zend_accel_in_shm(imports)) {
+		return imports;
+	}
+
+	/* Import sets are shared between all op_arrays of a file: persist once. */
+	HashTable *xlat = zend_shared_alloc_get_xlat_entry(imports);
+	if (xlat) {
+		return xlat;
+	}
+
+	zend_hash_persist(imports);
+
+	ZEND_HASH_PACKED_FOREACH_VAL(imports, v) {
+		zend_accel_store_interned_string(Z_STR_P(v));
+	} ZEND_HASH_FOREACH_END();
+
+	HashTable *ptr = zend_shared_memdup_put_free(imports, sizeof(HashTable));
+	GC_SET_REFCOUNT(ptr, 2);
+	GC_TYPE_INFO(ptr) = GC_ARRAY | ((IS_ARRAY_IMMUTABLE|GC_NOT_COLLECTABLE) << GC_FLAGS_SHIFT);
+
+	return ptr;
+}
+
 uint32_t zend_accel_get_class_name_map_ptr(zend_string *type_name)
 {
 	uint32_t ret;
@@ -478,6 +505,10 @@ static void zend_persist_op_array_ex(zend_op_array *op_array, zend_persistent_sc
 			if (op_array->attributes) {
 				op_array->attributes = zend_shared_alloc_get_xlat_entry(op_array->attributes);
 				ZEND_ASSERT(op_array->attributes != NULL);
+			}
+			if (op_array->extension_imports) {
+				op_array->extension_imports = zend_shared_alloc_get_xlat_entry(op_array->extension_imports);
+				ZEND_ASSERT(op_array->extension_imports != NULL);
 			}
 
 			if (op_array->try_catch_array) {
@@ -674,6 +705,10 @@ static void zend_persist_op_array_ex(zend_op_array *op_array, zend_persistent_sc
 
 	if (op_array->attributes) {
 		op_array->attributes = zend_persist_attributes(op_array->attributes);
+	}
+
+	if (op_array->extension_imports) {
+		op_array->extension_imports = zend_persist_extension_imports(op_array->extension_imports);
 	}
 
 	if (op_array->try_catch_array) {

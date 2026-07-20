@@ -23,6 +23,7 @@
 #include "zend_attributes.h"
 #include "zend_compile.h"
 #include "zend_constants.h"
+#include "zend_extension_methods.h"
 #include "zend_llist.h"
 #include "zend_API.h"
 #include "zend_exceptions.h"
@@ -403,6 +404,7 @@ void zend_file_context_begin(zend_file_context *prev_context) /* {{{ */
 	FC(imports) = NULL;
 	FC(imports_function) = NULL;
 	FC(imports_const) = NULL;
+	FC(extension_imports) = NULL;
 	FC(current_namespace) = NULL;
 	FC(in_namespace) = 0;
 	FC(has_bracketed_namespaces) = 0;
@@ -415,6 +417,9 @@ void zend_file_context_end(const zend_file_context *prev_context) /* {{{ */
 {
 	zend_end_namespace();
 	zend_hash_destroy(&FC(seen_symbols));
+	if (FC(extension_imports)) {
+		zend_hash_release(FC(extension_imports));
+	}
 	CG(file_context) = *prev_context;
 }
 /* }}} */
@@ -427,6 +432,7 @@ void zend_init_compiler_data_structures(void) /* {{{ */
 	CG(active_class_entry) = NULL;
 	CG(in_compilation) = 0;
 	CG(skip_shebang) = 0;
+	CG(extension_receiver) = NULL;
 
 	CG(encoding_declared) = 0;
 	CG(memoized_exprs) = NULL;
@@ -1787,6 +1793,13 @@ static zend_string *zend_resolve_const_class_name_reference(zend_ast *ast, const
 
 static void zend_ensure_valid_class_fetch_type(uint32_t fetch_type) /* {{{ */
 {
+	if (fetch_type == ZEND_FETCH_CLASS_STATIC && UNEXPECTED(CG(extension_receiver) != NULL)) {
+		/* Late static binding has no meaningful referent in extension
+		 * methods: the scope is the synthetic extension class, and the
+		 * receiver is an ordinary variable, not $this. */
+		zend_error_noreturn(E_COMPILE_ERROR,
+			"Cannot use \"static\" in an extension method");
+	}
 	if (fetch_type != ZEND_FETCH_CLASS_DEFAULT && zend_is_scope_known()) {
 		zend_class_entry *ce = CG(active_class_entry);
 		if (!ce) {
@@ -2994,7 +3007,16 @@ static bool is_this_fetch(const zend_ast *ast) /* {{{ */
 {
 	if (ast->kind == ZEND_AST_VAR && ast->child[0]->kind == ZEND_AST_ZVAL) {
 		const zval *name = zend_ast_get_zval(ast->child[0]);
-		return Z_TYPE_P(name) == IS_STRING && zend_string_equals(Z_STR_P(name), ZSTR_KNOWN(ZEND_STR_THIS));
+		if (Z_TYPE_P(name) == IS_STRING && zend_string_equals(Z_STR_P(name), ZSTR_KNOWN(ZEND_STR_THIS))) {
+			if (UNEXPECTED(CG(extension_receiver) != NULL)) {
+				/* Extension bodies have no $this: the receiver is the
+				 * declared variable, an ordinary by-value local. */
+				zend_error_noreturn(E_COMPILE_ERROR,
+					"Cannot use $this in an extension method (use the declared receiver $%s)",
+					ZSTR_VAL(CG(extension_receiver)));
+			}
+			return true;
+		}
 	}
 
 	return false;
@@ -5648,7 +5670,9 @@ static void zend_compile_static_call(znode *result, zend_ast *ast, uint32_t type
 }
 /* }}} */
 
-static void zend_compile_class_decl(znode *result, const zend_ast *ast, bool toplevel);
+static zend_class_entry *zend_compile_class_decl(znode *result, const zend_ast *ast, bool toplevel);
+static void zend_compile_extension_decl(zend_ast *ast);
+static void zend_extension_imports_add(zend_string *name, zend_string *name_lc);
 
 static void zend_compile_new(znode *result, zend_ast *ast) /* {{{ */
 {
@@ -8754,6 +8778,11 @@ static zend_op_array *zend_compile_func_decl_ex(
 	}
 
 	op_array->fn_flags |= (orig_op_array->fn_flags & ZEND_ACC_STRICT_TYPES);
+	/* Snapshot the file's `use extension` imports as of this position. */
+	if (FC(extension_imports)) {
+		op_array->extension_imports = FC(extension_imports);
+		GC_ADDREF(op_array->extension_imports);
+	}
 	op_array->fn_flags |= decl->flags;
 	op_array->line_start = decl->start_lineno;
 	op_array->line_end = decl->end_lineno;
@@ -8841,6 +8870,29 @@ static zend_op_array *zend_compile_func_decl_ex(
 
 	zend_compile_params(params_ast, return_type_ast,
 		is_method && zend_string_equals_literal(lcname, ZEND_TOSTRING_FUNC_LCNAME) ? IS_STRING : 0);
+
+	if (UNEXPECTED(CG(extension_receiver) != NULL) && is_method) {
+		/* Extension method: bind the receiver into its declared variable.
+		 * Emitted after the parameter RECVs so the engine's RECV-skip fast
+		 * path lands exactly on this opcode; before GENERATOR_CREATE so the
+		 * receiver CV is populated in the frame a generator would copy. */
+		znode recv_node;
+		zend_op *recv_op;
+
+		for (uint32_t i = 0; i < op_array->num_args; i++) {
+			if (zend_string_equals(op_array->arg_info[i].name, CG(extension_receiver))) {
+				zend_error_noreturn(E_COMPILE_ERROR,
+					"Cannot redeclare extension receiver $%s as a parameter",
+					ZSTR_VAL(CG(extension_receiver)));
+			}
+		}
+
+		recv_node.op_type = IS_CV;
+		recv_node.u.op.var = lookup_cv(CG(extension_receiver));
+		recv_op = zend_emit_op(NULL, ZEND_RECV_RECEIVER, NULL, NULL);
+		SET_NODE(recv_op->result, &recv_node);
+	}
+
 	if (CG(active_op_array)->fn_flags & ZEND_ACC_GENERATOR) {
 		if (CG(active_class_entry) != NULL) {
 			if (zend_is_constructor(CG(active_op_array)->function_name)) {
@@ -9546,7 +9598,149 @@ static void zend_compile_enum_backing_type(zend_class_entry *ce, zend_ast *enum_
 	zend_type_release(type, 0);
 }
 
-static void zend_compile_class_decl(znode *result, const zend_ast *ast, bool toplevel) /* {{{ */
+static void zend_compile_extension_decl(zend_ast *ast) /* {{{ */
+{
+	zend_ast *target_ast = ast->child[0];
+	zend_ast *receiver_ast = ast->child[1];
+	zend_ast *class_ast = ast->child[2];
+	zend_ast_decl *decl = (zend_ast_decl *) class_ast;
+	zend_string *target_name, *target_lc;
+	znode class_node;
+	zend_op *opline;
+
+	zend_string *receiver_name = zend_ast_get_str(receiver_ast);
+	if (zend_string_equals(receiver_name, ZSTR_KNOWN(ZEND_STR_THIS))) {
+		zend_error_noreturn(E_COMPILE_ERROR,
+			"Cannot use $this as the extension receiver variable");
+	}
+
+	/* v1 restriction: methods only (no properties, consts, or promoted state;
+	 * object layout is fixed at link time and shared under opcache). */
+	zend_ast_list *stmts = zend_ast_get_list(decl->child[2]);
+	for (uint32_t i = 0; i < stmts->children; i++) {
+		if (stmts->child[i] && stmts->child[i]->kind != ZEND_AST_METHOD) {
+			zend_error_noreturn(E_COMPILE_ERROR,
+				"Extension blocks may only declare methods");
+		}
+		if (stmts->child[i]) {
+			const zend_ast_decl *method = (const zend_ast_decl *) stmts->child[i];
+			/* Magic methods dispatch through dedicated class-entry slots and
+			 * handlers, never through the get_method miss path where
+			 * extension methods live, so none of them could ever work here.
+			 * The __ prefix is reserved for them; reject it wholesale. */
+			if (ZSTR_LEN(method->name) >= 2
+			 && ZSTR_VAL(method->name)[0] == '_' && ZSTR_VAL(method->name)[1] == '_') {
+				zend_error_noreturn(E_COMPILE_ERROR,
+					"Extension blocks may not declare magic method %s()",
+					ZSTR_VAL(method->name));
+			}
+			if (method->flags & ZEND_ACC_ABSTRACT) {
+				zend_error_noreturn(E_COMPILE_ERROR,
+					"Extension methods cannot be abstract");
+			}
+		}
+	}
+
+	/* Scalar targets: the built-in value type names, matched on the raw
+	 * unqualified name before namespace resolution (they are not classes and
+	 * must not be namespace-prefixed). Other reserved type names cannot be
+	 * extended at all. */
+	bool is_scalar_target = false;
+	if (target_ast->kind == ZEND_AST_ZVAL
+	 && target_ast->attr == ZEND_NAME_NOT_FQ) {
+		zend_string *raw = zend_ast_get_str(target_ast);
+		if (zend_string_equals_literal_ci(raw, "string")
+		 || zend_string_equals_literal_ci(raw, "int")
+		 || zend_string_equals_literal_ci(raw, "float")
+		 || zend_string_equals_literal_ci(raw, "bool")
+		 || zend_string_equals_literal_ci(raw, "array")) {
+			is_scalar_target = true;
+		} else if (zend_is_reserved_class_name(raw)) {
+			zend_error_noreturn(E_COMPILE_ERROR,
+				"Cannot extend reserved type %s", ZSTR_VAL(raw));
+		}
+	}
+
+	if (is_scalar_target) {
+		target_name = zend_string_copy(zend_ast_get_str(target_ast));
+		target_lc = zend_string_tolower(target_name);
+	} else {
+		target_name = zend_resolve_class_name_ast(target_ast);
+		target_lc = zend_string_tolower(target_name);
+	}
+
+	zend_string *ext_name = NULL, *ext_name_lc = NULL;
+	if (decl->name) {
+		/* Named form (`extension Name on Target $recv`): namespaced like a
+		 * class declaration; lexically gated at resolution time
+		 * (`use extension`). The declaring position imports its own
+		 * extension, so the block's methods and all code below can call it
+		 * without a self-import. */
+		ext_name = zend_prefix_with_ns(decl->name);
+		ext_name_lc = zend_string_tolower(ext_name);
+		zend_extension_imports_add(ext_name, ext_name_lc);
+	}
+
+	/* Compile the body as an anonymous, final, uninstantiable class. Its
+	 * methods have no $this: each receives the receiver in the declared
+	 * variable via ZEND_RECV_RECEIVER (see zend_compile_func_decl), so
+	 * extension bodies hold the receiver like any outside code would — and
+	 * consequently see only the target's public API. */
+	zend_string *orig_extension_receiver = CG(extension_receiver);
+	CG(extension_receiver) = receiver_name;
+	zend_class_entry *ext_ce = zend_compile_class_decl(&class_node, class_ast, false);
+	CG(extension_receiver) = orig_extension_receiver;
+
+	if (ext_name) {
+		/* A named extension is a class-table symbol (bound at runtime by
+		 * ZEND_BIND_EXTENSION): the synthetic CE carries the extension's real
+		 * name — it is what class_exists(), reflection, and diagnostics see,
+		 * and it is the name the class autoloader is asked for. The CE stays
+		 * uninstantiable: EXPLICIT (not IMPLICIT) abstract, because linking
+		 * clears an implicit-abstract flag on classes without abstract
+		 * methods. Both must happen at compile time — under opcache the CE
+		 * is persisted to (protected) shared memory. */
+		zend_string_release(ext_ce->name);
+		ext_ce->name = zend_new_interned_string(zend_string_copy(ext_name));
+		ext_ce->ce_flags |= ZEND_ACC_EXPLICIT_ABSTRACT_CLASS;
+		zend_string_release(ext_name);
+	}
+
+	/* Keep extension methods out of the polymorphic inline cache for the
+	 * prototype (correctness over speed; the cached path + JIT support is
+	 * future work). Must happen at compile time: under opcache the CE is
+	 * persisted to (protected) shared memory and is immutable at runtime. */
+	zend_function *ext_fn;
+	ZEND_HASH_MAP_FOREACH_PTR(&ext_ce->function_table, ext_fn) {
+		ext_fn->common.fn_flags |= ZEND_ACC_NEVER_CACHE;
+		if (is_scalar_target) {
+			/* Keep these bodies interpreted: generated code must never
+			 * observe the non-object receiver handoff in This. */
+			ext_fn->common.fn_flags2 |= ZEND_ACC2_SCALAR_RECEIVER;
+		}
+	} ZEND_HASH_FOREACH_END();
+
+	/* Runtime registration once the synthetic CE is declared. */
+	opline = zend_emit_op(NULL, ZEND_BIND_EXTENSION, &class_node, NULL);
+	opline->op2_type = IS_CONST;
+	opline->op2.constant = zend_add_literal_string(&target_lc);
+
+	if (ext_name_lc) {
+		/* The lc name is emitted as the literal following the target name
+		 * (consecutive-literal pattern; extended_value flags its presence). */
+		int ext_name_literal = zend_add_literal_string(&ext_name_lc);
+		ZEND_ASSERT(ext_name_literal == (int) opline->op2.constant + 1);
+		opline->extended_value = 1;
+	} else {
+		/* Anonymous form: globally visible once executed. */
+		opline->extended_value = 0;
+	}
+
+	zend_string_release(target_name);
+}
+/* }}} */
+
+static zend_class_entry *zend_compile_class_decl(znode *result, const zend_ast *ast, bool toplevel) /* {{{ */
 {
 	const zend_ast_decl *decl = (const zend_ast_decl *) ast;
 	zend_ast *extends_ast = decl->child[0];
@@ -9683,7 +9877,7 @@ static void zend_compile_class_decl(znode *result, const zend_ast *ast, bool top
 				 && !zend_compile_ignore_class(parent_ce, ce->info.user.filename)) {
 					if (zend_try_early_bind(ce, parent_ce, lcname, NULL)) {
 						zend_string_release(lcname);
-						return;
+						return ce;
 					}
 				}
 			} else if (EXPECTED(zend_hash_add_ptr(CG(class_table), lcname, ce) != NULL)) {
@@ -9692,7 +9886,7 @@ static void zend_compile_class_decl(znode *result, const zend_ast *ast, bool top
 				zend_inheritance_check_override(ce);
 				ce->ce_flags |= ZEND_ACC_LINKED;
 				zend_observer_class_linked_notify(ce, lcname);
-				return;
+				return ce;
 			} else {
 				goto link_unbound;
 			}
@@ -9762,6 +9956,7 @@ link_unbound:
 			opline->result.opline_num = -1;
 		}
 	}
+	return ce;
 }
 /* }}} */
 
@@ -9895,14 +10090,76 @@ static void zend_check_already_in_use(uint32_t type, const zend_string *old_name
 }
 /* }}} */
 
+/* `use extension Vendor\Name;` is activation, not aliasing: it adds the
+ * fully-qualified extension name to this file's visibility set, consulted
+ * from the calling frame when extension methods are resolved. */
+/* Append to the file's current `use extension` import set. Copy-on-write:
+ * op_arrays snapshot the set as of their compile position by holding the
+ * table pointer, so a published table is never mutated. */
+static void zend_extension_imports_add(zend_string *name, zend_string *name_lc) /* {{{ */
+{
+	HashTable *imports;
+	zval zv;
+
+	/* Import sets are stored as consecutive pairs: [lc name, original-case
+	 * name]. Gating compares the lc slots (even indices); the original-case
+	 * slot is what a class autoloader receives when an imported extension is
+	 * not loaded at first use. */
+	if (FC(extension_imports)) {
+		uint32_t n = zend_hash_num_elements(FC(extension_imports));
+		for (uint32_t i = 0; i < n; i += 2) {
+			zval *entry = zend_hash_index_find(FC(extension_imports), i);
+			if (entry && zend_string_equals(Z_STR_P(entry), name_lc)) {
+				return; /* already imported */
+			}
+		}
+		imports = zend_array_dup(FC(extension_imports));
+		zend_hash_release(FC(extension_imports));
+	} else {
+		imports = zend_new_array(8);
+	}
+	ZVAL_STR(&zv, zend_new_interned_string(zend_string_copy(name_lc)));
+	zend_hash_next_index_insert(imports, &zv);
+	ZVAL_STR(&zv, zend_new_interned_string(zend_string_copy(name)));
+	zend_hash_next_index_insert(imports, &zv);
+	FC(extension_imports) = imports;
+}
+/* }}} */
+
+static void zend_compile_use_extension(const zend_ast_list *list) /* {{{ */
+{
+	for (uint32_t i = 0; i < list->children; ++i) {
+		const zend_ast *use_ast = list->child[i];
+		zend_string *name = zend_ast_get_str(use_ast->child[0]);
+		zend_string *name_lc;
+
+		if (use_ast->child[1]) {
+			zend_error_noreturn(E_COMPILE_ERROR,
+				"Cannot alias extension %s: extension imports do not support \"as\"",
+				ZSTR_VAL(name));
+		}
+
+		name_lc = zend_string_tolower(name);
+		zend_extension_imports_add(name, name_lc);
+		zend_string_release(name_lc);
+	}
+}
+/* }}} */
+
 static void zend_compile_use(zend_ast *ast) /* {{{ */
 {
 	const zend_ast_list *list = zend_ast_get_list(ast);
 	uint32_t i;
 	zend_string *current_ns = FC(current_namespace);
 	uint32_t type = ast->attr;
-	HashTable *current_import = zend_get_import_ht(type);
+	HashTable *current_import;
 	bool case_sensitive = type == ZEND_SYMBOL_CONST;
+
+	if (type == ZEND_SYMBOL_EXTENSION) {
+		zend_compile_use_extension(list);
+		return;
+	}
+	current_import = zend_get_import_ht(type);
 
 	for (i = 0; i < list->children; ++i) {
 		const zend_ast *use_ast = list->child[i];
@@ -12084,6 +12341,9 @@ static void zend_compile_stmt(zend_ast *ast) /* {{{ */
 			break;
 		case ZEND_AST_USE_TRAIT:
 			zend_compile_use_trait(ast);
+			break;
+		case ZEND_AST_EXTENSION_DECL:
+			zend_compile_extension_decl(ast);
 			break;
 		case ZEND_AST_CLASS:
 			zend_compile_class_decl(NULL, ast, false);
