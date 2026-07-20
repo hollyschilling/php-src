@@ -127,8 +127,10 @@ static uint32_t zend_generics_param_index(
 }
 
 /* Local equivalent of zend_inheritance.c's zend_type_copy_ctor (which is
- * static there): arena-duplicate lists, addref name strings. */
-static void zend_generics_type_copy_ctor(zend_type *type)
+ * static there): arena-duplicate lists; addref name strings only when the
+ * copy will be released again (property/constant types are, substituted
+ * arg_info entries never are). */
+static void zend_generics_type_copy_ctor(zend_type *type, bool take_refs)
 {
 	if (ZEND_TYPE_HAS_LIST(*type)) {
 		const zend_type_list *old_list = ZEND_TYPE_LIST(*type);
@@ -142,12 +144,12 @@ static void zend_generics_type_copy_ctor(zend_type *type)
 		zend_type *list_type;
 		ZEND_TYPE_LIST_FOREACH_MUTABLE(new_list, list_type) {
 			if (ZEND_TYPE_HAS_LIST(*list_type)) {
-				zend_generics_type_copy_ctor(list_type);
-			} else if (ZEND_TYPE_HAS_NAME(*list_type)) {
+				zend_generics_type_copy_ctor(list_type, take_refs);
+			} else if (take_refs && ZEND_TYPE_HAS_NAME(*list_type)) {
 				zend_string_addref(ZEND_TYPE_NAME(*list_type));
 			}
 		} ZEND_TYPE_LIST_FOREACH_END();
-	} else if (ZEND_TYPE_HAS_NAME(*type)) {
+	} else if (take_refs && ZEND_TYPE_HAS_NAME(*type)) {
 		zend_string_addref(ZEND_TYPE_NAME(*type));
 	}
 }
@@ -156,7 +158,7 @@ static void zend_generics_type_copy_ctor(zend_type *type)
  * Returns true if a substitution happened. The result owns its strings. */
 static bool zend_generics_substitute_single(
 		zend_type *type, const zend_class_entry *template_ce,
-		const zend_generic_binding *binding)
+		const zend_generic_binding *binding, bool take_refs)
 {
 	if (!ZEND_TYPE_HAS_NAME(*type)) {
 		return false;
@@ -171,7 +173,8 @@ static bool zend_generics_substitute_single(
 	uint32_t extra_mask = ZEND_TYPE_FULL_MASK(*type) & _ZEND_TYPE_MAY_BE_MASK;
 
 	if (ZEND_TYPE_HAS_NAME(arg)) {
-		type->ptr = zend_string_copy(ZEND_TYPE_NAME(arg));
+		type->ptr = take_refs
+			? zend_string_copy(ZEND_TYPE_NAME(arg)) : ZEND_TYPE_NAME(arg);
 		type->type_mask = _ZEND_TYPE_NAME_BIT | extra_mask;
 	} else {
 		type->ptr = NULL;
@@ -201,10 +204,11 @@ static bool zend_generics_type_uses_params(
  * returns false) if a scalar argument would land inside a composite type. */
 static bool zend_generics_substitute_type(
 		zend_type *type, const zend_class_entry *template_ce,
-		const zend_generic_binding *binding, const zend_string *display_name)
+		const zend_generic_binding *binding, const zend_string *display_name,
+		bool take_refs)
 {
 	if (ZEND_TYPE_HAS_LIST(*type)) {
-		zend_generics_type_copy_ctor(type);
+		zend_generics_type_copy_ctor(type, take_refs);
 		zend_type *list_type;
 		ZEND_TYPE_LIST_FOREACH_MUTABLE(ZEND_TYPE_LIST(*type), list_type) {
 			if (ZEND_TYPE_HAS_NAME(*list_type)) {
@@ -218,15 +222,19 @@ static bool zend_generics_substitute_type(
 							ZSTR_VAL(template_ce->generic_params->params[idx].name));
 						return false;
 					}
-					zend_string_release(ZEND_TYPE_NAME(*list_type));
-					list_type->ptr = zend_string_copy(ZEND_TYPE_NAME(binding->args[idx]));
+					if (take_refs) {
+						zend_string_release(ZEND_TYPE_NAME(*list_type));
+						list_type->ptr = zend_string_copy(ZEND_TYPE_NAME(binding->args[idx]));
+					} else {
+						list_type->ptr = ZEND_TYPE_NAME(binding->args[idx]);
+					}
 				}
 			}
 		} ZEND_TYPE_LIST_FOREACH_END();
 		return true;
 	}
-	if (!zend_generics_substitute_single(type, template_ce, binding)) {
-		zend_generics_type_copy_ctor(type);
+	if (!zend_generics_substitute_single(type, template_ce, binding, take_refs)) {
+		zend_generics_type_copy_ctor(type, take_refs);
 	}
 	return true;
 }
@@ -277,8 +285,12 @@ static zend_op_array *zend_generics_clone_method(
 			zend_arg_info *entries = (zend_arg_info *) (block + sizeof(zend_arg_info *));
 			memcpy(entries, tpl_base, total * sizeof(zend_arg_info));
 			for (uint32_t i = 0; i < total; i++) {
+				/* These entries are never destroyed (the template's original
+				 * arg_info is restored before the final free), so they must
+				 * not take string references. */
 				if (!zend_generics_substitute_type(
-						&entries[i].type, template_ce, binding, display_name)) {
+						&entries[i].type, template_ce, binding, display_name,
+						/* take_refs */ false)) {
 					return NULL;
 				}
 			}
@@ -305,7 +317,9 @@ static zend_class_entry *zend_generics_stamp_ce(
 	ce->name = zend_string_copy(display_name);
 	ce->refcount = 1;
 	ce->inheritance_cache = NULL;
-	ce->ce_flags &= ~ZEND_ACC_IMMUTABLE;
+	/* The instance owns its tables and must take the full destroy path even
+	 * when the template came from SHM or the file cache. */
+	ce->ce_flags &= ~(ZEND_ACC_IMMUTABLE | ZEND_ACC_FILE_CACHED);
 	ce->ce_flags2 = (ce->ce_flags2 & ~ZEND_ACC2_GENERIC_TEMPLATE) | ZEND_ACC2_GENERIC_INSTANCE;
 	ce->generic_params = NULL;
 	ce->generic_binding = binding;
@@ -317,7 +331,9 @@ static zend_class_entry *zend_generics_stamp_ce(
 	if (ce->doc_comment) {
 		zend_string_addref(ce->doc_comment);
 	}
-	if (ce->attributes) {
+	if (ce->attributes && !(GC_FLAGS(ce->attributes) & IS_ARRAY_IMMUTABLE)) {
+		/* Immutable (SHM) tables are shared without refcounting; guarded
+		 * so no writes land in shared memory. zend_hash_release skips them. */
 		GC_ADDREF(ce->attributes);
 	}
 	/* Trait metadata stays owned by the template (methods were merged at
@@ -414,11 +430,13 @@ static zend_class_entry *zend_generics_stamp_ce(
 			if (new_prop_info->doc_comment) {
 				zend_string_addref(new_prop_info->doc_comment);
 			}
-			if (new_prop_info->attributes) {
+			if (new_prop_info->attributes
+					&& !(GC_FLAGS(new_prop_info->attributes) & IS_ARRAY_IMMUTABLE)) {
 				GC_ADDREF(new_prop_info->attributes);
 			}
 			if (!zend_generics_substitute_type(
-					&new_prop_info->type, template_ce, binding, display_name)) {
+					&new_prop_info->type, template_ce, binding, display_name,
+					/* take_refs */ true)) {
 				return NULL;
 			}
 			if (new_prop_info->hooks) {
@@ -463,11 +481,13 @@ static zend_class_entry *zend_generics_stamp_ce(
 			if (new_c->doc_comment) {
 				zend_string_addref(new_c->doc_comment);
 			}
-			if (new_c->attributes) {
+			if (new_c->attributes
+					&& !(GC_FLAGS(new_c->attributes) & IS_ARRAY_IMMUTABLE)) {
 				GC_ADDREF(new_c->attributes);
 			}
 			if (!zend_generics_substitute_type(
-					&new_c->type, template_ce, binding, display_name)) {
+					&new_c->type, template_ce, binding, display_name,
+					/* take_refs */ true)) {
 				return NULL;
 			}
 		}
@@ -605,6 +625,13 @@ ZEND_API zend_class_entry *zend_generics_stamp_instantiation(
 	}
 
 	if (!zend_generics_check_bounds(template_ce, binding, name, use_autoload)) {
+		/* Interning is a no-op at runtime under opcache, so the arg names
+		 * are real refs; the binding won't outlive this failure. */
+		for (uint32_t i = 0; i < num_args; i++) {
+			if (ZEND_TYPE_HAS_NAME(binding->args[i])) {
+				zend_string_release(ZEND_TYPE_NAME(binding->args[i]));
+			}
+		}
 		return NULL;
 	}
 
@@ -612,11 +639,17 @@ ZEND_API zend_class_entry *zend_generics_stamp_instantiation(
 	zend_string *lc_key = zend_new_interned_string(zend_string_copy(lc_name));
 	zend_class_entry *ce = zend_generics_stamp_ce(template_ce, display, lc_key, binding);
 	if (!ce) {
+		zend_string_release(display);
+		zend_string_release(lc_key);
 		return NULL;
 	}
 
 	zv = zend_hash_add_ptr(EG(class_table), lc_key, ce);
 	ZEND_ASSERT(zv && "mangled key cannot already be present");
+
+	/* ce->name and the hash bucket hold their own refs. */
+	zend_string_release(display);
+	zend_string_release(lc_key);
 
 	return ce;
 }

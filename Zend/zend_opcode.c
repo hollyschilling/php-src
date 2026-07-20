@@ -441,6 +441,14 @@ ZEND_API void destroy_zend_class(zval *zv)
 			if (ce->backed_enum_table) {
 				zend_hash_release(ce->backed_enum_table);
 			}
+			if (ce->generic_binding) {
+				/* Struct is arena-allocated; only the arg names are owned. */
+				for (uint32_t i = 0; i < ce->generic_binding->num_args; i++) {
+					if (ZEND_TYPE_HAS_NAME(ce->generic_binding->args[i])) {
+						zend_string_release_ex(ZEND_TYPE_NAME(ce->generic_binding->args[i]), 0);
+					}
+				}
+			}
 			break;
 		case ZEND_INTERNAL_CLASS:
 			if (ce->doc_comment) {
