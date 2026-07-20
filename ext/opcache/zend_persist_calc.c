@@ -265,6 +265,33 @@ static void zend_persist_op_array_calc_ex(zend_op_array *op_array)
 	if (op_array->scope) {
 		if (zend_shared_alloc_get_xlat_entry(op_array->opcodes)) {
 			/* already stored */
+			if (UNEXPECTED(op_array->fn_flags2 & ZEND_ACC2_GENERIC_SUBST_ARG_INFO)
+					&& op_array->arg_info) {
+				/* Type-substituted arg_info of a generic instantiation clone
+				 * is persisted separately from the shared body. */
+				zend_arg_info *arg_info = op_array->arg_info;
+				uint32_t num_args = op_array->num_args;
+				if (op_array->fn_flags & ZEND_ACC_HAS_RETURN_TYPE) {
+					arg_info--;
+					num_args++;
+				}
+				if (op_array->fn_flags & ZEND_ACC_VARIADIC) {
+					num_args++;
+				}
+				if (!zend_shared_alloc_get_xlat_entry(arg_info)) {
+					zend_shared_alloc_register_xlat_entry(arg_info, arg_info);
+					ADD_SIZE(sizeof(zend_arg_info) * num_args);
+					for (uint32_t i = 0; i < num_args; i++) {
+						if (arg_info[i].name) {
+							ADD_INTERNED_STRING(arg_info[i].name);
+						}
+						zend_persist_type_calc(&arg_info[i].type);
+						if (arg_info[i].doc_comment) {
+							ADD_INTERNED_STRING(arg_info[i].doc_comment);
+						}
+					}
+				}
+			}
 			ADD_SIZE(ZEND_ALIGNED_SIZE(zend_extensions_op_array_persist_calc(op_array)));
 			return;
 		}
@@ -604,6 +631,35 @@ void zend_persist_class_entry_calc(zend_class_entry *ce)
 				}
 				ADD_SIZE(sizeof(zend_class_name) * ce->num_interfaces);
 			}
+		}
+
+		if (ce->generic_params) {
+			for (uint32_t i = 0; i < ce->generic_params->num_params; i++) {
+				ADD_INTERNED_STRING(ce->generic_params->params[i].name);
+				if (ce->generic_params->params[i].bound_name) {
+					ADD_INTERNED_STRING(ce->generic_params->params[i].bound_name);
+				}
+			}
+			if (ce->generic_params->deferred_interfaces) {
+				for (uint32_t i = 0; i < ce->generic_params->num_deferred_interfaces; i++) {
+					ADD_INTERNED_STRING(ce->generic_params->deferred_interfaces[i]);
+				}
+				ADD_SIZE(sizeof(zend_string *) * ce->generic_params->num_deferred_interfaces);
+			}
+			ADD_SIZE(sizeof(zend_generic_params)
+				+ (ce->generic_params->num_params - 1) * sizeof(zend_generic_param));
+		}
+
+		if (ce->generic_binding) {
+			for (uint32_t i = 0; i < ce->generic_binding->num_args; i++) {
+				if (ZEND_TYPE_HAS_NAME(ce->generic_binding->args[i])) {
+					zend_string *type_name = ZEND_TYPE_NAME(ce->generic_binding->args[i]);
+					ADD_INTERNED_STRING(type_name);
+					ce->generic_binding->args[i].ptr = type_name;
+				}
+			}
+			ADD_SIZE(sizeof(zend_generic_binding)
+				+ (ce->generic_binding->num_args - 1) * sizeof(zend_type));
 		}
 
 		if (ce->num_traits) {

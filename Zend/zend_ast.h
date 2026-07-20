@@ -70,6 +70,8 @@ enum _zend_ast_kind {
 	ZEND_AST_MATCH_ARM_LIST,
 	ZEND_AST_MODIFIER_LIST,
 	ZEND_AST_SURFACE_NAMES,
+	ZEND_AST_GENERIC_PARAM_LIST,
+	ZEND_AST_GENERIC_ARG_LIST,
 
 	/* 0 child nodes */
 	ZEND_AST_MAGIC_CONST = 0 << ZEND_AST_NUM_CHILDREN_SHIFT,
@@ -158,6 +160,8 @@ enum _zend_ast_kind {
 	ZEND_AST_MODULE_EXPORT,
 	ZEND_AST_USE_MODULE,
 	ZEND_AST_PIPE,
+	ZEND_AST_GENERIC_PARAM,
+	ZEND_AST_GENERIC_TYPE,
 
 	/* Surfaces (RFC prototype): a `surface Name (implements Iface)?;` class
 	 * statement; a member declaration wrapped with its surface[...] name

@@ -959,6 +959,32 @@ static void zend_file_cache_serialize_class(zval                     *zv,
 		}
 	}
 
+	if (ce->generic_params) {
+		zend_generic_params *generic_params;
+
+		SERIALIZE_PTR(ce->generic_params);
+		generic_params = ce->generic_params;
+		UNSERIALIZE_PTR(generic_params);
+
+		for (uint32_t i = 0; i < generic_params->num_params; i++) {
+			SERIALIZE_STR(generic_params->params[i].name);
+			if (generic_params->params[i].bound_name) {
+				SERIALIZE_STR(generic_params->params[i].bound_name);
+			}
+		}
+		if (generic_params->deferred_interfaces) {
+			zend_string **deferred;
+
+			SERIALIZE_PTR(generic_params->deferred_interfaces);
+			deferred = generic_params->deferred_interfaces;
+			UNSERIALIZE_PTR(deferred);
+
+			for (uint32_t i = 0; i < generic_params->num_deferred_interfaces; i++) {
+				SERIALIZE_STR(deferred[i]);
+			}
+		}
+	}
+
 	SERIALIZE_PTR(ce->constructor);
 	SERIALIZE_PTR(ce->destructor);
 	SERIALIZE_PTR(ce->clone);
@@ -1839,6 +1865,22 @@ static void zend_file_cache_unserialize_class(zval                    *zv,
 					UNSERIALIZE_STR(q->exclude_class_names[j]);
 				}
 				p++;
+			}
+		}
+	}
+
+	if (ce->generic_params) {
+		UNSERIALIZE_PTR(ce->generic_params);
+		for (uint32_t i = 0; i < ce->generic_params->num_params; i++) {
+			UNSERIALIZE_STR(ce->generic_params->params[i].name);
+			if (ce->generic_params->params[i].bound_name) {
+				UNSERIALIZE_STR(ce->generic_params->params[i].bound_name);
+			}
+		}
+		if (ce->generic_params->deferred_interfaces) {
+			UNSERIALIZE_PTR(ce->generic_params->deferred_interfaces);
+			for (uint32_t i = 0; i < ce->generic_params->num_deferred_interfaces; i++) {
+				UNSERIALIZE_STR(ce->generic_params->deferred_interfaces[i]);
 			}
 		}
 	}

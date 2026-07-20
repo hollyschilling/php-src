@@ -366,7 +366,7 @@ typedef struct _zend_oparray_context {
 /* Class cannot be serialized or unserialized             |     |     |     */
 #define ZEND_ACC_NOT_SERIALIZABLE        (1 << 29) /*  X  |     |     |     */
 /*                                                        |     |     |     */
-/* Class Flags 2 (ce_flags2) (unused: 1-31)               |     |     |     */
+/* Class Flags 2 (ce_flags2) (unused: 3-31)               |     |     |     */
 /* =========================                              |     |     |     */
 /*                                                        |     |     |     */
 /* Value class: instances have value semantics. Assignment  |     |     |   */
@@ -374,6 +374,13 @@ typedef struct _zend_oparray_context {
 /* instance before mutating it (copy-on-write, as for       |     |     |   */
 /* arrays). Declared in userland with the `struct` keyword. |     |     |   */
 #define ZEND_ACC2_VALUE_CLASS            (1 << 0) /*   X  |     |     |     */
+/*                                                        |     |     |     */
+/* Generic class template (uninstantiable; stamps         |     |     |     */
+/* monomorphized instantiations)                          |     |     |     */
+#define ZEND_ACC2_GENERIC_TEMPLATE       (1 << 1)  /*  X  |     |     |     */
+/*                                                        |     |     |     */
+/* Stamped instantiation of a generic template            |     |     |     */
+#define ZEND_ACC2_GENERIC_INSTANCE       (1 << 2)  /*  X  |     |     |     */
 /*                                                        |     |     |     */
 /* Function Flags (unused: 30)                            |     |     |     */
 /* ==============                                         |     |     |     */
@@ -442,7 +449,7 @@ typedef struct _zend_oparray_context {
 /* op_array uses strict mode types                        |     |     |     */
 #define ZEND_ACC_STRICT_TYPES            (1U << 31) /*    |  X  |     |     */
 /*                                                        |     |     |     */
-/* Function Flags 2 (fn_flags2) (unused: 2-31)            |     |     |     */
+/* Function Flags 2 (fn_flags2) (unused: 4-31)            |     |     |     */
 /* ============================                           |     |     |     */
 /*                                                        |     |     |     */
 /* Function forbids dynamic calls                         |     |     |     */
@@ -460,6 +467,12 @@ typedef struct _zend_oparray_context {
 /* from the declaration. Implies a value-class scope, so    |     |     |   */
 /* call sites need no separate ce_flags2 test.              |     |     |   */
 #define ZEND_ACC2_MUTATING               (1 << 2)  /*     |  X  |     |     */
+
+/* op_array carries an arena-allocated, type-substituted  |     |     |     */
+/* arg_info (generic instantiation); the shared original  |     |     |     */
+/* is stored one pointer before the arena block and is    |     |     |     */
+/* restored by destroy_op_array before the final free     |     |     |     */
+#define ZEND_ACC2_GENERIC_SUBST_ARG_INFO (1 << 3)  /*     |  X  |     |     */
 
 #define ZEND_ACC_PPP_MASK  (ZEND_ACC_PUBLIC | ZEND_ACC_PROTECTED | ZEND_ACC_PRIVATE)
 #define ZEND_ACC_PPP_SET_MASK  (ZEND_ACC_PUBLIC_SET | ZEND_ACC_PROTECTED_SET | ZEND_ACC_PRIVATE_SET)
@@ -1114,6 +1127,10 @@ ZEND_API zend_string *zend_type_to_string(zend_type type);
 #define ZEND_FETCH_CLASS_AUTO		4
 #define ZEND_FETCH_CLASS_INTERFACE	5
 #define ZEND_FETCH_CLASS_TRAIT		6
+/* Resolve through the executing scope's generic binding; the type-parameter
+ * index is carried in the bits at ZEND_FETCH_CLASS_TYPE_PARAM_SHIFT. */
+#define ZEND_FETCH_CLASS_TYPE_PARAM	7
+#define ZEND_FETCH_CLASS_TYPE_PARAM_SHIFT 16
 #define ZEND_FETCH_CLASS_MASK        0x0f
 #define ZEND_FETCH_CLASS_NO_AUTOLOAD 0x80
 #define ZEND_FETCH_CLASS_SILENT      0x0100
@@ -1131,6 +1148,11 @@ ZEND_API zend_string *zend_type_to_string(zend_type type);
 #define ZEND_NAME_NOT_FQ   1
 #define ZEND_NAME_RELATIVE 2
 #define ZEND_NAME_MODULE   3
+
+/* Bound kind on a ZEND_AST_GENERIC_PARAM node (attr) and zend_generic_param */
+#define ZEND_GENERIC_BOUND_NONE       0
+#define ZEND_GENERIC_BOUND_IMPLEMENTS 1
+#define ZEND_GENERIC_BOUND_EXTENDS    2
 
 /* ZEND_FETCH_ flags in class name AST of new const expression must not clash with ZEND_NAME_ flags */
 #define ZEND_CONST_EXPR_NEW_FETCH_TYPE_SHIFT 2

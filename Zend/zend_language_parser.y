@@ -214,6 +214,7 @@ static YYSIZE_T zend_yytnamerr(char*, const char*);
 %token T_SPACESHIP "'<=>'"
 %token T_SL "'<<'"
 %token T_SR "'>>'"
+%token T_GENERIC_OPEN "generic '<'"
 %token T_INC "'++'"
 %token T_DEC "'--'"
 %token T_INT_CAST    "'(int)'"
@@ -287,6 +288,8 @@ static YYSIZE_T zend_yytnamerr(char*, const char*);
 %type <ast> isset_variable type return_type type_expr type_without_static
 %type <ast> identifier type_expr_without_static union_type_without_static_element union_type_without_static intersection_type_without_static
 %type <ast> inline_function union_type_element union_type intersection_type
+%type <ast> generic_params generic_param_list generic_param
+%type <ast> generic_type_args generic_arg_list generic_arg
 %type <ast> attributed_statement attributed_top_statement attributed_class_statement attributed_parameter
 %type <ast> attribute_decl attribute attributes attribute_group namespace_declaration_name
 %type <ast> match match_arm_list non_empty_match_arm_list match_arm match_arm_cond_list
@@ -688,11 +691,49 @@ is_variadic:
 
 class_declaration_statement:
 		class_modifiers T_CLASS { $<num>$ = CG(zend_lineno); }
-		T_STRING extends_from implements_list backup_doc_comment '{' class_statement_list '}'
-			{ $$ = zend_ast_create_decl(ZEND_AST_CLASS, $1, $<num>3, $7, zend_ast_get_str($4), $5, $6, $9, NULL, NULL); }
+		T_STRING generic_params extends_from implements_list backup_doc_comment '{' class_statement_list '}'
+			{ $$ = zend_ast_create_decl(ZEND_AST_CLASS, $1, $<num>3, $8, zend_ast_get_str($4), $6, $7, $10, NULL, $5); }
 	|	T_CLASS { $<num>$ = CG(zend_lineno); }
-		T_STRING extends_from implements_list backup_doc_comment '{' class_statement_list '}'
-			{ $$ = zend_ast_create_decl(ZEND_AST_CLASS, 0, $<num>2, $6, zend_ast_get_str($3), $4, $5, $8, NULL, NULL); }
+		T_STRING generic_params extends_from implements_list backup_doc_comment '{' class_statement_list '}'
+			{ $$ = zend_ast_create_decl(ZEND_AST_CLASS, 0, $<num>2, $7, zend_ast_get_str($3), $5, $6, $9, NULL, $4); }
+;
+
+generic_params:
+		%empty							{ $$ = NULL; }
+	|	generic_open generic_param_list '>'		{ $$ = $2; }
+;
+
+generic_open:
+		'<'
+	|	T_GENERIC_OPEN
+;
+
+generic_type_args:
+		generic_open generic_arg_list '>'	{ $$ = $2; }
+;
+
+generic_arg_list:
+		generic_arg							{ $$ = zend_ast_create_list(1, ZEND_AST_GENERIC_ARG_LIST, $1); }
+	|	generic_arg_list ',' generic_arg	{ $$ = zend_ast_list_add($1, $3); }
+;
+
+generic_arg:
+		name								{ $$ = $1; }
+	|	name generic_type_args				{ $$ = zend_ast_create(ZEND_AST_GENERIC_TYPE, $1, $2); }
+;
+
+generic_param_list:
+		generic_param					{ $$ = zend_ast_create_list(1, ZEND_AST_GENERIC_PARAM_LIST, $1); }
+	|	generic_param_list ',' generic_param
+			{ $$ = zend_ast_list_add($1, $3); }
+;
+
+generic_param:
+		T_STRING						{ $$ = zend_ast_create(ZEND_AST_GENERIC_PARAM, $1, NULL); }
+	|	T_STRING T_IMPLEMENTS name
+			{ $$ = zend_ast_create_ex(ZEND_AST_GENERIC_PARAM, ZEND_GENERIC_BOUND_IMPLEMENTS, $1, $3); }
+	|	T_STRING T_EXTENDS name
+			{ $$ = zend_ast_create_ex(ZEND_AST_GENERIC_PARAM, ZEND_GENERIC_BOUND_EXTENDS, $1, $3); }
 ;
 
 class_modifiers:
@@ -721,8 +762,8 @@ class_modifier:
 
 trait_declaration_statement:
 		T_TRAIT { $<num>$ = CG(zend_lineno); }
-		T_STRING backup_doc_comment '{' class_statement_list '}'
-			{ $$ = zend_ast_create_decl(ZEND_AST_CLASS, ZEND_ACC_TRAIT, $<num>2, $4, zend_ast_get_str($3), NULL, NULL, $6, NULL, NULL); }
+		T_STRING generic_params backup_doc_comment '{' class_statement_list '}'
+			{ $$ = zend_ast_create_decl(ZEND_AST_CLASS, ZEND_ACC_TRAIT, $<num>2, $5, zend_ast_get_str($3), NULL, NULL, $7, NULL, $4); }
 	|	class_modifiers T_TRAIT
 			{ $$ = NULL; zend_unexpected_class_modifiers($1, "a trait"); YYERROR; }
 ;
@@ -746,8 +787,8 @@ struct_declaration_statement:
 
 interface_declaration_statement:
 		T_INTERFACE { $<num>$ = CG(zend_lineno); }
-		T_STRING interface_extends_list backup_doc_comment '{' class_statement_list '}'
-			{ $$ = zend_ast_create_decl(ZEND_AST_CLASS, ZEND_ACC_INTERFACE, $<num>2, $5, zend_ast_get_str($3), NULL, $4, $7, NULL, NULL); }
+		T_STRING generic_params interface_extends_list backup_doc_comment '{' class_statement_list '}'
+			{ $$ = zend_ast_create_decl(ZEND_AST_CLASS, ZEND_ACC_INTERFACE, $<num>2, $6, zend_ast_get_str($3), NULL, $5, $8, NULL, $4); }
 	|	class_modifiers T_INTERFACE
 			{ $$ = NULL; zend_unexpected_class_modifiers($1, "an interface"); YYERROR; }
 ;
@@ -1013,6 +1054,8 @@ type_without_static:
 		T_ARRAY		{ $$ = zend_ast_create_ex(ZEND_AST_TYPE, IS_ARRAY); }
 	|	T_CALLABLE	{ $$ = zend_ast_create_ex(ZEND_AST_TYPE, IS_CALLABLE); }
 	|	name		{ $$ = $1; }
+	|	name generic_type_args
+			{ $$ = zend_ast_create(ZEND_AST_GENERIC_TYPE, $1, $2); }
 ;
 
 union_type_without_static_element:
@@ -1693,6 +1736,8 @@ class_name:
 			{ zval zv; ZVAL_INTERNED_STR(&zv, ZSTR_KNOWN(ZEND_STR_STATIC));
 			  $$ = zend_ast_create_zval_ex(&zv, ZEND_NAME_NOT_FQ); }
 	|	name { $$ = $1; }
+	|	name T_GENERIC_OPEN generic_arg_list '>'
+			{ $$ = zend_ast_create(ZEND_AST_GENERIC_TYPE, $1, $3); }
 ;
 
 class_name_reference:

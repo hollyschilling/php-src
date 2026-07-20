@@ -2661,6 +2661,17 @@ simple_list:
 			smart_str_appends(str, " instanceof ");
 			zend_ast_export_ns_name_or_expression(str, ast->child[1], 0, indent);
 			break;
+		case ZEND_AST_GENERIC_TYPE: {
+			const zend_ast_list *args = zend_ast_get_list(ast->child[1]);
+			zend_ast_export_ns_name(str, ast->child[0], 0, indent);
+			smart_str_appendc(str, '<');
+			for (uint32_t i = 0; i < args->children; i++) {
+				if (i) smart_str_appends(str, ", ");
+				zend_ast_export_ex(str, args->child[i], 0, indent);
+			}
+			smart_str_appendc(str, '>');
+			break;
+		}
 		case ZEND_AST_YIELD:
 			if (priority > 70) smart_str_appendc(str, '(');
 			smart_str_appends(str, "yield ");
