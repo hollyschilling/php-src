@@ -324,9 +324,12 @@ static zend_class_entry *zend_generics_stamp_ce(
 	ce->name = zend_string_copy(display_name);
 	ce->refcount = 1;
 	ce->inheritance_cache = NULL;
-	/* The instance owns its tables and must take the full destroy path even
-	 * when the template came from SHM or the file cache. */
-	ce->ce_flags &= ~(ZEND_ACC_IMMUTABLE | ZEND_ACC_FILE_CACHED);
+	/* The instance owns its tables, name and metadata refs, and must take the
+	 * full destroy path even when the template came from SHM or the file
+	 * cache (ZEND_ACC_CACHED would skip the name/metadata releases; harmless
+	 * for interned names, but deferred-interface substitution creates
+	 * runtime-allocated ones). */
+	ce->ce_flags &= ~(ZEND_ACC_IMMUTABLE | ZEND_ACC_FILE_CACHED | ZEND_ACC_CACHED);
 	ce->ce_flags2 = (ce->ce_flags2 & ~ZEND_ACC2_GENERIC_TEMPLATE) | ZEND_ACC2_GENERIC_INSTANCE;
 	ce->generic_params = NULL;
 	ce->generic_binding = binding;
@@ -929,8 +932,12 @@ static zend_class_entry *zend_generics_stamp_instantiation_impl(
 		return NULL;
 	}
 
-	zend_string *display = zend_new_interned_string(zend_string_copy(name));
-	zend_string *lc_key = zend_new_interned_string(zend_string_copy(lc_name));
+	/* Plain refs, deliberately not interned: in-place request interning would
+	 * flag the caller's allocation and its cleanup is interning-handler
+	 * specific (runtime-built names arrive here via deferred-interface
+	 * substitution). Preload persist interns names and keys itself. */
+	zend_string *display = zend_string_copy(name);
+	zend_string *lc_key = zend_string_copy(lc_name);
 	zend_class_entry *ce = zend_generics_stamp_ce(template_ce, display, lc_key, binding);
 	if (!ce) {
 		zend_string_release(display);
