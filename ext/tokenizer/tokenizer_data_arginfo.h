@@ -1,5 +1,5 @@
 /* This is a generated file, edit tokenizer_data.stub.php instead.
- * Stub hash: c5235344b7c651d27c2c33c90696a418a9c96837 */
+ * Stub hash: cd69bd1bd66c26f260413d13743f61d2e069d14d */
 
 static void register_tokenizer_data_symbols(int module_number)
 {
@@ -122,6 +122,7 @@ static void register_tokenizer_data_symbols(int module_number)
 	REGISTER_LONG_CONSTANT("T_SPACESHIP", T_SPACESHIP, CONST_PERSISTENT);
 	REGISTER_LONG_CONSTANT("T_SL", T_SL, CONST_PERSISTENT);
 	REGISTER_LONG_CONSTANT("T_SR", T_SR, CONST_PERSISTENT);
+	REGISTER_LONG_CONSTANT("T_GENERIC_OPEN", T_GENERIC_OPEN, CONST_PERSISTENT);
 	REGISTER_LONG_CONSTANT("T_INC", T_INC, CONST_PERSISTENT);
 	REGISTER_LONG_CONSTANT("T_DEC", T_DEC, CONST_PERSISTENT);
 	REGISTER_LONG_CONSTANT("T_INT_CAST", T_INT_CAST, CONST_PERSISTENT);
