@@ -507,6 +507,9 @@ static void zend_persist_op_array_ex(zend_op_array *op_array, zend_persistent_sc
 				op_array->filename = zend_shared_alloc_get_xlat_entry(op_array->filename);
 				ZEND_ASSERT(op_array->filename != NULL);
 			}
+			if (op_array->module_name) {
+				zend_accel_store_interned_string(op_array->module_name);
+			}
 			if (op_array->arg_info) {
 				zend_arg_info *arg_info = op_array->arg_info;
 				if (op_array->fn_flags & ZEND_ACC_HAS_RETURN_TYPE) {
@@ -693,6 +696,10 @@ static void zend_persist_op_array_ex(zend_op_array *op_array, zend_persistent_sc
 
 	if (op_array->filename) {
 		zend_accel_store_string(op_array->filename);
+	}
+
+	if (op_array->module_name) {
+		zend_accel_store_interned_string(op_array->module_name);
 	}
 
 	if (op_array->arg_info) {
@@ -1022,6 +1029,9 @@ zend_class_entry *zend_persist_class_entry(zend_class_entry *orig_ce)
 			}
 			if (ce->parent_name && !(ce->ce_flags & ZEND_ACC_LINKED)) {
 				zend_accel_store_interned_string(ce->parent_name);
+			}
+			if (ce->module_name) {
+				zend_accel_store_interned_string(ce->module_name);
 			}
 		}
 

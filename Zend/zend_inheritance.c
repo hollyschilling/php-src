@@ -202,6 +202,9 @@ static void do_inherit_parent_constructor(zend_class_entry *ce) /* {{{ */
 
 const char *zend_visibility_string(uint32_t fn_flags) /* {{{ */
 {
+	if (fn_flags & ZEND_ACC_MODULE_INTERNAL) {
+		return "internal";
+	}
 	if (fn_flags & ZEND_ACC_PUBLIC) {
 		return "public";
 	} else if (fn_flags & ZEND_ACC_PRIVATE) {
@@ -1242,6 +1245,30 @@ static inheritance_status do_inheritance_check_on_method(
 			ZEND_FN_SCOPE_NAME(child), ZSTR_VAL(child->common.function_name), zend_visibility_string(parent_flags), ZEND_FN_SCOPE_NAME(parent), (parent_flags&ZEND_ACC_PUBLIC) ? "" : " or weaker");
 	}
 
+	/* Module-internal members: overriding is only permitted from inside the
+	 * declaring module, and an override may not introduce internal. */
+	if ((flags & ZEND_INHERITANCE_CHECK_VISIBILITY)
+			&& UNEXPECTED((child_flags | parent_flags) & ZEND_ACC_MODULE_INTERNAL)) {
+		if (!(parent_flags & ZEND_ACC_MODULE_INTERNAL)) {
+			if (flags & ZEND_INHERITANCE_CHECK_SILENT) {
+				return INHERITANCE_ERROR;
+			}
+			zend_error_at_noreturn(E_COMPILE_ERROR, func_filename(child), func_lineno(child),
+				"Access level to %s::%s() must not be internal (as in %s %s)",
+				ZEND_FN_SCOPE_NAME(child), ZSTR_VAL(child->common.function_name),
+				zend_get_object_type(parent->common.scope), ZEND_FN_SCOPE_NAME(parent));
+		} else if (!child->common.scope->module_name
+				|| !parent->common.scope->module_name
+				|| !zend_string_equals(child->common.scope->module_name, parent->common.scope->module_name)) {
+			if (flags & ZEND_INHERITANCE_CHECK_SILENT) {
+				return INHERITANCE_ERROR;
+			}
+			zend_error_at_noreturn(E_COMPILE_ERROR, func_filename(child), func_lineno(child),
+				"Cannot override internal method %s::%s() from outside its module",
+				ZEND_FN_SCOPE_NAME(parent), ZSTR_VAL(child->common.function_name));
+		}
+	}
+
 	if (flags & ZEND_INHERITANCE_CHECK_PROTO) {
 		if (flags & ZEND_INHERITANCE_CHECK_SILENT) {
 			return zend_do_perform_implementation_check(child, child_scope, parent, parent_scope);
@@ -1513,6 +1540,18 @@ static void do_inherit_property(zend_property_info *parent_info, zend_string *ke
 
 			if (UNEXPECTED((child_info->flags & ZEND_ACC_PPP_MASK) > (parent_info->flags & ZEND_ACC_PPP_MASK))) {
 				zend_error_noreturn(E_COMPILE_ERROR, "Access level to %s::$%s must be %s (as in class %s)%s", ZSTR_VAL(ce->name), ZSTR_VAL(key), zend_visibility_string(parent_info->flags), ZSTR_VAL(parent_info->ce->name), (parent_info->flags&ZEND_ACC_PUBLIC) ? "" : " or weaker");
+			}
+			if (UNEXPECTED((child_info->flags | parent_info->flags) & ZEND_ACC_MODULE_INTERNAL)) {
+				if (!(parent_info->flags & ZEND_ACC_MODULE_INTERNAL)) {
+					zend_error_noreturn(E_COMPILE_ERROR,
+						"Access level to %s::$%s must not be internal (as in class %s)",
+						ZSTR_VAL(ce->name), ZSTR_VAL(key), ZSTR_VAL(parent_info->ce->name));
+				} else if (!ce->module_name || !parent_info->ce->module_name
+						|| !zend_string_equals(ce->module_name, parent_info->ce->module_name)) {
+					zend_error_noreturn(E_COMPILE_ERROR,
+						"Cannot override internal property %s::$%s from outside its module",
+						ZSTR_VAL(parent_info->ce->name), ZSTR_VAL(key));
+				}
 			}
 			if (!(child_info->flags & ZEND_ACC_STATIC) && !(parent_info->flags & ZEND_ACC_VIRTUAL)) {
 				/* If we added hooks to the child property, we use the child's slot for
@@ -2133,6 +2172,22 @@ static bool do_inherit_constant_check(
 			ZSTR_VAL(parent_constant->ce->name),
 			(ZEND_CLASS_CONST_FLAGS(parent_constant) & ZEND_ACC_PUBLIC) ? "" : " or weaker"
 		);
+	}
+
+	if (UNEXPECTED((ZEND_CLASS_CONST_FLAGS(child_constant) | ZEND_CLASS_CONST_FLAGS(parent_constant)) & ZEND_ACC_MODULE_INTERNAL)
+	 && child_constant->ce != parent_constant->ce) {
+		if (!(ZEND_CLASS_CONST_FLAGS(parent_constant) & ZEND_ACC_MODULE_INTERNAL)) {
+			zend_error_noreturn(E_COMPILE_ERROR,
+				"Access level to %s::%s must not be internal (as in %s %s)",
+				ZSTR_VAL(ce->name), ZSTR_VAL(name),
+				zend_get_object_type(parent_constant->ce),
+				ZSTR_VAL(parent_constant->ce->name));
+		} else if (!child_constant->ce->module_name || !parent_constant->ce->module_name
+				|| !zend_string_equals(child_constant->ce->module_name, parent_constant->ce->module_name)) {
+			zend_error_noreturn(E_COMPILE_ERROR,
+				"Cannot override internal constant %s::%s from outside its module",
+				ZSTR_VAL(parent_constant->ce->name), ZSTR_VAL(name));
+		}
 	}
 
 	if (!(ZEND_CLASS_CONST_FLAGS(parent_constant) & ZEND_ACC_PRIVATE)) {
@@ -3572,6 +3627,16 @@ static zend_class_entry *zend_lazy_class_load(const zend_class_entry *pce)
 		} while (0)
 #endif
 
+/* Module gate for inheritance edges: true when `ce` may not extend/implement/
+ * use `target`. A reference through an export map carries a "\0" provenance
+ * marker in `ref_name` and always passes (validated at fetch). */
+ZEND_API bool zend_module_inheritance_denied(const zend_class_entry *ce, const zend_class_entry *target, const zend_string *ref_name)
+{
+	return target->module_name != NULL
+		&& ZSTR_VAL(ref_name)[0] != '\0'
+		&& (!ce->module_name || !zend_string_equals(ce->module_name, target->module_name));
+}
+
 ZEND_API zend_class_entry *zend_do_link_class(zend_class_entry *ce, zend_string *lc_parent_name, const zend_string *key) /* {{{ */
 {
 	/* Load parent/interface dependencies first, so we can still gracefully abort linking
@@ -3592,9 +3657,17 @@ ZEND_API zend_class_entry *zend_do_link_class(zend_class_entry *ce, zend_string 
 	if (ce->parent_name) {
 		parent = zend_fetch_class_by_name(
 			ce->parent_name, lc_parent_name,
-			ZEND_FETCH_CLASS_ALLOW_NEARLY_LINKED | ZEND_FETCH_CLASS_EXCEPTION);
+			ZEND_FETCH_CLASS_ALLOW_NEARLY_LINKED | ZEND_FETCH_CLASS_EXCEPTION | ZEND_FETCH_CLASS_NO_MODULE_GATE);
 		if (!parent) {
 			check_unrecoverable_load_failure(ce);
+			return NULL;
+		}
+		/* Module gate: a bare (non-imported) reference to a module member may
+		 * only be extended from inside the same module. References through an
+		 * export map carry a "\0" provenance marker and were validated. */
+		if (UNEXPECTED(zend_module_inheritance_denied(ce, parent, ce->parent_name))) {
+			zend_throw_error(NULL, "Cannot extend class %s of module %s from outside the module; import the module with 'use module'",
+				ZSTR_VAL(parent->name), ZSTR_VAL(parent->module_name));
 			return NULL;
 		}
 		UPDATE_IS_CACHEABLE(parent);
@@ -3605,8 +3678,14 @@ ZEND_API zend_class_entry *zend_do_link_class(zend_class_entry *ce, zend_string 
 
 		for (i = 0; i < ce->num_traits; i++) {
 			zend_class_entry *trait = zend_fetch_class_by_name(ce->trait_names[i].name,
-				ce->trait_names[i].lc_name, ZEND_FETCH_CLASS_TRAIT | ZEND_FETCH_CLASS_EXCEPTION);
+				ce->trait_names[i].lc_name, ZEND_FETCH_CLASS_TRAIT | ZEND_FETCH_CLASS_EXCEPTION | ZEND_FETCH_CLASS_NO_MODULE_GATE);
 			if (UNEXPECTED(trait == NULL)) {
+				free_alloca(traits_and_interfaces, use_heap);
+				return NULL;
+			}
+			if (UNEXPECTED(zend_module_inheritance_denied(ce, trait, ce->trait_names[i].name))) {
+				zend_throw_error(NULL, "Cannot use trait %s of module %s from outside the module; import the module with 'use module'",
+					ZSTR_VAL(trait->name), ZSTR_VAL(trait->module_name));
 				free_alloca(traits_and_interfaces, use_heap);
 				return NULL;
 			}
@@ -3641,9 +3720,15 @@ ZEND_API zend_class_entry *zend_do_link_class(zend_class_entry *ce, zend_string 
 			zend_class_entry *iface = zend_fetch_class_by_name(
 				ce->interface_names[i].name, ce->interface_names[i].lc_name,
 				ZEND_FETCH_CLASS_INTERFACE |
-				ZEND_FETCH_CLASS_ALLOW_NEARLY_LINKED | ZEND_FETCH_CLASS_EXCEPTION);
+				ZEND_FETCH_CLASS_ALLOW_NEARLY_LINKED | ZEND_FETCH_CLASS_EXCEPTION | ZEND_FETCH_CLASS_NO_MODULE_GATE);
 			if (!iface) {
 				check_unrecoverable_load_failure(ce);
+				free_alloca(traits_and_interfaces, use_heap);
+				return NULL;
+			}
+			if (UNEXPECTED(zend_module_inheritance_denied(ce, iface, ce->interface_names[i].name))) {
+				zend_throw_error(NULL, "Cannot implement interface %s of module %s from outside the module; import the module with 'use module'",
+					ZSTR_VAL(iface->name), ZSTR_VAL(iface->module_name));
 				free_alloca(traits_and_interfaces, use_heap);
 				return NULL;
 			}
