@@ -7428,18 +7428,33 @@ static bool zend_is_active_template_param(const zend_string *name)
 	return false;
 }
 
-static void zend_append_generic_type_ref(smart_str *buf, zend_ast *ast);
+static void zend_append_generic_type_ref(smart_str *buf, zend_ast *ast, bool allow_params, bool *uses_params);
 
-static void zend_append_generic_arg(smart_str *buf, zend_ast *ast)
+/* When allow_params is true (deferred implements references), a bare type
+ * parameter is emitted under its canonical declared name and *uses_params is
+ * set; nested generic arguments still may not mention parameters (bare-only
+ * restriction, so substitution depth cannot grow). */
+static void zend_append_generic_arg(smart_str *buf, zend_ast *ast, bool allow_params, bool *uses_params)
 {
 	if (ast->kind == ZEND_AST_GENERIC_TYPE) {
-		zend_append_generic_type_ref(buf, ast);
+		zend_append_generic_type_ref(buf, ast, /* allow_params */ false, NULL);
 		return;
 	}
 
 	zend_string *name = zend_ast_get_str(ast);
 	if (ast->attr == ZEND_NAME_NOT_FQ) {
 		if (zend_is_active_template_param(name)) {
+			if (allow_params) {
+				const zend_generic_params *gp = CG(active_class_entry)->generic_params;
+				for (uint32_t i = 0; i < gp->num_params; i++) {
+					if (zend_string_equals_ci(gp->params[i].name, name)) {
+						smart_str_append(buf, gp->params[i].name);
+						*uses_params = true;
+						return;
+					}
+				}
+				ZEND_UNREACHABLE();
+			}
 			zend_error_noreturn(E_COMPILE_ERROR,
 				"Cannot use type parameter %s as a generic type argument "
 				"(type arguments must be concrete in this version)", ZSTR_VAL(name));
@@ -7470,7 +7485,7 @@ static void zend_append_generic_arg(smart_str *buf, zend_ast *ast)
 	zend_string_release(resolved);
 }
 
-static void zend_append_generic_type_ref(smart_str *buf, zend_ast *ast)
+static void zend_append_generic_type_ref(smart_str *buf, zend_ast *ast, bool allow_params, bool *uses_params)
 {
 	zend_ast *base_ast = ast->child[0];
 	const zend_ast_list *args = zend_ast_get_list(ast->child[1]);
@@ -7501,7 +7516,7 @@ static void zend_append_generic_type_ref(smart_str *buf, zend_ast *ast)
 		if (i) {
 			smart_str_appendc(buf, ',');
 		}
-		zend_append_generic_arg(buf, args->child[i]);
+		zend_append_generic_arg(buf, args->child[i], allow_params, uses_params);
 	}
 	smart_str_appendc(buf, '>');
 }
@@ -7510,11 +7525,16 @@ static void zend_append_generic_type_ref(smart_str *buf, zend_ast *ast)
  * fully-qualified base and class arguments (use-aliases applied), canonical
  * scalar spellings, no whitespace, declared argument order. The interned
  * result is both the display name and (lowercased) the class-table key. */
-static zend_string *zend_resolve_generic_type_ast(zend_ast *ast)
+static zend_string *zend_resolve_generic_type_ast_ex(zend_ast *ast, bool allow_params, bool *uses_params)
 {
 	smart_str buf = {0};
-	zend_append_generic_type_ref(&buf, ast);
+	zend_append_generic_type_ref(&buf, ast, allow_params, uses_params);
 	return zend_new_interned_string(smart_str_extract(&buf));
+}
+
+static zend_string *zend_resolve_generic_type_ast(zend_ast *ast)
+{
+	return zend_resolve_generic_type_ast_ex(ast, /* allow_params */ false, NULL);
 }
 
 static zend_type zend_compile_single_typename(zend_ast *ast)
@@ -9691,17 +9711,45 @@ static void zend_compile_implements(zend_ast *ast) /* {{{ */
 	uint32_t i;
 
 	interface_names = emalloc(sizeof(zend_class_name) * list->children);
+	uint32_t num_concrete = 0;
+	zend_string **deferred = NULL;
+	uint32_t num_deferred = 0;
 
 	for (i = 0; i < list->children; ++i) {
 		zend_ast *class_ast = list->child[i];
-		interface_names[i].name = class_ast->kind == ZEND_AST_GENERIC_TYPE
-			? zend_resolve_class_name_ast(class_ast)
-			: zend_resolve_const_class_name_reference(class_ast, "interface name");
-		interface_names[i].lc_name = zend_string_tolower(interface_names[i].name);
+		zend_string *name;
+		if (class_ast->kind == ZEND_AST_GENERIC_TYPE) {
+			bool uses_params = false;
+			name = zend_resolve_generic_type_ast_ex(class_ast, /* allow_params */ true, &uses_params);
+			if (uses_params) {
+				/* Param-dependent reference: resolved per instantiation at
+				 * stamp time; excluded from ordinary interface linking. */
+				ZEND_ASSERT(ce->generic_params != NULL);
+				if (!deferred) {
+					deferred = zend_arena_alloc(&CG(arena),
+						sizeof(zend_string *) * list->children);
+				}
+				deferred[num_deferred++] = name;
+				continue;
+			}
+		} else {
+			name = zend_resolve_const_class_name_reference(class_ast, "interface name");
+		}
+		interface_names[num_concrete].name = name;
+		interface_names[num_concrete].lc_name = zend_string_tolower(name);
+		num_concrete++;
 	}
 
-	ce->num_interfaces = list->children;
-	ce->interface_names = interface_names;
+	if (num_concrete) {
+		ce->num_interfaces = num_concrete;
+		ce->interface_names = interface_names;
+	} else {
+		efree(interface_names);
+	}
+	if (num_deferred) {
+		ce->generic_params->deferred_interfaces = deferred;
+		ce->generic_params->num_deferred_interfaces = num_deferred;
+	}
 }
 /* }}} */
 
@@ -9755,6 +9803,8 @@ static void zend_compile_generic_params(zend_class_entry *ce, const zend_ast *pa
 	generic_params = zend_arena_alloc(&CG(arena),
 		sizeof(zend_generic_params) + (list->children - 1) * sizeof(zend_generic_param));
 	generic_params->num_params = list->children;
+	generic_params->num_deferred_interfaces = 0;
+	generic_params->deferred_interfaces = NULL;
 
 	for (uint32_t i = 0; i < list->children; i++) {
 		const zend_ast *param_ast = list->child[i];

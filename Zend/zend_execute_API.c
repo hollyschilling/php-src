@@ -156,6 +156,7 @@ void init_executor(void) /* {{{ */
 
 	zend_hash_init(&EG(included_files), 8, NULL, NULL, 0);
 	zend_hash_init(&EG(autoload_current_classnames), 8, NULL, NULL, 0);
+	EG(generics_stamping) = NULL;
 
 	EG(ticks_count) = 0;
 
@@ -503,6 +504,11 @@ void shutdown_executor(void) /* {{{ */
 
 		zend_hash_destroy(&EG(included_files));
 		zend_hash_destroy(&EG(autoload_current_classnames));
+		if (EG(generics_stamping)) {
+			zend_hash_destroy(EG(generics_stamping));
+			FREE_HASHTABLE(EG(generics_stamping));
+			EG(generics_stamping) = NULL;
+		}
 
 		zend_stack_destroy(&EG(user_error_handlers_error_reporting));
 		zend_stack_destroy(&EG(user_error_handlers));

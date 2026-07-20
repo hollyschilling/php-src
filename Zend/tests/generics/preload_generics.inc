@@ -1,6 +1,11 @@
 <?php
-class Vec<T> {
+interface PCollection<T> {
+    public function add(T $item): void;
+}
+
+class Vec<T> implements PCollection<T> {
     private array $items = [];
+    public function add(T $item): void { $this->items[] = $item; }
     public function push(T $item): void { $this->items[] = $item; }
     public function pop(): mixed { return array_pop($this->items); }
 }

@@ -1163,10 +1163,19 @@ zend_class_entry *zend_persist_class_entry(zend_class_entry *orig_ce)
 					zend_accel_store_interned_string(generic_params->params[i].bound_name);
 				}
 			}
+			zend_string **deferred = NULL;
+			if (generic_params->deferred_interfaces) {
+				for (uint32_t i = 0; i < generic_params->num_deferred_interfaces; i++) {
+					zend_accel_store_interned_string(generic_params->deferred_interfaces[i]);
+				}
+				deferred = zend_shared_memdup(generic_params->deferred_interfaces,
+					sizeof(zend_string *) * generic_params->num_deferred_interfaces);
+			}
 			/* Arena-allocated at compile time: copy without freeing. */
 			ce->generic_params = zend_shared_memdup(generic_params,
 				sizeof(zend_generic_params)
 					+ (generic_params->num_params - 1) * sizeof(zend_generic_param));
+			ce->generic_params->deferred_interfaces = deferred;
 		}
 		if (ce->generic_binding) {
 			/* Preload-stamped instantiation. Arena-allocated: copy without

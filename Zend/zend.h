@@ -160,6 +160,11 @@ typedef struct _zend_generic_param {
 
 typedef struct _zend_generic_params {
 	uint32_t num_params;
+	/* implements/interface-extends references whose arguments mention type
+	 * parameters (bare only, e.g. "App\Collection<T>"); excluded from
+	 * interface_names and resolved per instantiation at stamp time. */
+	uint32_t num_deferred_interfaces;
+	zend_string **deferred_interfaces;
 	zend_generic_param params[1];
 } zend_generic_params;
 

@@ -583,6 +583,12 @@ void zend_persist_class_entry_calc(zend_class_entry *ce)
 					ADD_INTERNED_STRING(ce->generic_params->params[i].bound_name);
 				}
 			}
+			if (ce->generic_params->deferred_interfaces) {
+				for (uint32_t i = 0; i < ce->generic_params->num_deferred_interfaces; i++) {
+					ADD_INTERNED_STRING(ce->generic_params->deferred_interfaces[i]);
+				}
+				ADD_SIZE(sizeof(zend_string *) * ce->generic_params->num_deferred_interfaces);
+			}
 			ADD_SIZE(sizeof(zend_generic_params)
 				+ (ce->generic_params->num_params - 1) * sizeof(zend_generic_param));
 		}

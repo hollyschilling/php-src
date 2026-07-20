@@ -15,25 +15,32 @@ if (PHP_OS_FAMILY == 'Windows') die('skip Preloading is not supported on Windows
 <?php
 // get_declared_classes() does not trigger stamp-on-miss, so presence here
 // proves each instantiation was stamped at preload time, not at runtime.
-$declared = array_flip(get_declared_classes());
-foreach (["Vec<int>", "Vec<string>", "Vec<float>", "Vec<DateTime>", "Vec<Vec<int>>"] as $c) {
-    printf("%-14s %s\n", $c, isset($declared[$c]) ? "preloaded" : "MISSING");
+$declared = array_flip(array_merge(get_declared_classes(), get_declared_interfaces()));
+foreach (["Vec<int>", "Vec<string>", "Vec<float>", "Vec<DateTime>", "Vec<Vec<int>>",
+          "PCollection<float>", "PCollection<DateTime>"] as $c) {
+    printf("%-21s %s\n", $c, isset($declared[$c]) ? "preloaded" : "MISSING");
 }
 
 $f = new FloatList();
 $f->push(1.5);
 var_dump($f->pop());
 try { $f->push("x"); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+var_dump($f instanceof PCollection<float>);
 var_dump(makeDates() instanceof Vec<DateTime>);
+var_dump(makeDates() instanceof PCollection<DateTime>);
 var_dump(get_class(makeDates()));
 ?>
 --EXPECTF--
-Vec<int>       preloaded
-Vec<string>    preloaded
-Vec<float>     preloaded
-Vec<DateTime>  preloaded
-Vec<Vec<int>>  preloaded
+Vec<int>              preloaded
+Vec<string>           preloaded
+Vec<float>            preloaded
+Vec<DateTime>         preloaded
+Vec<Vec<int>>         preloaded
+PCollection<float>    preloaded
+PCollection<DateTime> preloaded
 float(1.5)
 Vec<float>::push(): Argument #1 ($item) must be of type float, string given, called in %s on line %d
+bool(true)
+bool(true)
 bool(true)
 string(13) "Vec<DateTime>"

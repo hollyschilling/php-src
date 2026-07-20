@@ -942,6 +942,17 @@ static void zend_file_cache_serialize_class(zval                     *zv,
 				SERIALIZE_STR(generic_params->params[i].bound_name);
 			}
 		}
+		if (generic_params->deferred_interfaces) {
+			zend_string **deferred;
+
+			SERIALIZE_PTR(generic_params->deferred_interfaces);
+			deferred = generic_params->deferred_interfaces;
+			UNSERIALIZE_PTR(deferred);
+
+			for (uint32_t i = 0; i < generic_params->num_deferred_interfaces; i++) {
+				SERIALIZE_STR(deferred[i]);
+			}
+		}
 	}
 
 	SERIALIZE_PTR(ce->constructor);
@@ -1825,6 +1836,12 @@ static void zend_file_cache_unserialize_class(zval                    *zv,
 			UNSERIALIZE_STR(ce->generic_params->params[i].name);
 			if (ce->generic_params->params[i].bound_name) {
 				UNSERIALIZE_STR(ce->generic_params->params[i].bound_name);
+			}
+		}
+		if (ce->generic_params->deferred_interfaces) {
+			UNSERIALIZE_PTR(ce->generic_params->deferred_interfaces);
+			for (uint32_t i = 0; i < ce->generic_params->num_deferred_interfaces; i++) {
+				UNSERIALIZE_STR(ce->generic_params->deferred_interfaces[i]);
 			}
 		}
 	}
