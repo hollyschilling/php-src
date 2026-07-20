@@ -2390,14 +2390,14 @@ static void zend_add_trait_method(zend_class_entry *ce, zend_string *name, zend_
 	if (UNEXPECTED((fn->common.fn_flags2 & ZEND_ACC2_MUTATING)
 	 && !(fn->common.fn_flags & ZEND_ACC_ABSTRACT)
 	 && !(ce->ce_flags2 & ZEND_ACC2_VALUE_CLASS))) {
-		/* A concrete mutating body needs a struct consumer. An abstract
-		 * colored member is only a requirement -- permission the consumer's
-		 * implementation need not use -- and is valid anywhere; the
-		 * effect-variance edge rule governs whatever satisfies it. */
-		zend_error_noreturn(E_COMPILE_ERROR,
-			"%s %s cannot use mutating method %s::%s(); mutating methods require a struct",
-			zend_get_object_type_case(ce, true), ZSTR_VAL(ce->name),
-			ZSTR_VAL(fn->common.scope->name), ZSTR_VAL(fn->common.function_name));
+		/* On a struct consumer the marker gives the receiver exclusive,
+		 * written-back binding. On a class (or an interface's default-less
+		 * requirement carrier) writes to $this persist anyway -- reference
+		 * semantics make every method effectively mutating -- so the marker
+		 * is meaningless rather than wrong: strip it from this consumer's
+		 * copy so no mutating call machinery engages. The trait stays usable
+		 * by both kinds of consumer. */
+		fn->common.fn_flags2 &= ~ZEND_ACC2_MUTATING;
 	}
 
 	if ((existing_fn = zend_hash_find_ptr(&ce->function_table, key)) != NULL) {

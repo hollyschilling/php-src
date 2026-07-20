@@ -1,5 +1,5 @@
 --TEST--
-Structs: a trait's mutating method cannot be used by a class
+Structs: a trait's mutating method is usable by a class, with the marker ignored
 --FILE--
 <?php
 trait Bumps {
@@ -9,6 +9,9 @@ class C {
     public int $n = 0;
     use Bumps;
 }
+$c = new C();
+$c->bump();
+var_dump($c->n);
 ?>
---EXPECTF--
-Fatal error: Class C cannot use mutating method Bumps::bump(); mutating methods require a struct in %s on line %d
+--EXPECT--
+int(1)
