@@ -82,6 +82,8 @@ static zend_string *validate_allow_dynamic_properties(
 		msg = "Cannot apply #[\\AllowDynamicProperties] to readonly class %s";
 	} else if (scope->ce_flags & ZEND_ACC_ENUM) {
 		msg = "Cannot apply #[\\AllowDynamicProperties] to enum %s";
+	} else if (scope->ce_flags2 & ZEND_ACC2_VALUE_CLASS) {
+		msg = "Cannot apply #[\\AllowDynamicProperties] to struct %s";
 	}
 	if (msg != NULL) {
 		return zend_strpprintf(0, msg, ZSTR_VAL(scope->name));

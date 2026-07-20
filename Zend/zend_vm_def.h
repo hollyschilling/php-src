@@ -1040,6 +1040,7 @@ ZEND_VM_HANDLER(28, ZEND_ASSIGN_OBJ_OP, VAR|UNUSED|THIS|CV, CONST|TMP|CV, OP)
 ZEND_VM_C_LABEL(assign_op_object):
 		/* here we are sure we are dealing with an object */
 		zobj = Z_OBJ_P(object);
+		zobj = zend_value_class_separate(object, zobj);
 		if (OP2_TYPE == IS_CONST) {
 			name = Z_STR_P(property);
 		} else {
@@ -1317,6 +1318,7 @@ ZEND_VM_HANDLER(132, ZEND_PRE_INC_OBJ, VAR|UNUSED|THIS|CV, CONST|TMP|CV, CACHE_S
 ZEND_VM_C_LABEL(pre_incdec_object):
 		/* here we are sure we are dealing with an object */
 		zobj = Z_OBJ_P(object);
+		zobj = zend_value_class_separate(object, zobj);
 		if (OP2_TYPE == IS_CONST) {
 			name = Z_STR_P(property);
 		} else {
@@ -1388,6 +1390,7 @@ ZEND_VM_HANDLER(134, ZEND_POST_INC_OBJ, VAR|UNUSED|THIS|CV, CONST|TMP|CV, CACHE_
 ZEND_VM_C_LABEL(post_incdec_object):
 		/* here we are sure we are dealing with an object */
 		zobj = Z_OBJ_P(object);
+		zobj = zend_value_class_separate(object, zobj);
 		if (OP2_TYPE == IS_CONST) {
 			name = Z_STR_P(property);
 		} else {
@@ -2250,6 +2253,94 @@ ZEND_VM_C_LABEL(fetch_obj_r_finish):
 	ZEND_VM_NEXT_OPCODE_CHECK_EXCEPTION();
 }
 
+ZEND_VM_HANDLER(215, ZEND_FETCH_OBJ_RECEIVER, TMPVAR|UNUSED|THIS|CV, CONST, CACHE_SLOT)
+{
+	/* A property read in method-receiver position (`$c->list->append(...)`,
+	 * always immediately followed by its ZEND_INIT_METHOD_CALL). When the
+	 * value is a struct in a lendable slot, hand INIT the slot itself
+	 * (IS_INDIRECT) so a mutating callee can separate and write the caller's
+	 * storage -- the scoped borrow. Everything else reads exactly like
+	 * ZEND_FETCH_OBJ_R. */
+	USE_OPLINE
+	zval *container;
+	void **cache_slot;
+
+	SAVE_OPLINE();
+	container = GET_OP1_OBJ_ZVAL_PTR_UNDEF(BP_VAR_R);
+
+	if ((OP1_TYPE & IS_CV) && UNEXPECTED(Z_ISREF_P(container))) {
+		container = Z_REFVAL_P(container);
+	}
+	if (OP1_TYPE == IS_UNUSED || EXPECTED(Z_TYPE_P(container) == IS_OBJECT)) {
+		zend_object *zobj = Z_OBJ_P(container);
+		uintptr_t prop_offset;
+
+		cache_slot = CACHE_ADDR(opline->extended_value);
+		if (EXPECTED(zobj->ce == CACHED_PTR_EX(cache_slot))) {
+			prop_offset = (uintptr_t)CACHED_PTR_EX(cache_slot + 1);
+		} else {
+			/* Cold cache: resolve here, so the first mutating call can
+			 * already borrow (the plain-read fallback would only warm the
+			 * cache after INIT rejected the receiver). */
+			const zend_property_info *info = zend_get_property_info(
+				zobj->ce, Z_STR_P(RT_CONSTANT(opline, opline->op2)), 1);
+
+			if (info == NULL || info == ZEND_WRONG_PROPERTY_INFO
+			 || (info->flags & ZEND_ACC_STATIC) || info->hooks) {
+				ZEND_VM_C_GOTO(fetch_obj_receiver_plain);
+			}
+			prop_offset = info->offset;
+			CACHE_PTR_EX(cache_slot, zobj->ce);
+			CACHE_PTR_EX(cache_slot + 1, (void*)prop_offset);
+		}
+		{
+			if (EXPECTED(IS_VALID_PROPERTY_OFFSET(prop_offset))) {
+				zval *slot = OBJ_PROP(zobj, prop_offset);
+
+				if (EXPECTED(Z_TYPE_P(slot) == IS_OBJECT)
+				 && EXPECTED(!(Z_OBJ_P(slot)->ce->ce_flags2 & ZEND_ACC2_VALUE_CLASS))) {
+					/* The overwhelmingly common case -- a class-typed
+					 * receiver -- completes here rather than re-running the
+					 * whole lookup through the fallback. INIT loads this
+					 * object's ce next, so the flags test above prefetches
+					 * for free. */
+					ZVAL_COPY(EX_VAR(opline->result.var), slot);
+					FREE_OP1();
+					ZEND_VM_NEXT_OPCODE();
+				}
+				if (EXPECTED(Z_TYPE_P(slot) == IS_OBJECT)) {
+					bool anchored = true;
+					bool container_is_root;
+
+					if (OP1_TYPE == IS_UNUSED) {
+						container_is_root =
+							(EX(func)->common.fn_flags2 & ZEND_ACC2_MUTATING) != 0;
+					} else if (OP1_TYPE == IS_CV) {
+						container_is_root = GC_REFCOUNT(zobj) == 1;
+					} else {
+						/* A temporary container is freed below; the slot only
+						 * stays anchored if a co-owner keeps the container
+						 * alive through the adjacent INIT (nothing can run in
+						 * between, and after INIT separates, the slot pointer
+						 * is never consulted again). */
+						container_is_root = false;
+						anchored = GC_REFCOUNT(zobj) >= 2;
+					}
+					if (anchored
+					 && zend_receiver_slot_is_lendable(zobj, slot, container_is_root)) {
+						ZVAL_INDIRECT(EX_VAR(opline->result.var), slot);
+						FREE_OP1();
+						ZEND_VM_NEXT_OPCODE();
+					}
+				}
+			}
+		}
+	}
+ZEND_VM_C_LABEL(fetch_obj_receiver_plain): ;
+	/* Not a borrowable struct slot: an ordinary property read. */
+	ZEND_VM_DISPATCH_TO_HANDLER(ZEND_FETCH_OBJ_R);
+}
+
 ZEND_VM_HANDLER(85, ZEND_FETCH_OBJ_W, VAR|UNUSED|THIS|CV, CONST|TMP|CV, FETCH_REF|DIM_WRITE|CACHE_SLOT)
 {
 	USE_OPLINE
@@ -2510,6 +2601,7 @@ ZEND_VM_HANDLER(24, ZEND_ASSIGN_OBJ, VAR|UNUSED|THIS|CV, CONST|TMP|CV, CACHE_SLO
 
 ZEND_VM_C_LABEL(assign_object):
 	zobj = Z_OBJ_P(object);
+	zobj = zend_value_class_separate(object, zobj);
 	if (OP2_TYPE == IS_CONST) {
 		if (EXPECTED(zobj->ce == CACHED_PTR(opline->extended_value))) {
 			void **cache_slot = CACHE_ADDR(opline->extended_value);
@@ -3003,7 +3095,14 @@ ZEND_VM_HOT_HELPER(zend_leave_helper, ANY, ANY)
 #endif
 		if (UNEXPECTED(call_info & ZEND_CALL_RELEASE_THIS)) {
 			zend_vm_release_call_frame_this(execute_data);
-		} else if (UNEXPECTED(call_info & ZEND_CALL_CLOSURE)) {
+		} else if (UNEXPECTED(call_info & ZEND_CALL_HAS_THIS)) {
+			zend_check_value_class_this_escape(execute_data);
+		}
+		/* Independent of RELEASE_THIS: a value-class receiver reached through a
+		 * closure owns its (possibly separated) $this via RELEASE_THIS while the
+		 * closure object is still released here. For every pre-existing frame the
+		 * two flags remain mutually exclusive, so behaviour is unchanged. */
+		if (UNEXPECTED(call_info & ZEND_CALL_CLOSURE)) {
 			OBJ_RELEASE(ZEND_CLOSURE_OBJECT(EX(func)));
 		}
 		EG(vm_stack_top) = (zval*)execute_data;
@@ -3037,7 +3136,14 @@ ZEND_VM_HOT_HELPER(zend_leave_helper, ANY, ANY)
 
 		if (UNEXPECTED(call_info & ZEND_CALL_RELEASE_THIS)) {
 			zend_vm_release_call_frame_this(execute_data);
-		} else if (UNEXPECTED(call_info & ZEND_CALL_CLOSURE)) {
+		} else if (UNEXPECTED(call_info & ZEND_CALL_HAS_THIS)) {
+			zend_check_value_class_this_escape(execute_data);
+		}
+		/* Independent of RELEASE_THIS: a value-class receiver reached through a
+		 * closure owns its (possibly separated) $this via RELEASE_THIS while the
+		 * closure object is still released here. For every pre-existing frame the
+		 * two flags remain mutually exclusive, so behaviour is unchanged. */
+		if (UNEXPECTED(call_info & ZEND_CALL_CLOSURE)) {
 			OBJ_RELEASE(ZEND_CLOSURE_OBJECT(EX(func)));
 		}
 
@@ -3056,6 +3162,15 @@ ZEND_VM_HOT_HELPER(zend_leave_helper, ANY, ANY)
 		if (EX(func)->op_array.last_var > 0) {
 			zend_detach_symbol_table(execute_data);
 			call_info |= ZEND_CALL_NEEDS_REATTACH;
+		}
+		/* An eval/include frame binds $this borrowed; value-class separation
+		 * inside it takes ownership of the frame's copy via RELEASE_THIS
+		 * (the write is local to the eval, as to any frame). Release it
+		 * before the op_array is destroyed: dropping the copy can run
+		 * destructors of its property objects, which must not observe a
+		 * frame whose func has already been freed. */
+		if (UNEXPECTED(call_info & ZEND_CALL_RELEASE_THIS)) {
+			OBJ_RELEASE(Z_OBJ(execute_data->This));
 		}
 		zend_destroy_static_vars(&EX(func)->op_array);
 		destroy_op_array(&EX(func)->op_array);
@@ -3093,6 +3208,16 @@ ZEND_VM_HOT_HELPER(zend_leave_helper, ANY, ANY)
 				if (UNEXPECTED(call_info & ZEND_CALL_HAS_EXTRA_NAMED_PARAMS)) {
 					zend_free_extra_named_params(EX(extra_named_params));
 				}
+			}
+			/* Top frames (zend_call_function) bind $this borrowed and thus
+			 * never carried RELEASE_THIS historically. Value-class separation
+			 * can set it mid-call when a write takes ownership of the copy,
+			 * and a value-class constructor invoked through this route needs
+			 * its escape check, exactly as in the nested leave paths above. */
+			if (UNEXPECTED(call_info & ZEND_CALL_RELEASE_THIS)) {
+				OBJ_RELEASE(Z_OBJ(execute_data->This));
+			} else if (UNEXPECTED(call_info & ZEND_CALL_HAS_THIS)) {
+				zend_check_value_class_this_escape(execute_data);
 			}
 			if (UNEXPECTED(call_info & ZEND_CALL_CLOSURE)) {
 				OBJ_RELEASE(ZEND_CLOSURE_OBJECT(EX(func)));
@@ -3684,12 +3809,14 @@ ZEND_VM_HOT_OBJ_HANDLER(112, ZEND_INIT_METHOD_CALL, CONST|TMP|UNUSED|THIS|CV, CO
 	USE_OPLINE
 	zval *function_name;
 	zval *object;
+	zval *recv_slot = NULL;
 	zend_function *fbc;
 	zend_class_entry *called_scope;
 	zend_object *obj;
 	zend_execute_data *call;
 	uint32_t call_info;
 
+	(void)recv_slot;
 	SAVE_OPLINE();
 
 	object = GET_OP1_OBJ_ZVAL_PTR_UNDEF(BP_VAR_R);
@@ -3727,6 +3854,17 @@ ZEND_VM_HOT_OBJ_HANDLER(112, ZEND_INIT_METHOD_CALL, CONST|TMP|UNUSED|THIS|CV, CO
 			if (OP1_TYPE != IS_CONST && EXPECTED(Z_TYPE_P(object) == IS_OBJECT)) {
 				obj = Z_OBJ_P(object);
 			} else {
+				if ((OP1_TYPE & (IS_VAR|IS_TMP_VAR))
+				 && EXPECTED(Z_TYPE_P(object) == IS_INDIRECT)) {
+					/* Scoped borrow from ZEND_FETCH_OBJ_RECEIVER: op1 is the
+					 * caller's property slot, holding an object by
+					 * construction. Own a reference like any fetched
+					 * receiver; a mutating callee separates the slot below. */
+					recv_slot = Z_INDIRECT_P(object);
+					obj = Z_OBJ_P(recv_slot);
+					GC_ADDREF(obj);
+					break;
+				}
 				if ((OP1_TYPE & (IS_VAR|IS_CV)) && EXPECTED(Z_ISREF_P(object))) {
 					zend_reference *ref = Z_REF_P(object);
 
@@ -3827,7 +3965,11 @@ ZEND_VM_HOT_OBJ_HANDLER(112, ZEND_INIT_METHOD_CALL, CONST|TMP|UNUSED|THIS|CV, CO
 		}
 		if (OP2_TYPE == IS_CONST &&
 		    EXPECTED(!(fbc->common.fn_flags & (ZEND_ACC_CALL_VIA_TRAMPOLINE|ZEND_ACC_NEVER_CACHE))) &&
+		    EXPECTED(!(fbc->common.fn_flags2 & ZEND_ACC2_MUTATING)) &&
 		    EXPECTED(obj == orig_obj)) {
+			/* Mutating callees stay out of the inline cache so no cache-hit
+			 * fast path (VM or JIT) can push their frame without the
+			 * receiver validation below. */
 			CACHE_POLYMORPHIC_PTR(opline->result.num, called_scope, fbc);
 		}
 		if ((OP1_TYPE & (IS_VAR|IS_TMP_VAR)) && UNEXPECTED(obj != orig_obj)) {
@@ -3843,6 +3985,41 @@ ZEND_VM_HOT_OBJ_HANDLER(112, ZEND_INIT_METHOD_CALL, CONST|TMP|UNUSED|THIS|CV, CO
 
 	if (OP2_TYPE != IS_CONST) {
 		FREE_OP2();
+	}
+
+	if (UNEXPECTED(fbc->common.fn_flags2 & ZEND_ACC2_MUTATING)) {
+		/* A mutating callee writes its receiver in place, so the receiver
+		 * must be a slot this call site can lend exclusively. Separate a
+		 * variable receiver before the frame takes its reference; $this
+		 * chains stay borrowed (already exclusive in a mutating frame, and
+		 * the outermost frame's escape check covers the whole chain). */
+		if (OP1_TYPE == IS_CV) {
+			obj = zend_value_class_separate_container(object);
+		} else if (OP1_TYPE == IS_UNUSED) {
+			if (UNEXPECTED(!(EX(func)->common.fn_flags2 & ZEND_ACC2_MUTATING))) {
+				zend_throw_error(NULL,
+					"Cannot call mutating method %s::%s() on $this in a non-mutating method",
+					ZSTR_VAL(obj->ce->name), ZSTR_VAL(fbc->common.function_name));
+				HANDLE_EXCEPTION();
+			}
+		} else if ((OP1_TYPE & (IS_VAR|IS_TMP_VAR)) && EXPECTED(recv_slot != NULL)) {
+			/* Borrowed property slot: separate the value in the caller's
+			 * storage. Drop the frame's reference around the separation so
+			 * the refcount it reads reflects the slot alone. */
+			GC_DELREF(obj);
+			obj = zend_value_class_separate_container(recv_slot);
+			GC_ADDREF(obj);
+		} else {
+			zend_throw_error(NULL,
+				"Cannot call mutating method %s::%s() on this receiver; assign it to a variable first",
+				ZSTR_VAL(obj->ce->name), ZSTR_VAL(fbc->common.function_name));
+			if (OP1_TYPE & (IS_VAR|IS_TMP_VAR)) {
+				if (GC_DELREF(obj) == 0) {
+					zend_objects_store_del(obj);
+				}
+			}
+			HANDLE_EXCEPTION();
+		}
 	}
 
 	call_info = ZEND_CALL_NESTED_FUNCTION | ZEND_CALL_HAS_THIS;
@@ -3951,7 +4128,10 @@ ZEND_VM_HANDLER(113, ZEND_INIT_STATIC_METHOD_CALL, UNUSED|CLASS_FETCH|CONST|VAR,
 		}
 		if (OP2_TYPE == IS_CONST &&
 		    EXPECTED(!(fbc->common.fn_flags & (ZEND_ACC_CALL_VIA_TRAMPOLINE|ZEND_ACC_NEVER_CACHE))) &&
+		    EXPECTED(!(fbc->common.fn_flags2 & ZEND_ACC2_MUTATING)) &&
 			EXPECTED(!(fbc->common.scope->ce_flags & ZEND_ACC_TRAIT))) {
+			/* Mutating callees stay out of the inline cache: see
+			 * ZEND_INIT_METHOD_CALL. */
 			CACHE_POLYMORPHIC_PTR(opline->result.num, ce, fbc);
 		}
 		if (EXPECTED(fbc->type == ZEND_USER_FUNCTION) && UNEXPECTED(!RUN_TIME_CACHE(&fbc->op_array))) {
@@ -3977,6 +4157,14 @@ ZEND_VM_HANDLER(113, ZEND_INIT_STATIC_METHOD_CALL, UNUSED|CLASS_FETCH|CONST|VAR,
 
 	if (!(fbc->common.fn_flags & ZEND_ACC_STATIC)) {
 		if (Z_TYPE(EX(This)) == IS_OBJECT && instanceof_function(Z_OBJCE(EX(This)), ce)) {
+			if (UNEXPECTED(fbc->common.fn_flags2 & ZEND_ACC2_MUTATING)
+			 && UNEXPECTED(!(EX(func)->common.fn_flags2 & ZEND_ACC2_MUTATING))) {
+				/* self::m() binds $this: same rule as $this->m(). */
+				zend_throw_error(NULL,
+					"Cannot call mutating method %s::%s() on $this in a non-mutating method",
+					ZSTR_VAL(Z_OBJ(EX(This))->ce->name), ZSTR_VAL(fbc->common.function_name));
+				HANDLE_EXCEPTION();
+			}
 			ce = (zend_class_entry*)Z_OBJ(EX(This));
 			call_info = ZEND_CALL_NESTED_FUNCTION | ZEND_CALL_HAS_THIS;
 		} else {
@@ -4123,6 +4311,17 @@ ZEND_VM_HANDLER(118, ZEND_INIT_USER_CALL, CONST, CONST|TMP|CV, NUM)
 			if (fcc.object) {
 				object_or_called_scope = fcc.object;
 				call_info |= ZEND_CALL_HAS_THIS;
+				if (UNEXPECTED(fcc.object->ce->ce_flags2 & ZEND_ACC2_VALUE_CLASS)) {
+					/* Each invocation of a closure bound to a value class must
+					 * act on a fresh copy of the captured receiver, so own $this
+					 * (addref + RELEASE_THIS): the first write then separates it
+					 * and the captured value is never mutated. Without this a
+					 * closure that exclusively holds its receiver (refcount 1)
+					 * would write in place and leak state across calls. The
+					 * closure object is still released independently on return. */
+					GC_ADDREF(fcc.object);
+					call_info |= ZEND_CALL_RELEASE_THIS;
+				}
 			}
 		} else if (fcc.object) {
 			GC_ADDREF(fcc.object); /* For $this pointer */
@@ -6145,12 +6344,22 @@ ZEND_VM_HANDLER(68, ZEND_NEW, UNUSED|CLASS_FETCH|CONST|VAR, UNUSED|CACHE_SLOT, N
 			init_func_run_time_cache(&constructor->op_array);
 		}
 		/* We are not handling overloaded classes right now */
+		/* Value classes bind $this borrowed and exclusive: the constructor
+		 * shares the result slot's single reference (no addref, no
+		 * RELEASE_THIS), so promoted and body writes through $this land in
+		 * place instead of separating. The result slot owns the instance
+		 * across the call; the escape check verifies nothing else grabbed a
+		 * reference by the time the constructor returns. */
+		uint32_t ctor_call_info = ZEND_CALL_FUNCTION | ZEND_CALL_HAS_THIS;
+		if (EXPECTED(!(ce->ce_flags2 & ZEND_ACC2_VALUE_CLASS))) {
+			Z_ADDREF_P(result);
+			ctor_call_info |= ZEND_CALL_RELEASE_THIS;
+		}
 		call = zend_vm_stack_push_call_frame(
-			ZEND_CALL_FUNCTION | ZEND_CALL_RELEASE_THIS | ZEND_CALL_HAS_THIS,
+			ctor_call_info,
 			constructor,
 			opline->extended_value,
 			Z_OBJ_P(result));
-		Z_ADDREF_P(result);
 	}
 
 	call->prev_execute_data = EX(call);
@@ -7146,6 +7355,16 @@ ZEND_VM_COLD_CONST_HANDLER(125, ZEND_FE_RESET_RW, CONST|TMP|VAR|CV, JMP_ADDR)
 		FREE_OP1_IF_VAR();
 		ZEND_VM_NEXT_OPCODE();
 	} else if (OP1_TYPE != IS_CONST && EXPECTED(Z_TYPE_P(array_ptr) == IS_OBJECT)) {
+		if (UNEXPECTED(Z_OBJCE_P(array_ptr)->ce_flags2 & ZEND_ACC2_VALUE_CLASS)) {
+			/* By-reference iteration takes references into the value's
+			 * property slots; a slot inside a value has no stable identity
+			 * to name. By-value foreach works as for any object. */
+			zend_throw_error(NULL, "Cannot iterate struct %s by reference",
+				ZSTR_VAL(Z_OBJCE_P(array_ptr)->name));
+			UNDEF_RESULT();
+			FREE_OP1_IF_VAR();
+			HANDLE_EXCEPTION();
+		}
 		if (!Z_OBJCE_P(array_ptr)->get_iterator) {
 			zend_object *zobj = Z_OBJ_P(array_ptr);
 			HashTable *properties;
@@ -9413,6 +9632,22 @@ ZEND_VM_HOT_HANDLER(184, ZEND_FETCH_THIS, UNUSED, UNUSED)
 	if (EXPECTED(Z_TYPE(EX(This)) == IS_OBJECT)) {
 		zval *result = EX_VAR(opline->result.var);
 
+		if (UNEXPECTED(opline->extended_value == ZEND_FETCH_THIS_WRITE)
+		 && (Z_OBJCE(EX(This))->ce_flags2 & ZEND_ACC2_VALUE_CLASS)) {
+			/* $this is the container of a property write and the receiver is
+			 * a value class (this_guaranteed_exists() is false, e.g. a
+			 * scopeless closure later bound to a struct): hand back a writable
+			 * indirect to the frame's This slot rather than an addref'd handle
+			 * copy. The property write then separates EX(This) itself -- so a
+			 * later read of $this sees the copy -- instead of mutating a
+			 * throwaway that is discarded after the write. The compile-time
+			 * marker restricts this to property-write consumers, which
+			 * dereference INDIRECT; other IS_VAR consumers (argument sends)
+			 * keep the handle copy. */
+			ZVAL_INDIRECT(result, &EX(This));
+			ZEND_VM_NEXT_OPCODE();
+		}
+
 		ZVAL_OBJ(result, Z_OBJ(EX(This)));
 		Z_ADDREF_P(result);
 		ZEND_VM_NEXT_OPCODE();
@@ -9936,6 +10171,23 @@ ZEND_VM_HANDLER(202, ZEND_CALLABLE_CONVERT, UNUSED, UNUSED, NUM|CACHE_SLOT)
 		EX(call) = call->prev_execute_data;
 		zend_vm_stack_free_call_frame(call);
 		ZVAL_UNDEF(EX_VAR(opline->result.var));
+		HANDLE_EXCEPTION();
+	}
+
+	if (UNEXPECTED(call->func->common.fn_flags2 & ZEND_ACC2_MUTATING)) {
+		/* A closure would hold its own handle to the receiver; there is no
+		 * caller slot for a later invocation to separate and write. The
+		 * pending frame is NOT freed here: the exception unwinder discovers
+		 * it from the opline position and releases it (freeing it twice
+		 * corrupts the VM stack). The result slot must be UNDEF'd: this
+		 * opcode never threw before, and ZEND_HANDLE_EXCEPTION dtors the
+		 * faulting opline's result, which still holds stale bytes from an
+		 * earlier user of the temporary. */
+		SAVE_OPLINE();
+		ZVAL_UNDEF(EX_VAR(opline->result.var));
+		zend_throw_error(NULL, "Cannot create a first-class callable of mutating method %s::%s()",
+			ZSTR_VAL(call->func->common.scope->name),
+			ZSTR_VAL(call->func->common.function_name));
 		HANDLE_EXCEPTION();
 	}
 

@@ -857,6 +857,22 @@ zend_result zend_call_function(zend_fcall_info *fci, zend_fcall_info_cache *fci_
 	} else {
 		object_or_called_scope = fci_cache->object;
 		call_info = ZEND_CALL_TOP_FUNCTION | ZEND_CALL_DYNAMIC | ZEND_CALL_HAS_THIS;
+		if (UNEXPECTED(fci_cache->object->ce->ce_flags2 & ZEND_ACC2_VALUE_CLASS)
+		 && !(func->common.fn_flags2 & ZEND_ACC2_MUTATING)
+		 && !func->common.prop_info) {
+			/* A by-value receiver must be owned by the frame so the first
+			 * write separates it: with only the caller's borrowed reference,
+			 * a sole-holder receiver (a closure's capture invoked via
+			 * array_map/usort/...) is written in place and state leaks
+			 * across invocations. Mirrors the VM call paths
+			 * (zend_init_dynamic_call_object, INIT_USER_CALL). Exclusive
+			 * contexts stay borrowed: mutating callees -- today a struct's
+			 * constructor, i.e. fresh-instance construction, shared
+			 * receivers having been rejected below -- and property hooks,
+			 * whose set variant must write the caller's instance in place. */
+			GC_ADDREF(fci_cache->object);
+			call_info |= ZEND_CALL_RELEASE_THIS;
+		}
 	}
 
 	if (UNEXPECTED(func->common.fn_flags & ZEND_ACC_DEPRECATED)) {
@@ -865,6 +881,26 @@ zend_result zend_call_function(zend_fcall_info *fci, zend_fcall_info_cache *fci_
 		if (UNEXPECTED(EG(exception))) {
 			return SUCCESS;
 		}
+	}
+
+	if (UNEXPECTED(func->common.fn_flags2 & ZEND_ACC2_MUTATING)
+	 && fci_cache->object
+	 && GC_REFCOUNT(fci_cache->object) > 1) {
+		/* A mutating callee writes its receiver in place under the
+		 * borrowed-exclusive $this convention, which this route cannot
+		 * establish for a shared receiver: only ZEND_INIT_METHOD_CALL can
+		 * separate the caller's slot. Fresh-instance construction
+		 * (ReflectionClass::newInstance, internal object creation) holds the
+		 * sole reference and passes borrowed. */
+		if (func->common.fn_flags & ZEND_ACC_CTOR) {
+			zend_throw_error(NULL, "Cannot call the constructor of struct %s explicitly",
+				ZSTR_VAL(fci_cache->object->ce->name));
+		} else {
+			zend_throw_error(NULL, "Cannot call mutating method %s::%s() on a shared instance",
+				ZSTR_VAL(fci_cache->object->ce->name), ZSTR_VAL(func->common.function_name));
+		}
+		zend_release_fcall_info_cache(fci_cache);
+		return SUCCESS;
 	}
 
 #ifdef ZEND_CHECK_STACK_LIMIT
