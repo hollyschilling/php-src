@@ -27,6 +27,12 @@ ZEND_API zend_class_entry *zend_generics_stamp_instantiation(
  * (transitive closure), so the stamped classes persist into SHM. */
 ZEND_API void zend_generics_preload_stamp_all(void);
 
+/* Closure creation: substitute the stamped scope's type arguments into the
+ * closure's own signature copy (no-op unless the scope carries a binding and
+ * the signature mentions a type parameter). */
+ZEND_API void zend_generics_substitute_closure_signature(
+		zend_op_array *op_array, const zend_class_entry *scope);
+
 END_EXTERN_C()
 
 #endif /* ZEND_GENERICS_H */
