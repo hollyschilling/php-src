@@ -16,6 +16,7 @@
 #include "zend.h"
 #include "zend_API.h"
 #include "zend_compile.h"
+#include "zend_exceptions.h"
 #include "zend_execute.h"
 #include "zend_generics.h"
 #include "zend_inheritance.h"
@@ -566,6 +567,156 @@ static bool zend_generics_check_bounds(
 		}
 	}
 	return true;
+}
+
+static void zend_generics_collect_type_names(zend_type type, HashTable *candidates)
+{
+	if (ZEND_TYPE_HAS_LIST(type)) {
+		const zend_type *list_type;
+		ZEND_TYPE_LIST_FOREACH(ZEND_TYPE_LIST(type), list_type) {
+			zend_generics_collect_type_names(*list_type, candidates);
+		} ZEND_TYPE_LIST_FOREACH_END();
+	} else if (ZEND_TYPE_HAS_NAME(type)) {
+		zend_string *name = ZEND_TYPE_NAME(type);
+		if (memchr(ZSTR_VAL(name), '<', ZSTR_LEN(name))) {
+			zend_hash_add_empty_element(candidates, name);
+		}
+	}
+}
+
+static void zend_generics_collect_op_array(const zend_op_array *op_array, HashTable *candidates)
+{
+	if (op_array->type != ZEND_USER_FUNCTION) {
+		return;
+	}
+	if (op_array->arg_info) {
+		uint32_t total = op_array->num_args;
+		const zend_arg_info *base = op_array->arg_info;
+		if (op_array->fn_flags & ZEND_ACC_HAS_RETURN_TYPE) {
+			base--;
+			total++;
+		}
+		if (op_array->fn_flags & ZEND_ACC_VARIADIC) {
+			total++;
+		}
+		for (uint32_t i = 0; i < total; i++) {
+			zend_generics_collect_type_names(base[i].type, candidates);
+		}
+	}
+	if (op_array->literals) {
+		for (int i = 0; i < op_array->last_literal; i++) {
+			const zval *zv = &op_array->literals[i];
+			if (Z_TYPE_P(zv) == IS_STRING
+					&& memchr(Z_STRVAL_P(zv), '<', Z_STRLEN_P(zv))) {
+				zend_generic_name_slice base_slice;
+				zend_generic_name_slice arg_slices[ZEND_GENERICS_MAX_ARGS];
+				uint32_t num_args;
+				if (zend_generics_parse_name(Z_STR_P(zv), &base_slice, arg_slices, &num_args)) {
+					zend_hash_add_empty_element(candidates, Z_STR_P(zv));
+				}
+			}
+		}
+	}
+	for (uint32_t i = 0; i < op_array->num_dynamic_func_defs; i++) {
+		zend_generics_collect_op_array(op_array->dynamic_func_defs[i], candidates);
+	}
+}
+
+/* Preload support: after preload_link, discover every generic instantiation
+ * reachable from preloaded code (type positions, class-ref literals) and
+ * stamp it, to a fixpoint so instantiations seed further instantiations.
+ * Stamped classes sit in EG(class_table) and are persisted into SHM with
+ * everything else, so requests start with the closed world fully stamped. */
+ZEND_API void zend_generics_preload_stamp_all(void)
+{
+	HashTable candidates, attempted;
+	bool stamped_any;
+
+	zend_hash_init(&candidates, 64, NULL, NULL, 0);
+	zend_hash_init(&attempted, 64, NULL, NULL, 0);
+
+	do {
+		stamped_any = false;
+		zend_hash_clean(&candidates);
+
+		zend_class_entry *scan_ce;
+		ZEND_HASH_MAP_FOREACH_PTR(EG(class_table), scan_ce) {
+			if (scan_ce->type != ZEND_USER_CLASS) {
+				continue;
+			}
+			const zend_property_info *prop_info;
+			ZEND_HASH_MAP_FOREACH_PTR(&scan_ce->properties_info, prop_info) {
+				if (prop_info->ce == scan_ce) {
+					zend_generics_collect_type_names(prop_info->type, &candidates);
+					if (prop_info->hooks) {
+						for (uint32_t i = 0; i < ZEND_PROPERTY_HOOK_COUNT; i++) {
+							if (prop_info->hooks[i]) {
+								zend_generics_collect_op_array(
+									&prop_info->hooks[i]->op_array, &candidates);
+							}
+						}
+					}
+				}
+			} ZEND_HASH_FOREACH_END();
+			const zend_class_constant *c;
+			ZEND_HASH_MAP_FOREACH_PTR(&scan_ce->constants_table, c) {
+				if (c->ce == scan_ce) {
+					zend_generics_collect_type_names(c->type, &candidates);
+				}
+			} ZEND_HASH_FOREACH_END();
+			const zend_op_array *method;
+			ZEND_HASH_MAP_FOREACH_PTR(&scan_ce->function_table, method) {
+				if (method->scope == scan_ce) {
+					zend_generics_collect_op_array(method, &candidates);
+				}
+			} ZEND_HASH_FOREACH_END();
+		} ZEND_HASH_FOREACH_END();
+
+		const zend_op_array *fn;
+		ZEND_HASH_MAP_FOREACH_PTR(EG(function_table), fn) {
+			zend_generics_collect_op_array(fn, &candidates);
+		} ZEND_HASH_FOREACH_END();
+
+		zend_string *candidate;
+		ZEND_HASH_MAP_FOREACH_STR_KEY(&candidates, candidate) {
+			if (!zend_hash_add_empty_element(&attempted, candidate)) {
+				continue; /* already tried */
+			}
+
+			/* Only attempt names whose base is a known generic template, so
+			 * false-positive string literals stay silent. */
+			zend_generic_name_slice base_slice;
+			zend_generic_name_slice arg_slices[ZEND_GENERICS_MAX_ARGS];
+			uint32_t num_args;
+			if (!zend_generics_parse_name(candidate, &base_slice, arg_slices, &num_args)) {
+				continue;
+			}
+			zend_string *base_name = zend_string_init(base_slice.start, base_slice.len, 0);
+			zend_class_entry *template_ce =
+				zend_lookup_class_ex(base_name, NULL, ZEND_FETCH_CLASS_NO_AUTOLOAD);
+			zend_string_release(base_name);
+			if (!template_ce || !(template_ce->ce_flags2 & ZEND_ACC2_GENERIC_TEMPLATE)) {
+				continue;
+			}
+
+			zend_string *lc_name = zend_string_tolower(candidate);
+			if (!zend_hash_exists(EG(class_table), lc_name)) {
+				if (zend_lookup_class_ex(candidate, NULL, 0)) {
+					stamped_any = true;
+				} else if (EG(exception)) {
+					zend_error(E_WARNING,
+						"Preloading could not stamp generic instantiation %s "
+						"(it will be stamped, or fail, at runtime)",
+						ZSTR_VAL(candidate));
+					zend_clear_exception();
+				}
+			}
+			zend_string_release(lc_name);
+		} ZEND_HASH_FOREACH_END();
+	} while (stamped_any);
+
+	zend_hash_destroy(&candidates);
+	zend_hash_destroy(&attempted);
 }
 
 ZEND_API zend_class_entry *zend_generics_stamp_instantiation(
