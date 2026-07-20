@@ -549,6 +549,17 @@ void zend_persist_class_entry_calc(zend_class_entry *ce)
 			}
 		}
 
+		if (ce->generic_params) {
+			for (uint32_t i = 0; i < ce->generic_params->num_params; i++) {
+				ADD_INTERNED_STRING(ce->generic_params->params[i].name);
+				if (ce->generic_params->params[i].bound_name) {
+					ADD_INTERNED_STRING(ce->generic_params->params[i].bound_name);
+				}
+			}
+			ADD_SIZE(sizeof(zend_generic_params)
+				+ (ce->generic_params->num_params - 1) * sizeof(zend_generic_param));
+		}
+
 		if (ce->num_traits) {
 			uint32_t i;
 

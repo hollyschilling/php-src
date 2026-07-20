@@ -1126,6 +1126,22 @@ zend_class_entry *zend_persist_class_entry(zend_class_entry *orig_ce)
 			}
 		}
 
+		if (ce->generic_params) {
+			zend_generic_params *generic_params = ce->generic_params;
+			for (uint32_t i = 0; i < generic_params->num_params; i++) {
+				zend_accel_store_interned_string(generic_params->params[i].name);
+				if (generic_params->params[i].bound_name) {
+					zend_accel_store_interned_string(generic_params->params[i].bound_name);
+				}
+			}
+			/* Arena-allocated at compile time: copy without freeing. */
+			ce->generic_params = zend_shared_memdup(generic_params,
+				sizeof(zend_generic_params)
+					+ (generic_params->num_params - 1) * sizeof(zend_generic_param));
+		}
+		/* Instantiations are stamped at runtime and never persisted. */
+		ZEND_ASSERT(ce->generic_binding == NULL);
+
 		ZEND_ASSERT(ce->backed_enum_table == NULL);
 	}
 

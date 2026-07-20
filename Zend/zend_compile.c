@@ -1232,7 +1232,8 @@ static zend_string *zend_resolve_generic_type_ast(zend_ast *ast);
 static zend_string *zend_resolve_class_name_ast(zend_ast *ast) /* {{{ */
 {
 	if (ast->kind == ZEND_AST_GENERIC_TYPE) {
-		return zend_string_copy(zend_resolve_generic_type_ast(ast));
+		/* Returns an owned reference (interning is a no-op under opcache). */
+		return zend_resolve_generic_type_ast(ast);
 	}
 	const zval *class_name = zend_ast_get_zval(ast);
 	if (Z_TYPE_P(class_name) != IS_STRING) {
@@ -7522,7 +7523,8 @@ static zend_type zend_compile_single_typename(zend_ast *ast)
 	if (ast->kind == ZEND_AST_GENERIC_TYPE) {
 		zend_string *mangled = zend_resolve_generic_type_ast(ast);
 		zend_alloc_ce_cache(mangled);
-		return (zend_type) ZEND_TYPE_INIT_CLASS(zend_string_copy(mangled), /* allow null */ false, 0);
+		/* The type consumes the owned reference. */
+		return (zend_type) ZEND_TYPE_INIT_CLASS(mangled, /* allow null */ false, 0);
 	}
 	if (ast->kind == ZEND_AST_TYPE) {
 		if (ast->attr == IS_STATIC && !CG(active_class_entry) && zend_is_scope_known()) {
