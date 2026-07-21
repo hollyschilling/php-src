@@ -11253,7 +11253,8 @@ static int zend_jit_leave_func(zend_jit_ctx         *jit,
 		jit_OBJ_RELEASE(jit, ir_LOAD_A(jit_EX(This.value.obj)));
 		fast_path = ir_END();
 		ir_IF_FALSE(if_release);
-		if (op_array->fn_flags & ZEND_ACC_CTOR) {
+		if ((op_array->fn_flags & ZEND_ACC_CTOR)
+		 && (op_array->fn_flags2 & ZEND_ACC2_MUTATING)) {
 			ir_CALL_1(IR_VOID, ir_CONST_FC_FUNC(zend_jit_value_class_this_escape), jit_FP(jit));
 		}
 		ir_MERGE_WITH(fast_path);
