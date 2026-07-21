@@ -60,7 +60,8 @@ ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_CCONV zend_jit_leave_func_helper_tai
 		 * see zend_jit_leave_nested_func_helper. */
 		if (UNEXPECTED(call_info & ZEND_CALL_RELEASE_THIS)) {
 			OBJ_RELEASE(Z_OBJ(execute_data->This));
-		} else if (UNEXPECTED(call_info & ZEND_CALL_HAS_THIS)) {
+		} else if ((call_info & ZEND_CALL_HAS_THIS)
+			 && UNEXPECTED(EX(func)->common.fn_flags2 & ZEND_ACC2_MUTATING)) {
 			zend_check_value_class_this_escape(execute_data);
 		}
 		if (UNEXPECTED(call_info & ZEND_CALL_CLOSURE)) {
@@ -98,7 +99,8 @@ ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_CCONV zend_jit_leave_func_helper_tai
 		/* Top frames: see zend_jit_leave_top_func_helper. */
 		if (UNEXPECTED(call_info & ZEND_CALL_RELEASE_THIS)) {
 			OBJ_RELEASE(Z_OBJ(execute_data->This));
-		} else if (UNEXPECTED(call_info & ZEND_CALL_HAS_THIS)) {
+		} else if ((call_info & ZEND_CALL_HAS_THIS)
+			 && UNEXPECTED(EX(func)->common.fn_flags2 & ZEND_ACC2_MUTATING)) {
 			zend_check_value_class_this_escape(execute_data);
 		}
 		if (UNEXPECTED(call_info & ZEND_CALL_CLOSURE)) {
@@ -124,7 +126,8 @@ ZEND_OPCODE_HANDLER_RET ZEND_FASTCALL zend_jit_leave_nested_func_helper(ZEND_OPC
 	 * constructor's, which must pass the escape check. */
 	if (UNEXPECTED(call_info & ZEND_CALL_RELEASE_THIS)) {
 		OBJ_RELEASE(Z_OBJ(execute_data->This));
-	} else if (UNEXPECTED(call_info & ZEND_CALL_HAS_THIS)) {
+	} else if ((call_info & ZEND_CALL_HAS_THIS)
+		 && UNEXPECTED(EX(func)->common.fn_flags2 & ZEND_ACC2_MUTATING)) {
 		zend_check_value_class_this_escape(execute_data);
 	}
 	if (UNEXPECTED(call_info & ZEND_CALL_CLOSURE)) {
@@ -176,7 +179,8 @@ ZEND_OPCODE_HANDLER_RET ZEND_FASTCALL zend_jit_leave_top_func_helper(ZEND_OPCODE
 	 * constructor needing its escape check. */
 	if (UNEXPECTED(call_info & ZEND_CALL_RELEASE_THIS)) {
 		OBJ_RELEASE(Z_OBJ(execute_data->This));
-	} else if (UNEXPECTED(call_info & ZEND_CALL_HAS_THIS)) {
+	} else if ((call_info & ZEND_CALL_HAS_THIS)
+		 && UNEXPECTED(EX(func)->common.fn_flags2 & ZEND_ACC2_MUTATING)) {
 		zend_check_value_class_this_escape(execute_data);
 	}
 	if (UNEXPECTED(call_info & ZEND_CALL_CLOSURE)) {

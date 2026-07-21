@@ -3095,7 +3095,10 @@ ZEND_VM_HOT_HELPER(zend_leave_helper, ANY, ANY)
 #endif
 		if (UNEXPECTED(call_info & ZEND_CALL_RELEASE_THIS)) {
 			OBJ_RELEASE(Z_OBJ(execute_data->This));
-		} else if (UNEXPECTED(call_info & ZEND_CALL_HAS_THIS)) {
+		} else if ((call_info & ZEND_CALL_HAS_THIS)
+		 && UNEXPECTED(EX(func)->common.fn_flags2 & ZEND_ACC2_MUTATING)) {
+			/* Only a mutating value-class constructor can fail the escape
+			 * check; keep ordinary method returns free of the call. */
 			zend_check_value_class_this_escape(execute_data);
 		}
 		/* Independent of RELEASE_THIS: a value-class receiver reached through a
@@ -3136,7 +3139,10 @@ ZEND_VM_HOT_HELPER(zend_leave_helper, ANY, ANY)
 
 		if (UNEXPECTED(call_info & ZEND_CALL_RELEASE_THIS)) {
 			OBJ_RELEASE(Z_OBJ(execute_data->This));
-		} else if (UNEXPECTED(call_info & ZEND_CALL_HAS_THIS)) {
+		} else if ((call_info & ZEND_CALL_HAS_THIS)
+		 && UNEXPECTED(EX(func)->common.fn_flags2 & ZEND_ACC2_MUTATING)) {
+			/* Only a mutating value-class constructor can fail the escape
+			 * check; keep ordinary method returns free of the call. */
 			zend_check_value_class_this_escape(execute_data);
 		}
 		/* Independent of RELEASE_THIS: a value-class receiver reached through a
@@ -3216,7 +3222,10 @@ ZEND_VM_HOT_HELPER(zend_leave_helper, ANY, ANY)
 			 * its escape check, exactly as in the nested leave paths above. */
 			if (UNEXPECTED(call_info & ZEND_CALL_RELEASE_THIS)) {
 				OBJ_RELEASE(Z_OBJ(execute_data->This));
-			} else if (UNEXPECTED(call_info & ZEND_CALL_HAS_THIS)) {
+			} else if ((call_info & ZEND_CALL_HAS_THIS)
+			 && UNEXPECTED(EX(func)->common.fn_flags2 & ZEND_ACC2_MUTATING)) {
+				/* Only a mutating value-class constructor can fail the escape
+				 * check; keep ordinary method returns free of the call. */
 				zend_check_value_class_this_escape(execute_data);
 			}
 			if (UNEXPECTED(call_info & ZEND_CALL_CLOSURE)) {
