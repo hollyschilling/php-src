@@ -3114,7 +3114,24 @@ static void zend_compile_class_ref(znode *result, zend_ast *name_ast, uint32_t f
 	if (name_ast->kind == ZEND_AST_GENERIC_TYPE) {
 		/* Mangled generic names are already fully qualified. */
 		result->op_type = IS_CONST;
-		ZVAL_STR(&result->u.constant, zend_resolve_class_name_ast(name_ast));
+		zend_string *resolved = zend_resolve_class_name_ast(name_ast);
+		const zend_ast *base_ast = name_ast->child[0];
+		if (UNEXPECTED(base_ast->kind == ZEND_AST_ZVAL
+				&& base_ast->attr == ZEND_NAME_MODULE)
+				&& !(fetch_flags & (ZEND_FETCH_CLASS_NO_AUTOLOAD|ZEND_FETCH_CLASS_SILENT))) {
+			/* An instantiation named through a module import (Mod:>Vec<int>)
+			 * carries the same "\0" FQMN "\0" FQCN provenance marker as a bare
+			 * module reference, so the runtime acquisition gate recognises it.
+			 * The wrapped FQCN is the plain mangled name (Ns\Vec<int>), which
+			 * stamps and looks up normally once the marker is stripped. See the
+			 * non-generic ZEND_NAME_MODULE branch below. */
+			zend_lang_module *m;
+			zend_string *base_fqcn =
+				zend_resolve_module_qualified_name(zend_ast_get_str(base_ast), &m);
+			zend_string_release(base_fqcn);
+			resolved = zend_mark_module_provenance(m, resolved);
+		}
+		ZVAL_STR(&result->u.constant, resolved);
 		return;
 	}
 
