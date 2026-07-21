@@ -11319,17 +11319,17 @@ static void zend_compile_module_def(const zend_ast *ast) /* {{{ */
 
 	zend_string *fqmn = zend_new_interned_string(zend_prefix_with_ns(local));
 	zend_array *exports = zend_new_array(list->children);
+	zend_array *extensions = zend_new_array(0);
 
 	for (i = 0; i < list->children; i++) {
 		const zend_ast *export_ast = list->child[i];
 		zend_ast *name_ast = export_ast->child[0];
-		zend_ast *alias_ast = export_ast->child[1];
 		zend_string *fqcn;
-		zend_string *alias;
 		zval zv;
 
 		/* Export entries use use-statement semantics: written names are
-		 * absolute, independent of the current namespace. */
+		 * absolute, independent of the current namespace. Original case is
+		 * preserved — extension autoloading (PSR-4) is case-sensitive. */
 		if (name_ast->attr == ZEND_NAME_FQ) {
 			fqcn = zend_resolve_class_name(zend_ast_get_str(name_ast), ZEND_NAME_FQ);
 		} else if (name_ast->attr == ZEND_NAME_NOT_FQ) {
@@ -11340,6 +11340,17 @@ static void zend_compile_module_def(const zend_ast *ast) /* {{{ */
 		}
 		fqcn = zend_new_interned_string(fqcn);
 
+		if (export_ast->kind == ZEND_AST_MODULE_EXPORT_EXTENSION) {
+			/* Exported named extension: carried as a bare FQN. `use module`
+			 * injects it into the importer's extension import set, so there is
+			 * no alias (extensions are activated, never short-named). */
+			ZVAL_STR(&zv, fqcn);
+			zend_hash_next_index_insert(extensions, &zv);
+			continue;
+		}
+
+		zend_ast *alias_ast = export_ast->child[1];
+		zend_string *alias;
 		if (alias_ast) {
 			alias = zend_string_copy(zend_ast_get_str(alias_ast));
 		} else {
@@ -11356,16 +11367,25 @@ static void zend_compile_module_def(const zend_ast *ast) /* {{{ */
 		zend_string_release_ex(alias, 0);
 	}
 
-	zval fqmn_zv, exports_zv;
-	ZVAL_STR(&fqmn_zv, fqmn);
+	/* op2 packs both surfaces the definition installs: [0] the export map,
+	 * [1] the exported-extension list. See zend_lang_module_register. */
+	zend_array *payload = zend_new_array(2);
+	zval exports_zv, extensions_zv, payload_zv;
 	ZVAL_ARR(&exports_zv, exports);
+	ZVAL_ARR(&extensions_zv, extensions);
+	zend_hash_index_add_new(payload, 0, &exports_zv);
+	zend_hash_index_add_new(payload, 1, &extensions_zv);
+	ZVAL_ARR(&payload_zv, payload);
+
+	zval fqmn_zv;
+	ZVAL_STR(&fqmn_zv, fqmn);
 
 	zend_op *opline = get_next_op();
 	opline->opcode = ZEND_REGISTER_MODULE;
 	opline->op1_type = IS_CONST;
 	opline->op1.constant = zend_add_literal(&fqmn_zv);
 	opline->op2_type = IS_CONST;
-	opline->op2.constant = zend_add_literal(&exports_zv);
+	opline->op2.constant = zend_add_literal(&payload_zv);
 	opline->result_type = IS_UNUSED;
 }
 /* }}} */
@@ -11400,6 +11420,20 @@ static void zend_compile_use_module(const zend_ast *ast) /* {{{ */
 		zend_error_noreturn(E_COMPILE_ERROR,
 			"Module %s is not defined; load its definition file before this file "
 			"or register a loader with module_loader_register()", ZSTR_VAL(fqmn));
+	}
+
+	/* Activate the module's exported extensions: feed each into this file's
+	 * extension import set, exactly as a direct `use extension` would. From
+	 * here dispatch, autoload-on-miss, and conflict resolution are identical
+	 * to a hand-written import (the import set is their only key). */
+	if (m->extensions) {
+		zval *ext_name_zv;
+		ZEND_HASH_FOREACH_VAL(m->extensions, ext_name_zv) {
+			zend_string *ext_name = Z_STR_P(ext_name_zv);
+			zend_string *ext_name_lc = zend_string_tolower(ext_name);
+			zend_extension_imports_add(ext_name, ext_name_lc);
+			zend_string_release(ext_name_lc);
+		} ZEND_HASH_FOREACH_END();
 	}
 
 	if (alias_ast) {

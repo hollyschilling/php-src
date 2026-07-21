@@ -133,13 +133,17 @@ typedef struct _zend_file_context {
 	HashTable seen_symbols;
 } zend_file_context;
 
-/* A registered module definition: its FQMN and export surface. */
+/* A registered module definition: its FQMN, class export surface, and the
+ * named extensions it exports (activated in importers by `use module`). */
 typedef struct _zend_lang_module {
 	zend_string *fqmn;
-	zend_array  *exports; /* export alias -> canonical FQCN (string zvals) */
+	zend_array  *exports;    /* export alias -> canonical FQCN (string zvals) */
+	zend_array  *extensions; /* packed list of exported named-extension FQNs
+	                          * (original-case string zvals); injected into an
+	                          * importer's extension import set by `use module` */
 } zend_lang_module;
 
-ZEND_API zend_result zend_lang_module_register(zend_string *fqmn, zend_array *exports);
+ZEND_API zend_result zend_lang_module_register(zend_string *fqmn, zend_array *payload);
 ZEND_API zend_lang_module *zend_lang_module_get(zend_string *fqmn);
 void zend_lang_modules_shutdown(void);
 

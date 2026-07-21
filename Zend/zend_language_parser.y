@@ -480,6 +480,25 @@ module_export:
 			  }
 			  zend_ast_destroy($1);
 			  $$ = zend_ast_create(ZEND_AST_MODULE_EXPORT, $2, $4); }
+	|	T_STRING T_EXTENSION name ';'
+			{ if (!zend_string_equals_literal(zend_ast_get_str($1), "export")) {
+			      /* YYERROR from an action skips this rule's RHS destructors. */
+			      zend_ast_destroy($1);
+			      zend_ast_destroy($3);
+			      zend_throw_exception(zend_ce_compile_error,
+			          "Unexpected statement in module definition block, expecting 'export'", 0);
+			      YYERROR;
+			  }
+			  zend_ast_destroy($1);
+			  $$ = zend_ast_create(ZEND_AST_MODULE_EXPORT_EXTENSION, $3); }
+	|	T_STRING T_EXTENSION name T_AS T_STRING ';'
+			{ $$ = NULL;
+			  zend_ast_destroy($1);
+			  zend_ast_destroy($3);
+			  zend_ast_destroy($5);
+			  zend_throw_exception(zend_ce_compile_error,
+			      "Exported extensions cannot be aliased; an extension is activated, not named", 0);
+			  YYERROR; }
 ;
 
 group_use_declaration:

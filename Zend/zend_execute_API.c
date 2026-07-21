@@ -1896,17 +1896,34 @@ zend_class_entry *zend_fetch_class_with_scope(
 	return ce;
 }
 
+static zend_always_inline void zend_lang_module_keep_array(zend_array *arr)
+{
+	if (arr && !(GC_FLAGS(arr) & IS_ARRAY_IMMUTABLE)) {
+		GC_ADDREF(arr);
+	}
+}
+
+static zend_always_inline void zend_lang_module_drop_array(zend_array *arr)
+{
+	if (arr && !(GC_FLAGS(arr) & IS_ARRAY_IMMUTABLE)) {
+		zend_array_release(arr);
+	}
+}
+
 static void zend_lang_module_dtor(zval *zv)
 {
 	zend_lang_module *m = Z_PTR_P(zv);
 	zend_string_release_ex(m->fqmn, 0);
-	if (m->exports && !(GC_FLAGS(m->exports) & IS_ARRAY_IMMUTABLE)) {
-		zend_array_release(m->exports);
-	}
+	zend_lang_module_drop_array(m->exports);
+	zend_lang_module_drop_array(m->extensions);
 	efree(m);
 }
 
-ZEND_API zend_result zend_lang_module_register(zend_string *fqmn, zend_array *exports)
+/* The register opcode carries a single const array `payload` packing the two
+ * surfaces a definition installs: payload[0] is the export map (alias -> FQCN),
+ * payload[1] the list of exported named-extension FQNs. Keeping both in one
+ * operand leaves the ZEND_REGISTER_MODULE opcode a plain (CONST, CONST). */
+ZEND_API zend_result zend_lang_module_register(zend_string *fqmn, zend_array *payload)
 {
 	zend_lang_module *m;
 
@@ -1918,12 +1935,15 @@ ZEND_API zend_result zend_lang_module_register(zend_string *fqmn, zend_array *ex
 		return FAILURE;
 	}
 
+	zval *exports_zv = zend_hash_index_find(payload, 0);
+	zval *extensions_zv = zend_hash_index_find(payload, 1);
+
 	m = emalloc(sizeof(zend_lang_module));
 	m->fqmn = zend_string_copy(fqmn);
-	m->exports = exports;
-	if (exports && !(GC_FLAGS(exports) & IS_ARRAY_IMMUTABLE)) {
-		GC_ADDREF(exports);
-	}
+	m->exports = exports_zv ? Z_ARR_P(exports_zv) : NULL;
+	m->extensions = extensions_zv ? Z_ARR_P(extensions_zv) : NULL;
+	zend_lang_module_keep_array(m->exports);
+	zend_lang_module_keep_array(m->extensions);
 	zend_hash_add_new_ptr(EG(lang_modules), m->fqmn, m);
 	return SUCCESS;
 }
