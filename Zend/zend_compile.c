@@ -3283,6 +3283,20 @@ static bool is_this_fetch(const zend_ast *ast) /* {{{ */
 			}
 			return true;
 		}
+		/* In a mutating extension body the receiver variable is the frame's
+		 * This: compile its property and method accesses through the $this
+		 * forms so receiver writes land in place (bypassing value-class CoW
+		 * separation) and nested mutating calls follow the $this chain rule,
+		 * exactly as in native mutating struct methods. Plain value uses of
+		 * the variable, and uses inside nested closures, stay ordinary CV
+		 * accesses of the same object. */
+		if (UNEXPECTED(CG(extension_receiver) != NULL)
+		 && Z_TYPE_P(name) == IS_STRING
+		 && CG(active_op_array)
+		 && (CG(active_op_array)->fn_flags2 & ZEND_ACC2_MUTATING)
+		 && zend_string_equals(Z_STR_P(name), CG(extension_receiver))) {
+			return true;
+		}
 	}
 
 	return false;
@@ -9032,7 +9046,11 @@ static zend_string *zend_begin_method_decl(zend_op_array *op_array, zend_string 
 		 * cannot be checked here: whether the consumer is a struct is only
 		 * known at flattening (zend_add_trait_method). */
 		if (!(ce->ce_flags2 & ZEND_ACC2_VALUE_CLASS)
-		 && !(ce->ce_flags & (ZEND_ACC_TRAIT|ZEND_ACC_INTERFACE))) {
+		 && !(ce->ce_flags & (ZEND_ACC_TRAIT|ZEND_ACC_INTERFACE))
+		 && CG(extension_receiver) == NULL) {
+			/* Extension bodies compile against a synthetic CE; whether the
+			 * target is a struct is only known when the extension binds
+			 * (ZEND_BIND_EXTENSION validates it there). */
 			zend_error_noreturn(E_COMPILE_ERROR,
 				"Cannot declare mutating method %s::%s() outside a struct",
 				ZSTR_VAL(ce->name), ZSTR_VAL(name));
@@ -10434,6 +10452,13 @@ static void zend_compile_extension_decl(zend_ast *ast) /* {{{ */
 	ZEND_HASH_MAP_FOREACH_PTR(&ext_ce->function_table, ext_fn) {
 		ext_fn->common.fn_flags |= ZEND_ACC_NEVER_CACHE;
 		if (is_scalar_target) {
+			if (UNEXPECTED(ext_fn->common.fn_flags2 & ZEND_ACC2_MUTATING)) {
+				/* Scalars bind by value through the This handoff; there is
+				 * no caller slot to write back to. Deliberately unsupported. */
+				zend_error_noreturn(E_COMPILE_ERROR,
+					"Extension method %s() for scalar target %s cannot be mutating",
+					ZSTR_VAL(ext_fn->common.function_name), ZSTR_VAL(target_name));
+			}
 			/* Keep these bodies interpreted: generated code must never
 			 * observe the non-object receiver handoff in This. */
 			ext_fn->common.fn_flags2 |= ZEND_ACC2_SCALAR_RECEIVER;
