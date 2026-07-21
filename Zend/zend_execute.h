@@ -432,6 +432,29 @@ static zend_always_inline void zend_vm_stack_free_call_frame(zend_execute_data *
 	zend_vm_stack_free_call_frame_ex(ZEND_CALL_INFO(call), call);
 }
 
+/* Release a frame's This under ZEND_CALL_RELEASE_THIS. Normally this holds
+ * an object pointer — sometimes with no object type bits set (closure
+ * delayed-release frames write only Z_OBJ). Scalar extension methods instead
+ * carry their receiver by value with its own type bits (IS_FALSE..IS_ARRAY),
+ * which legacy frames never use here. Must not dereference call->func:
+ * trampoline-style functions are freed before this point. */
+static zend_always_inline void zend_vm_release_call_frame_this(zend_execute_data *call)
+{
+	zval *this_zv = &call->This;
+
+	if (UNEXPECTED(Z_TYPE_P(this_zv) >= IS_FALSE && Z_TYPE_P(this_zv) <= IS_ARRAY)) {
+		/* scalar extension receiver, stored by value */
+		if (Z_REFCOUNTED_P(this_zv)) {
+			zend_refcounted *rc = Z_COUNTED_P(this_zv);
+			if (GC_DELREF(rc) == 0) {
+				rc_dtor_func(rc);
+			}
+		}
+	} else {
+		OBJ_RELEASE(Z_OBJ_P(this_zv));
+	}
+}
+
 zend_execute_data *zend_vm_stack_copy_call_frame(
 	zend_execute_data *call, uint32_t passed_args, uint32_t additional_args);
 
