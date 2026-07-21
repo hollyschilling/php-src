@@ -1784,6 +1784,7 @@ PHP_ADD_SOURCES([Zend], m4_normalize([
     zend_max_execution_timer.c
     zend_multibyte.c
     zend_extension_methods.c
+    zend_surfaces.c
     zend_object_handlers.c
     zend_objects_API.c
     zend_objects.c

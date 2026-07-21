@@ -66,6 +66,7 @@ void init_op_array(zend_op_array *op_array, zend_function_type type, int initial
 	op_array->doc_comment = NULL;
 	op_array->attributes = NULL;
 	op_array->extension_imports = NULL;
+	op_array->surface_grants = NULL;
 
 	op_array->arg_info = NULL;
 	op_array->num_args = 0;
@@ -363,6 +364,13 @@ ZEND_API void destroy_zend_class(zval *zv)
 					zend_hash_release(ce->attributes);
 				}
 
+				if (ce->surface_decls) {
+					zend_hash_release(ce->surface_decls);
+				}
+				if (ce->surface_members) {
+					zend_hash_release(ce->surface_members);
+				}
+
 				if (ce->num_interfaces > 0 && !(ce->ce_flags & ZEND_ACC_RESOLVED_INTERFACES)) {
 					uint32_t i;
 
@@ -624,6 +632,9 @@ ZEND_API void destroy_op_array(zend_op_array *op_array)
 	}
 	if (op_array->extension_imports) {
 		zend_hash_release(op_array->extension_imports);
+	}
+	if (op_array->surface_grants) {
+		zend_hash_release(op_array->surface_grants);
 	}
 	if (op_array->live_range) {
 		efree(op_array->live_range);

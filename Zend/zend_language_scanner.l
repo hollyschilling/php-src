@@ -629,6 +629,12 @@ static zend_op_array *zend_compile(zend_function_type type)
 			op_array->extension_imports = CG(file_context).extension_imports;
 			GC_ADDREF(op_array->extension_imports);
 		}
+		/* Likewise the file's final surface grant set (unless a body-local
+		 * grant already unshared this op_array's table). */
+		if (CG(file_context).surface_grants && !op_array->surface_grants) {
+			op_array->surface_grants = CG(file_context).surface_grants;
+			GC_ADDREF(op_array->surface_grants);
+		}
 		pass_two(op_array);
 		zend_oparray_context_end(&original_oparray_context);
 		zend_file_context_end(&original_file_context);
@@ -1603,6 +1609,24 @@ OPTIONAL_WHITESPACE_OR_COMMENTS ({WHITESPACE}|{MULTI_LINE_COMMENT}|{SINGLE_LINE_
 <ST_IN_SCRIPTING>"struct"{WHITESPACE_OR_COMMENTS}[a-zA-Z_\x80-\xff] {
 	yyless(6);
 	RETURN_TOKEN_WITH_IDENT(T_STRUCT);
+}
+
+/*
+ * Surfaces: `surface` is contextual, recognized only when followed by an
+ * identifier (a surface declaration in a class body) or by `[` (the
+ * surface[...] member modifier / grant clause).
+ */
+<ST_IN_SCRIPTING>"surface"{WHITESPACE_OR_COMMENTS}("extends"|"implements") {
+	yyless(7);
+	RETURN_TOKEN_WITH_STR(T_STRING, 0);
+}
+<ST_IN_SCRIPTING>"surface"{WHITESPACE_OR_COMMENTS}[a-zA-Z_\x80-\xff] {
+	yyless(7);
+	RETURN_TOKEN_WITH_IDENT(T_SURFACE);
+}
+<ST_IN_SCRIPTING>"surface"{OPTIONAL_WHITESPACE_OR_COMMENTS}"[" {
+	yyless(7);
+	RETURN_TOKEN_WITH_IDENT(T_SURFACE);
 }
 
 <ST_IN_SCRIPTING>"extends" {

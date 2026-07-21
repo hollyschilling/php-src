@@ -195,6 +195,24 @@ static void zend_persist_attributes_calc(HashTable *attributes)
 	}
 }
 
+static void zend_persist_surface_table_calc(HashTable *ht)
+{
+	if (!zend_shared_alloc_get_xlat_entry(ht)
+	 && (ZCG(current_persistent_script)->corrupted
+	  || !zend_accel_in_shm(ht))) {
+		Bucket *p;
+
+		zend_shared_alloc_register_xlat_entry(ht, ht);
+		ADD_SIZE(sizeof(HashTable));
+		zend_hash_persist_calc(ht);
+
+		ZEND_HASH_MAP_FOREACH_BUCKET(ht, p) {
+			ADD_INTERNED_STRING(p->key);
+			zend_persist_zval_calc(&p->val);
+		} ZEND_HASH_FOREACH_END();
+	}
+}
+
 static void zend_persist_extension_imports_calc(HashTable *imports)
 {
 	if (!zend_shared_alloc_get_xlat_entry(imports)
@@ -341,6 +359,10 @@ static void zend_persist_op_array_calc_ex(zend_op_array *op_array)
 
 	if (op_array->extension_imports) {
 		zend_persist_extension_imports_calc(op_array->extension_imports);
+	}
+
+	if (op_array->surface_grants) {
+		zend_persist_extension_imports_calc(op_array->surface_grants);
 	}
 
 	if (op_array->try_catch_array) {
@@ -556,6 +578,13 @@ void zend_persist_class_entry_calc(zend_class_entry *ce)
 
 		if (ce->attributes) {
 			zend_persist_attributes_calc(ce->attributes);
+		}
+
+		if (ce->surface_decls) {
+			zend_persist_surface_table_calc(ce->surface_decls);
+		}
+		if (ce->surface_members) {
+			zend_persist_surface_table_calc(ce->surface_members);
 		}
 
 		if (ce->num_interfaces) {

@@ -24,6 +24,7 @@
 #include "zend_compile.h"
 #include "zend_constants.h"
 #include "zend_extension_methods.h"
+#include "zend_surfaces.h"
 #include "zend_llist.h"
 #include "zend_API.h"
 #include "zend_exceptions.h"
@@ -405,6 +406,7 @@ void zend_file_context_begin(zend_file_context *prev_context) /* {{{ */
 	FC(imports_function) = NULL;
 	FC(imports_const) = NULL;
 	FC(extension_imports) = NULL;
+	FC(surface_grants) = NULL;
 	FC(current_namespace) = NULL;
 	FC(in_namespace) = 0;
 	FC(has_bracketed_namespaces) = 0;
@@ -420,6 +422,9 @@ void zend_file_context_end(const zend_file_context *prev_context) /* {{{ */
 	if (FC(extension_imports)) {
 		zend_hash_release(FC(extension_imports));
 	}
+	if (FC(surface_grants)) {
+		zend_hash_release(FC(surface_grants));
+	}
 	CG(file_context) = *prev_context;
 }
 /* }}} */
@@ -433,6 +438,7 @@ void zend_init_compiler_data_structures(void) /* {{{ */
 	CG(in_compilation) = 0;
 	CG(skip_shebang) = 0;
 	CG(extension_receiver) = NULL;
+	CG(pending_member_surfaces) = NULL;
 
 	CG(encoding_declared) = 0;
 	CG(memoized_exprs) = NULL;
@@ -983,6 +989,20 @@ uint32_t zend_modifier_list_to_flags(zend_modifier_target target, zend_ast *modi
 	const zend_ast_list *modifier_list = zend_ast_get_list(modifiers);
 
 	for (uint32_t i = 0; i < modifier_list->children; i++) {
+		if (modifier_list->child[i]->kind == ZEND_AST_SURFACE_NAMES) {
+			/* surface[...] composes with the other modifiers for properties,
+			 * methods, and class constants; the names are extracted
+			 * separately via zend_surface_names_from_modifiers(). */
+			if (target != ZEND_MODIFIER_TARGET_PROPERTY
+			 && target != ZEND_MODIFIER_TARGET_METHOD
+			 && target != ZEND_MODIFIER_TARGET_CONSTANT) {
+				zend_throw_exception_ex(zend_ce_compile_error, 0,
+					"Cannot use the surface modifier on a %s",
+					target == ZEND_MODIFIER_TARGET_CPP ? "parameter" : "property hook");
+				return 0;
+			}
+			continue;
+		}
 		uint32_t token = (uint32_t) Z_LVAL_P(zend_ast_get_zval(modifier_list->child[i]));
 		uint32_t new_flag = zend_modifier_token_to_flag(target, token);
 		if (!new_flag) {
@@ -1002,6 +1022,51 @@ uint32_t zend_modifier_list_to_flags(zend_modifier_target target, zend_ast *modi
 	}
 
 	return flags;
+}
+
+/* Surfaces: pull the surface[...] name list out of a member modifier list.
+ * Multiple surface[...] groups on one member merge into a single list. */
+zend_ast *zend_surface_names_from_modifiers(zend_ast *modifiers)
+{
+	zend_ast *names = NULL;
+
+	if (!modifiers) {
+		return NULL;
+	}
+	const zend_ast_list *modifier_list = zend_ast_get_list(modifiers);
+	for (uint32_t i = 0; i < modifier_list->children; i++) {
+		zend_ast *child = modifier_list->child[i];
+		if (child->kind != ZEND_AST_SURFACE_NAMES) {
+			continue;
+		}
+		if (!names) {
+			names = child;
+		} else {
+			const zend_ast_list *extra = zend_ast_get_list(child);
+			for (uint32_t j = 0; j < extra->children; j++) {
+				names = zend_ast_list_add(names, extra->child[j]);
+			}
+		}
+	}
+	return names;
+}
+
+/* Surfaces: a surface member may not carry an explicit get-visibility
+ * (surface[...] occupies that slot) and may not be static (deferred to
+ * future scope by the RFC). Set-visibility (private(set) etc.) composes. */
+bool zend_surface_member_modifiers_valid(uint32_t flags)
+{
+	if (flags & ZEND_ACC_PPP_MASK) {
+		zend_throw_exception(zend_ce_compile_error,
+			"Cannot combine the surface modifier with public, protected, or private", 0);
+		return false;
+	}
+	if (flags & ZEND_ACC_STATIC) {
+		zend_throw_exception(zend_ce_compile_error,
+			"Cannot use the surface modifier on a static member (not yet supported)", 0);
+		return false;
+	}
+	return true;
 }
 
 uint32_t zend_add_class_modifier(uint32_t flags, uint32_t new_flag) /* {{{ */
@@ -1949,6 +2014,14 @@ static bool zend_try_ct_eval_class_const(zval *zv, zend_string *class_name, zend
 		return false;
 	}
 
+	/* Surfaces: never substitute a surface constant at compile time — the
+	 * access must go through the runtime check against the fetching
+	 * op_array's grants. */
+	if (cc->ce->surface_members
+	 && zend_surfaces_member_set(cc->ce, 'c', name)) {
+		return false;
+	}
+
 	c = &cc->value;
 
 	/* Substitute case-sensitive (or lowercase) persistent class constants */
@@ -2135,6 +2208,8 @@ ZEND_API void zend_initialize_class_data(zend_class_entry *ce, bool nullify_hand
 	ce->default_static_members_count = 0;
 	ce->properties_info_table = NULL;
 	ce->attributes = NULL;
+	ce->surface_decls = NULL;
+	ce->surface_members = NULL;
 	ce->enum_backing_type = IS_UNDEF;
 	ce->backed_enum_table = NULL;
 
@@ -5725,6 +5800,8 @@ static void zend_compile_static_call(znode *result, zend_ast *ast, uint32_t type
 static zend_class_entry *zend_compile_class_decl(znode *result, const zend_ast *ast, bool toplevel);
 static void zend_compile_extension_decl(zend_ast *ast);
 static void zend_extension_imports_add(zend_string *name, zend_string *name_lc);
+static void zend_surfaces_record_member(
+	zend_class_entry *ce, char kind, const zend_string *member_name, const zend_ast *names_ast);
 
 static void zend_compile_new(znode *result, zend_ast *ast) /* {{{ */
 {
@@ -8621,6 +8698,10 @@ static zend_string *zend_begin_method_decl(zend_op_array *op_array, zend_string 
 	zend_class_entry *ce = CG(active_class_entry);
 	bool in_interface = (ce->ce_flags & ZEND_ACC_INTERFACE) != 0;
 	uint32_t fn_flags = op_array->fn_flags;
+	/* Consume any surface[...] assignment before the body compiles (it may
+	 * contain nested classes with surface members of their own). */
+	const zend_ast *member_surfaces = CG(pending_member_surfaces);
+	CG(pending_member_surfaces) = NULL;
 
 	zend_string *lcname;
 
@@ -8728,6 +8809,21 @@ static zend_string *zend_begin_method_decl(zend_op_array *op_array, zend_string 
 	 && zend_is_value_class_forbidden_magic_method(lcname)) {
 		zend_error_noreturn(E_COMPILE_ERROR, "Struct %s cannot include magic method %s()",
 			ZSTR_VAL(ce->name), ZSTR_VAL(name));
+	}
+
+	if (member_surfaces) {
+		/* Magic methods dispatch through class-entry slots and handlers, not
+		 * the method-resolution path where the surface check lives, so they
+		 * cannot be gated. The constructor is the exception: `new` is gated
+		 * via get_constructor. */
+		if (ZSTR_LEN(lcname) >= 2
+		 && ZSTR_VAL(lcname)[0] == '_' && ZSTR_VAL(lcname)[1] == '_'
+		 && !zend_string_equals_literal(lcname, "__construct")) {
+			zend_error_noreturn(E_COMPILE_ERROR,
+				"Magic method %s::%s() cannot be a surface member",
+				ZSTR_VAL(ce->name), ZSTR_VAL(name));
+		}
+		zend_surfaces_record_member(ce, 'm', lcname, member_surfaces);
 	}
 
 	zend_add_magic_method(ce, (zend_function *) op_array, lcname);
@@ -8880,6 +8976,19 @@ static zend_op_array *zend_compile_func_decl_ex(
 	if (FC(extension_imports)) {
 		op_array->extension_imports = FC(extension_imports);
 		GC_ADDREF(op_array->extension_imports);
+	}
+	/* Snapshot the lexically active surface grants. Arrow functions inherit
+	 * the enclosing body's grants (they auto-capture their scope); long
+	 * closures and named functions start from the file-level set only. */
+	{
+		HashTable *grants_src = FC(surface_grants);
+		if (decl->kind == ZEND_AST_ARROW_FUNC && orig_op_array->surface_grants) {
+			grants_src = orig_op_array->surface_grants;
+		}
+		if (grants_src) {
+			op_array->surface_grants = grants_src;
+			GC_ADDREF(grants_src);
+		}
 	}
 	op_array->fn_flags |= decl->flags;
 	op_array->line_start = decl->start_lineno;
@@ -9296,11 +9405,135 @@ static void zend_compile_property_hooks(
 	}
 }
 
+/* Surfaces: compile the `surface Name (implements Iface)?;` statements of a
+ * class body into ce->surface_decls, appending any bound interfaces to the
+ * class's interface list (they are implemented nominally). Runs before the
+ * body's members compile so a member may name any surface of the class
+ * regardless of declaration order. */
+static void zend_surfaces_compile_declarations(zend_class_entry *ce, const zend_ast *stmt_ast)
+{
+	const zend_ast_list *list = zend_ast_get_list((zend_ast *) stmt_ast);
+
+	for (uint32_t i = 0; i < list->children; i++) {
+		const zend_ast *decl_ast = list->child[i];
+		if (!decl_ast || decl_ast->kind != ZEND_AST_SURFACE_DECL) {
+			continue;
+		}
+		if (ce->ce_flags & ZEND_ACC_INTERFACE) {
+			zend_error_noreturn(E_COMPILE_ERROR,
+				"Interface %s cannot declare surfaces", ZSTR_VAL(ce->name));
+		}
+		if (ce->ce_flags & ZEND_ACC_TRAIT) {
+			zend_error_noreturn(E_COMPILE_ERROR,
+				"Trait %s cannot declare surfaces (not yet supported)", ZSTR_VAL(ce->name));
+		}
+
+		zend_string *name = zend_new_interned_string(
+			zend_string_copy(zend_ast_get_str(decl_ast->child[0])));
+		zval iface_zv;
+
+		if (decl_ast->child[1]) {
+			zend_string *iface_name = zend_resolve_const_class_name_reference(
+				decl_ast->child[1], "interface name");
+			ZVAL_STR(&iface_zv, zend_new_interned_string(iface_name));
+
+			/* The surface-bound interface becomes an ordinary implemented
+			 * interface (nominal implementation); scoped conformance is
+			 * validated at link time. An explicit `implements` of the same
+			 * interface (or another surface's binding to it) is fine — only
+			 * one entry goes on the interface list. */
+			zend_string *iface_lc = zend_string_tolower(Z_STR(iface_zv));
+			bool already_listed = false;
+			for (uint32_t j = 0; j < ce->num_interfaces; j++) {
+				if (zend_string_equals(ce->interface_names[j].lc_name, iface_lc)) {
+					already_listed = true;
+					break;
+				}
+			}
+			if (already_listed) {
+				zend_string_release(iface_lc);
+			} else {
+				ce->num_interfaces++;
+				ce->interface_names =
+					erealloc(ce->interface_names, sizeof(zend_class_name) * ce->num_interfaces);
+				ce->interface_names[ce->num_interfaces - 1].name =
+					zend_string_copy(Z_STR(iface_zv));
+				ce->interface_names[ce->num_interfaces - 1].lc_name = iface_lc;
+			}
+		} else {
+			ZVAL_NULL(&iface_zv);
+		}
+
+		if (!ce->surface_decls) {
+			ALLOC_HASHTABLE(ce->surface_decls);
+			zend_hash_init(ce->surface_decls, 4, NULL, ZVAL_PTR_DTOR, 0);
+		}
+		if (!zend_hash_add(ce->surface_decls, name, &iface_zv)) {
+			zend_error_noreturn(E_COMPILE_ERROR,
+				"Cannot redeclare surface %s on %s", ZSTR_VAL(name), ZSTR_VAL(ce->name));
+		}
+		zend_string_release(name);
+	}
+}
+
+/* Surfaces: record a member's surface[...] assignment into the active
+ * class's surface_members table under a kind-prefixed key ('m'/'p'/'c').
+ * names_ast is the member's ZEND_AST_SURFACE_NAMES list. Name existence and
+ * ownership are validated at link time (the names may belong to an ancestor
+ * for overrides, unknown at compile time). */
+static void zend_surfaces_record_member(
+		zend_class_entry *ce, char kind, const zend_string *member_name, const zend_ast *names_ast)
+{
+	const zend_ast_list *names = zend_ast_get_list((zend_ast *) names_ast);
+
+	if (ce->ce_flags & ZEND_ACC_INTERFACE) {
+		zend_error_noreturn(E_COMPILE_ERROR,
+			"Interface %s cannot declare surface members", ZSTR_VAL(ce->name));
+	}
+	if (ce->ce_flags & ZEND_ACC_TRAIT) {
+		zend_error_noreturn(E_COMPILE_ERROR,
+			"Trait %s cannot declare surface members (not yet supported)", ZSTR_VAL(ce->name));
+	}
+
+	zval arr;
+	array_init(&arr);
+	for (uint32_t i = 0; i < names->children; i++) {
+		zend_string *name = zend_ast_get_str(names->child[i]);
+		for (uint32_t j = 0; j < i; j++) {
+			if (zend_string_equals(zend_ast_get_str(names->child[j]), name)) {
+				zend_error_noreturn(E_COMPILE_ERROR,
+					"Duplicate surface name %s in surface[...] modifier", ZSTR_VAL(name));
+			}
+		}
+		add_next_index_str(&arr, zend_new_interned_string(zend_string_copy(name)));
+	}
+
+	zend_string *key = zend_string_alloc(ZSTR_LEN(member_name) + 2, 0);
+	ZSTR_VAL(key)[0] = kind;
+	ZSTR_VAL(key)[1] = ':';
+	memcpy(ZSTR_VAL(key) + 2, ZSTR_VAL(member_name), ZSTR_LEN(member_name) + 1);
+	key = zend_new_interned_string(key);
+
+	if (!ce->surface_members) {
+		ALLOC_HASHTABLE(ce->surface_members);
+		zend_hash_init(ce->surface_members, 8, NULL, ZVAL_PTR_DTOR, 0);
+	}
+	if (!zend_hash_add(ce->surface_members, key, &arr)) {
+		/* Duplicate member declarations error out before reaching here. */
+		zval_ptr_dtor(&arr);
+	}
+	zend_string_release(key);
+}
+
 static void zend_compile_prop_decl(zend_ast *ast, zend_ast *type_ast, uint32_t flags, zend_ast *attr_ast) /* {{{ */
 {
 	const zend_ast_list *list = zend_ast_get_list(ast);
 	zend_class_entry *ce = CG(active_class_entry);
 	uint32_t i, children = list->children;
+	/* Consume any surface[...] assignment before hook bodies compile (they
+	 * may contain nested classes with surface members of their own). */
+	const zend_ast *member_surfaces = CG(pending_member_surfaces);
+	CG(pending_member_surfaces) = NULL;
 
 	if (ce->ce_flags & ZEND_ACC_ENUM) {
 		zend_error_noreturn(E_COMPILE_ERROR, "Enum %s cannot include properties", ZSTR_VAL(ce->name));
@@ -9384,6 +9617,10 @@ static void zend_compile_prop_decl(zend_ast *ast, zend_ast *type_ast, uint32_t f
 		if (zend_hash_exists(&ce->properties_info, name)) {
 			zend_error_noreturn(E_COMPILE_ERROR, "Cannot redeclare %s::$%s",
 				ZSTR_VAL(ce->name), ZSTR_VAL(name));
+		}
+
+		if (member_surfaces) {
+			zend_surfaces_record_member(ce, 'p', name, member_surfaces);
 		}
 
 		if (*value_ast_ptr) {
@@ -9479,6 +9716,8 @@ static void zend_compile_class_const_decl(zend_ast *ast, uint32_t flags, zend_as
 	const zend_ast_list *list = zend_ast_get_list(ast);
 	zend_class_entry *ce = CG(active_class_entry);
 	uint32_t i, children = list->children;
+	const zend_ast *member_surfaces = CG(pending_member_surfaces);
+	CG(pending_member_surfaces) = NULL;
 
 	for (i = 0; i < children; ++i) {
 		zend_class_constant *c;
@@ -9518,6 +9757,10 @@ static void zend_compile_class_const_decl(zend_ast *ast, uint32_t flags, zend_as
 
 			zend_error_noreturn(E_COMPILE_ERROR, "Cannot use %s as value for class constant %s::%s of type %s",
 				zend_zval_type_name(&value_zv), ZSTR_VAL(ce->name), ZSTR_VAL(name), ZSTR_VAL(type_str));
+		}
+
+		if (member_surfaces) {
+			zend_surfaces_record_member(ce, 'c', name, member_surfaces);
 		}
 
 		c = zend_declare_typed_class_constant(ce, name, &value_zv, flags, doc_comment, type);
@@ -9974,6 +10217,8 @@ static zend_class_entry *zend_compile_class_decl(znode *result, const zend_ast *
 		zend_enum_register_props(ce);
 	}
 
+	zend_surfaces_compile_declarations(ce, stmt_ast);
+
 	zend_compile_stmt(stmt_ast);
 
 	/* Reset lineno for final opcodes and errors */
@@ -10013,6 +10258,7 @@ static zend_class_entry *zend_compile_class_decl(znode *result, const zend_ast *
 				zend_build_properties_info_table(ce);
 				zend_inheritance_check_override(ce);
 				ce->ce_flags |= ZEND_ACC_LINKED;
+				zend_surfaces_link_class(ce);
 				zend_observer_class_linked_notify(ce, lcname);
 				return ce;
 			} else {
@@ -10024,6 +10270,7 @@ link_unbound:
 			zend_build_properties_info_table(ce);
 			zend_inheritance_check_override(ce);
 			ce->ce_flags |= ZEND_ACC_LINKED;
+			zend_surfaces_link_class(ce);
 		}
 	}
 
@@ -10254,12 +10501,78 @@ static void zend_extension_imports_add(zend_string *name, zend_string *name_lc) 
 }
 /* }}} */
 
+/* Surfaces: append one "lcclass:Surface" grant entry to a grant table,
+ * honoring the copy-on-write discipline (published tables are never
+ * mutated; a shared table is duplicated before the first body-local add). */
+static void zend_surface_grant_table_add(HashTable **table_ptr, zend_string *entry) /* {{{ */
+{
+	HashTable *table = *table_ptr;
+	zval zv;
+
+	if (table) {
+		zval *existing;
+		ZEND_HASH_PACKED_FOREACH_VAL(table, existing) {
+			if (zend_string_equals(Z_STR_P(existing), entry)) {
+				return; /* already granted */
+			}
+		} ZEND_HASH_FOREACH_END();
+		if (GC_REFCOUNT(table) > 1) {
+			HashTable *unshared = zend_array_dup(table);
+			zend_hash_release(table);
+			*table_ptr = table = unshared;
+		}
+	} else {
+		*table_ptr = table = zend_new_array(4);
+	}
+	ZVAL_STR(&zv, zend_new_interned_string(zend_string_copy(entry)));
+	zend_hash_next_index_insert(table, &zv);
+}
+/* }}} */
+
+/* Register the grants of one `use C with surface[A, B]` clause. File-level
+ * grants go into the file context (snapshotted into op_arrays compiled
+ * later, like extension imports); in-body grants go into the op_array being
+ * compiled. Whether the named surfaces exist on the named class cannot be
+ * checked here (the class is generally not loaded at compile time); an
+ * unknown surface simply never matches at runtime. */
+static void zend_surface_grants_register(zend_string *class_fq, const zend_ast *names_ast, bool in_body) /* {{{ */
+{
+	zend_string *lc = zend_string_tolower(class_fq);
+	const zend_ast_list *names = zend_ast_get_list((zend_ast *) names_ast);
+
+	for (uint32_t i = 0; i < names->children; i++) {
+		zend_string *surface = zend_ast_get_str(names->child[i]);
+		zend_string *entry = zend_string_alloc(ZSTR_LEN(lc) + 1 + ZSTR_LEN(surface), 0);
+
+		memcpy(ZSTR_VAL(entry), ZSTR_VAL(lc), ZSTR_LEN(lc));
+		ZSTR_VAL(entry)[ZSTR_LEN(lc)] = ':';
+		memcpy(ZSTR_VAL(entry) + ZSTR_LEN(lc) + 1, ZSTR_VAL(surface), ZSTR_LEN(surface) + 1);
+
+		if (in_body) {
+			zend_surface_grant_table_add(&CG(active_op_array)->surface_grants, entry);
+		} else {
+			/* The file-level table may be pointer-shared with op_arrays
+			 * compiled earlier; always leave those snapshots untouched. */
+			zend_surface_grant_table_add(&FC(surface_grants), entry);
+		}
+		zend_string_release(entry);
+	}
+	zend_string_release(lc);
+}
+/* }}} */
+
 static void zend_compile_use_extension(const zend_ast_list *list) /* {{{ */
 {
 	for (uint32_t i = 0; i < list->children; ++i) {
 		const zend_ast *use_ast = list->child[i];
-		zend_string *name = zend_ast_get_str(use_ast->child[0]);
+		zend_string *name;
 		zend_string *name_lc;
+
+		if (use_ast->kind == ZEND_AST_USE_GRANT) {
+			zend_error_noreturn(E_COMPILE_ERROR,
+				"Cannot grant surfaces on an extension import (extensions have no surfaces)");
+		}
+		name = zend_ast_get_str(use_ast->child[0]);
 
 		if (use_ast->child[1]) {
 			zend_error_noreturn(E_COMPILE_ERROR,
@@ -10283,7 +10596,15 @@ static void zend_compile_use(zend_ast *ast) /* {{{ */
 	HashTable *current_import;
 	bool case_sensitive = type == ZEND_SYMBOL_CONST;
 
+	/* `use` now also parses inside function/method bodies, where its only
+	 * role is granting surfaces; imports remain file-scoped, top level only. */
+	bool in_body = CG(active_op_array)->function_name != NULL;
+
 	if (type == ZEND_SYMBOL_EXTENSION) {
+		if (in_body) {
+			zend_error_noreturn(E_COMPILE_ERROR,
+				"\"use extension\" is only allowed at the top level of a file");
+		}
 		zend_compile_use_extension(list);
 		return;
 	}
@@ -10291,6 +10612,63 @@ static void zend_compile_use(zend_ast *ast) /* {{{ */
 
 	for (i = 0; i < list->children; ++i) {
 		const zend_ast *use_ast = list->child[i];
+		const zend_ast *grant_names = NULL;
+
+		if (use_ast->kind == ZEND_AST_USE_GRANT) {
+			if (type != ZEND_SYMBOL_CLASS) {
+				zend_error_noreturn(E_COMPILE_ERROR,
+					"Cannot grant surfaces on a %s import (only classes have surfaces)",
+					type == ZEND_SYMBOL_FUNCTION ? "function" : "constant");
+			}
+			grant_names = use_ast->child[1];
+			use_ast = use_ast->child[0];
+
+			if (in_body) {
+				/* Grant-only: resolve the name like a class reference in
+				 * code (imports + current namespace); no import happens. */
+				if (use_ast->child[1]) {
+					zend_error_noreturn(E_COMPILE_ERROR,
+						"Cannot alias in a surface grant inside a function (grants do not import)");
+				}
+				zend_string *fq = zend_resolve_class_name(
+					zend_ast_get_str(use_ast->child[0]), ZEND_NAME_NOT_FQ);
+				zend_surface_grants_register(fq, grant_names, /* in_body */ true);
+				zend_string_release(fq);
+				continue;
+			}
+
+			/* File level: `use X with surface[...]` on a name that is
+			 * already imported identically is grant-only (the RFC's
+			 * "already in scope" form); otherwise it imports as usual. An
+			 * unqualified name outside any namespace is also grant-only —
+			 * the import would be a warned-about no-op. */
+			if (!use_ast->child[1]) {
+				const char *unqualified;
+				size_t unqualified_len;
+				zend_string *name = zend_ast_get_str(use_ast->child[0]);
+				if (!zend_get_unqualified_name(name, &unqualified, &unqualified_len)) {
+					zend_string *lookup = zend_string_tolower(name);
+					zend_string *existing = zend_hash_find_ptr(current_import, lookup);
+					zend_string_release(lookup);
+					if (existing) {
+						zend_surface_grants_register(existing, grant_names, /* in_body */ false);
+						continue;
+					}
+					if (!FC(current_namespace)) {
+						zend_surface_grants_register(name, grant_names, /* in_body */ false);
+						continue;
+					}
+				}
+			}
+			zend_surface_grants_register(
+				zend_ast_get_str(use_ast->child[0]), grant_names, /* in_body */ false);
+			/* fall through to the ordinary import below */
+		} else if (in_body) {
+			zend_error_noreturn(E_COMPILE_ERROR,
+				"A use statement inside a function may only grant surfaces "
+				"(use ClassName with surface[...])");
+		}
+
 		zend_ast *old_name_ast = use_ast->child[0];
 		zend_ast *new_name_ast = use_ast->child[1];
 		zend_string *old_name = zend_ast_get_str(old_name_ast);
@@ -10361,7 +10739,10 @@ static void zend_compile_group_use(const zend_ast *ast) /* {{{ */
 
 	for (i = 0; i < list->children; i++) {
 		zend_ast *inline_use, *use = list->child[i];
-		zval *name_zval = zend_ast_get_zval(use->child[0]);
+		/* A member carrying a surface grant is wrapped; the name lives on
+		 * the inner use-elem. */
+		zend_ast *elem = use->kind == ZEND_AST_USE_GRANT ? use->child[0] : use;
+		zval *name_zval = zend_ast_get_zval(elem->child[0]);
 		zend_string *name = Z_STR_P(name_zval);
 		zend_string *compound_ns = zend_concat_names(ZSTR_VAL(ns), ZSTR_LEN(ns), ZSTR_VAL(name), ZSTR_LEN(name));
 		zend_string_release_ex(name, 0);
@@ -12469,6 +12850,18 @@ static void zend_compile_stmt(zend_ast *ast) /* {{{ */
 			break;
 		case ZEND_AST_USE_TRAIT:
 			zend_compile_use_trait(ast);
+			break;
+		case ZEND_AST_SURFACE_DECL:
+			/* Handled by zend_surfaces_compile_declarations() before the
+			 * class body's members compile. */
+			break;
+		case ZEND_AST_SURFACE_MEMBER:
+			/* Member declaration carrying a surface[...] modifier: expose
+			 * the name list to the member's compile function. */
+			ZEND_ASSERT(CG(pending_member_surfaces) == NULL);
+			CG(pending_member_surfaces) = ast->child[1];
+			zend_compile_stmt(ast->child[0]);
+			ZEND_ASSERT(CG(pending_member_surfaces) == NULL);
 			break;
 		case ZEND_AST_EXTENSION_DECL:
 			zend_compile_extension_decl(ast);

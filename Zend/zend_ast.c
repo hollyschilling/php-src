@@ -3044,6 +3044,10 @@ zend_ast * ZEND_FASTCALL zend_ast_with_attributes(zend_ast *ast, zend_ast *attr)
 	ZEND_ASSERT(attr->kind == ZEND_AST_ATTRIBUTE_LIST);
 
 	switch (ast->kind) {
+	case ZEND_AST_SURFACE_MEMBER:
+		/* Attributes apply to the wrapped member declaration. */
+		ast->child[0] = zend_ast_with_attributes(ast->child[0], attr);
+		return ast;
 	case ZEND_AST_FUNC_DECL:
 	case ZEND_AST_CLOSURE:
 	case ZEND_AST_METHOD:
