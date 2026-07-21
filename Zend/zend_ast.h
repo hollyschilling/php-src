@@ -117,6 +117,7 @@ enum _zend_ast_kind {
 	ZEND_AST_MODULE_DECL,
 	/* "...Ts" in a generic type-argument list (pack expansion). */
 	ZEND_AST_GENERIC_ARG_SPREAD,
+	ZEND_AST_MODULE_EXPORT_EXTENSION,
 
 	/* 2 child nodes */
 	ZEND_AST_DIM = 2 << ZEND_AST_NUM_CHILDREN_SHIFT,
