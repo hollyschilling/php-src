@@ -148,6 +148,34 @@ C23_ENUM(zend_class_type, uint8_t) {
 	ZEND_USER_CLASS = 2,
 };
 
+/* Type parameters of a generic class template (ZEND_ACC2_GENERIC_TEMPLATE).
+ * Names are interned; bound_name is the resolved FQ class/interface name or
+ * NULL, with bound_kind a ZEND_GENERIC_BOUND_* constant giving the declared
+ * relation (implements vs extends), validated at stamp time. */
+typedef struct _zend_generic_param {
+	zend_string *name;
+	zend_string *bound_name;
+	uint32_t bound_kind;
+} zend_generic_param;
+
+typedef struct _zend_generic_params {
+	uint32_t num_params;
+	/* implements/interface-extends references whose arguments mention type
+	 * parameters (bare only, e.g. "App\Collection<T>"); excluded from
+	 * interface_names and resolved per instantiation at stamp time. */
+	uint32_t num_deferred_interfaces;
+	zend_string **deferred_interfaces;
+	zend_generic_param params[1];
+} zend_generic_params;
+
+/* Binding of a stamped instantiation (ZEND_ACC2_GENERIC_INSTANCE) back to
+ * its template: args[i] is the substituted type for template param i. */
+typedef struct _zend_generic_binding {
+	zend_class_entry *template_ce;
+	uint32_t num_args;
+	zend_type args[1];
+} zend_generic_binding;
+
 struct _zend_class_entry {
 	zend_class_type type;
 	zend_string *name;
@@ -237,6 +265,11 @@ struct _zend_class_entry {
 
 	uint32_t enum_backing_type;
 	HashTable *backed_enum_table;
+
+	/* allocated only for generic templates (ZEND_ACC2_GENERIC_TEMPLATE) */
+	zend_generic_params *generic_params;
+	/* allocated only for stamped instantiations (ZEND_ACC2_GENERIC_INSTANCE) */
+	zend_generic_binding *generic_binding;
 
 	zend_string *doc_comment;
 

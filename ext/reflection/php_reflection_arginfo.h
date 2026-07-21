@@ -1,5 +1,5 @@
 /* This is a generated file, edit php_reflection.stub.php instead.
- * Stub hash: d9ad4eb2a4cadbfdd5974376d7d9c6571159a085
+ * Stub hash: f8a160fa3e1cfa151ad0b806fb45984c2f5d9b4d
  * Has decl header: yes */
 
 ZEND_BEGIN_ARG_WITH_TENTATIVE_RETURN_TYPE_INFO_EX(arginfo_class_Reflection_getModifierNames, 0, 1, IS_ARRAY, 0)
@@ -205,6 +205,19 @@ ZEND_END_ARG_INFO()
 #define arginfo_class_ReflectionClass_isAnonymous arginfo_class_ReflectionFunctionAbstract_inNamespace
 
 #define arginfo_class_ReflectionClass_isInstantiable arginfo_class_ReflectionFunctionAbstract_inNamespace
+
+#define arginfo_class_ReflectionClass_isGenericTemplate arginfo_class_ReflectionFunctionAbstract_hasTentativeReturnType
+
+#define arginfo_class_ReflectionClass_isGenericInstantiation arginfo_class_ReflectionFunctionAbstract_hasTentativeReturnType
+
+#define arginfo_class_ReflectionClass_getGenericTypeParameters arginfo_class_ReflectionFunctionAbstract_getClosureUsedVariables
+
+#define arginfo_class_ReflectionClass_getGenericTypeArguments arginfo_class_ReflectionFunctionAbstract_getClosureUsedVariables
+
+ZEND_BEGIN_ARG_WITH_RETURN_OBJ_INFO_EX(arginfo_class_ReflectionClass_getGenericTemplate, 0, 0, ReflectionClass, 1)
+ZEND_END_ARG_INFO()
+
+#define arginfo_class_ReflectionClass_getGenericInterfaceNames arginfo_class_ReflectionFunctionAbstract_getClosureUsedVariables
 
 #define arginfo_class_ReflectionClass_isCloneable arginfo_class_ReflectionFunctionAbstract_inNamespace
 
@@ -823,6 +836,12 @@ ZEND_METHOD(ReflectionClass, isInternal);
 ZEND_METHOD(ReflectionClass, isUserDefined);
 ZEND_METHOD(ReflectionClass, isAnonymous);
 ZEND_METHOD(ReflectionClass, isInstantiable);
+ZEND_METHOD(ReflectionClass, isGenericTemplate);
+ZEND_METHOD(ReflectionClass, isGenericInstantiation);
+ZEND_METHOD(ReflectionClass, getGenericTypeParameters);
+ZEND_METHOD(ReflectionClass, getGenericTypeArguments);
+ZEND_METHOD(ReflectionClass, getGenericTemplate);
+ZEND_METHOD(ReflectionClass, getGenericInterfaceNames);
 ZEND_METHOD(ReflectionClass, isCloneable);
 ZEND_METHOD(ReflectionClass, getFileName);
 ZEND_METHOD(ReflectionClass, getStartLine);
@@ -1126,6 +1145,12 @@ static const zend_function_entry class_ReflectionClass_methods[] = {
 	ZEND_ME(ReflectionClass, isUserDefined, arginfo_class_ReflectionClass_isUserDefined, ZEND_ACC_PUBLIC)
 	ZEND_ME(ReflectionClass, isAnonymous, arginfo_class_ReflectionClass_isAnonymous, ZEND_ACC_PUBLIC)
 	ZEND_ME(ReflectionClass, isInstantiable, arginfo_class_ReflectionClass_isInstantiable, ZEND_ACC_PUBLIC)
+	ZEND_ME(ReflectionClass, isGenericTemplate, arginfo_class_ReflectionClass_isGenericTemplate, ZEND_ACC_PUBLIC)
+	ZEND_ME(ReflectionClass, isGenericInstantiation, arginfo_class_ReflectionClass_isGenericInstantiation, ZEND_ACC_PUBLIC)
+	ZEND_ME(ReflectionClass, getGenericTypeParameters, arginfo_class_ReflectionClass_getGenericTypeParameters, ZEND_ACC_PUBLIC)
+	ZEND_ME(ReflectionClass, getGenericTypeArguments, arginfo_class_ReflectionClass_getGenericTypeArguments, ZEND_ACC_PUBLIC)
+	ZEND_ME(ReflectionClass, getGenericTemplate, arginfo_class_ReflectionClass_getGenericTemplate, ZEND_ACC_PUBLIC)
+	ZEND_ME(ReflectionClass, getGenericInterfaceNames, arginfo_class_ReflectionClass_getGenericInterfaceNames, ZEND_ACC_PUBLIC)
 	ZEND_ME(ReflectionClass, isCloneable, arginfo_class_ReflectionClass_isCloneable, ZEND_ACC_PUBLIC)
 	ZEND_ME(ReflectionClass, getFileName, arginfo_class_ReflectionClass_getFileName, ZEND_ACC_PUBLIC)
 	ZEND_ME(ReflectionClass, getStartLine, arginfo_class_ReflectionClass_getStartLine, ZEND_ACC_PUBLIC)

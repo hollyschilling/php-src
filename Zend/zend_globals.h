@@ -205,6 +205,8 @@ struct _zend_executor_globals {
 	HashTable *function_table;	/* function symbol table */
 	HashTable *class_table;		/* class table */
 	HashTable *zend_constants;	/* constants table */
+	/* lc mangled names currently being stamped (cycle guard); lazily allocated */
+	HashTable *generics_stamping;
 
 	zval          *vm_stack_top;
 	zval          *vm_stack_end;
@@ -405,6 +407,8 @@ struct _zend_php_scanner_globals {
 	bool heredoc_scan_ahead;
 	int heredoc_indentation;
 	bool heredoc_indentation_uses_spaces;
+	/* open generic type-argument lists ('<' claimed as T_GENERIC_OPEN) */
+	uint32_t generic_depth;
 
 	/* original (unfiltered) script */
 	unsigned char *script_org;

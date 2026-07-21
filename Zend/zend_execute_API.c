@@ -30,6 +30,7 @@
 #include "zend_exceptions.h"
 #include "zend_closures.h"
 #include "zend_generators.h"
+#include "zend_generics.h"
 #include "zend_vm.h"
 #include "zend_float.h"
 #include "zend_fibers.h"
@@ -156,6 +157,7 @@ void init_executor(void) /* {{{ */
 	zend_hash_init(&EG(included_files), 8, NULL, NULL, 0);
 	zend_hash_init(&EG(autoload_current_classnames), 8, NULL, NULL, 0);
 	EG(extension_autoload_attempted) = NULL;
+	EG(generics_stamping) = NULL;
 
 	EG(ticks_count) = 0;
 
@@ -516,6 +518,11 @@ void shutdown_executor(void) /* {{{ */
 			zend_hash_destroy(EG(extension_autoload_attempted));
 			FREE_HASHTABLE(EG(extension_autoload_attempted));
 			EG(extension_autoload_attempted) = NULL;
+		}
+		if (EG(generics_stamping)) {
+			zend_hash_destroy(EG(generics_stamping));
+			FREE_HASHTABLE(EG(generics_stamping));
+			EG(generics_stamping) = NULL;
 		}
 
 		zend_stack_destroy(&EG(user_error_handlers_error_reporting));
@@ -1294,6 +1301,22 @@ ZEND_API zend_class_entry *zend_lookup_class_ex(zend_string *name, zend_string *
 		return ce;
 	}
 
+	/* Mangled generic names miss the class table until their instantiation is
+	 * stamped from the template. Stamping may itself load classes, so it is
+	 * only attempted at run-time. */
+	if (UNEXPECTED(memchr(ZSTR_VAL(lc_name), '<', ZSTR_LEN(lc_name)) != NULL)
+			&& !zend_is_compiling()) {
+		ce = zend_generics_stamp_instantiation(name, lc_name,
+			!(flags & ZEND_FETCH_CLASS_NO_AUTOLOAD));
+		if (!key) {
+			zend_string_release_ex(lc_name, 0);
+		}
+		if (ce && ce_cache) {
+			SET_CE_CACHE(ce_cache, ce);
+		}
+		return ce;
+	}
+
 	/* The compiler is not-reentrant. Make sure we autoload only during run-time. */
 	if ((flags & ZEND_FETCH_CLASS_NO_AUTOLOAD) || zend_is_compiling()) {
 		if (!key) {
@@ -1798,6 +1821,30 @@ check_fetch_type:
 				return NULL;
 			}
 			return ce;
+		case ZEND_FETCH_CLASS_TYPE_PARAM: {
+			uint32_t param_idx = fetch_type >> ZEND_FETCH_CLASS_TYPE_PARAM_SHIFT;
+			scope = zend_get_executed_scope();
+			if (UNEXPECTED(!scope || !scope->generic_binding)) {
+				zend_throw_or_error(fetch_type, NULL,
+					"Cannot resolve a type parameter when no generic binding is in scope");
+				return NULL;
+			}
+			ZEND_ASSERT(param_idx < scope->generic_binding->num_args);
+			zend_type arg = scope->generic_binding->args[param_idx];
+			if (UNEXPECTED(!ZEND_TYPE_HAS_NAME(arg))) {
+				zend_string *type_str = zend_type_to_string(arg);
+				zend_throw_or_error(fetch_type, NULL,
+					"Cannot use scalar type argument %s as a class", ZSTR_VAL(type_str));
+				zend_string_release(type_str);
+				return NULL;
+			}
+			ce = zend_lookup_class_ex(ZEND_TYPE_NAME(arg), NULL, fetch_type);
+			if (!ce) {
+				report_class_fetch_error(ZEND_TYPE_NAME(arg), fetch_type);
+				return NULL;
+			}
+			return ce;
+		}
 		case ZEND_FETCH_CLASS_AUTO: {
 				fetch_sub_type = zend_get_class_fetch_type(class_name);
 				if (UNEXPECTED(fetch_sub_type != ZEND_FETCH_CLASS_DEFAULT)) {

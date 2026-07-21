@@ -512,11 +512,40 @@ static void zend_persist_op_array_ex(zend_op_array *op_array, zend_persistent_sc
 			}
 			if (op_array->arg_info) {
 				zend_arg_info *arg_info = op_array->arg_info;
+				uint32_t num_args = op_array->num_args;
 				if (op_array->fn_flags & ZEND_ACC_HAS_RETURN_TYPE) {
 					arg_info--;
+					num_args++;
 				}
-				arg_info = zend_shared_alloc_get_xlat_entry(arg_info);
-				ZEND_ASSERT(arg_info != NULL);
+				if (UNEXPECTED(op_array->fn_flags2 & ZEND_ACC2_GENERIC_SUBST_ARG_INFO)) {
+					/* Type-substituted copy carried by a generic instantiation
+					 * clone: persist it separately from the template's array.
+					 * The source block is arena-allocated (with the template's
+					 * original stored one pointer before it): copy, don't free.
+					 * The persisted copy has no hidden pointer, so drop the
+					 * marker; immutable functions are never destroyed anyway. */
+					if (op_array->fn_flags & ZEND_ACC_VARIADIC) {
+						num_args++;
+					}
+					zend_arg_info *persisted = zend_shared_alloc_get_xlat_entry(arg_info);
+					if (!persisted) {
+						persisted = zend_shared_memdup_put(arg_info, sizeof(zend_arg_info) * num_args);
+						for (uint32_t i = 0; i < num_args; i++) {
+							if (persisted[i].name) {
+								zend_accel_store_interned_string(persisted[i].name);
+							}
+							zend_persist_type(&persisted[i].type);
+							if (persisted[i].doc_comment) {
+								zend_accel_store_interned_string(persisted[i].doc_comment);
+							}
+						}
+					}
+					arg_info = persisted;
+					op_array->fn_flags2 &= ~ZEND_ACC2_GENERIC_SUBST_ARG_INFO;
+				} else {
+					arg_info = zend_shared_alloc_get_xlat_entry(arg_info);
+					ZEND_ASSERT(arg_info != NULL);
+				}
 				if (op_array->fn_flags & ZEND_ACC_HAS_RETURN_TYPE) {
 					arg_info++;
 				}
@@ -1216,6 +1245,44 @@ zend_class_entry *zend_persist_class_entry(zend_class_entry *orig_ce)
 			}
 		}
 
+		if (ce->generic_params) {
+			zend_generic_params *generic_params = ce->generic_params;
+			for (uint32_t i = 0; i < generic_params->num_params; i++) {
+				zend_accel_store_interned_string(generic_params->params[i].name);
+				if (generic_params->params[i].bound_name) {
+					zend_accel_store_interned_string(generic_params->params[i].bound_name);
+				}
+			}
+			zend_string **deferred = NULL;
+			if (generic_params->deferred_interfaces) {
+				for (uint32_t i = 0; i < generic_params->num_deferred_interfaces; i++) {
+					zend_accel_store_interned_string(generic_params->deferred_interfaces[i]);
+				}
+				deferred = zend_shared_memdup(generic_params->deferred_interfaces,
+					sizeof(zend_string *) * generic_params->num_deferred_interfaces);
+			}
+			/* Arena-allocated at compile time: copy without freeing. */
+			ce->generic_params = zend_shared_memdup(generic_params,
+				sizeof(zend_generic_params)
+					+ (generic_params->num_params - 1) * sizeof(zend_generic_param));
+			ce->generic_params->deferred_interfaces = deferred;
+		}
+		if (ce->generic_binding) {
+			/* Preload-stamped instantiation. Arena-allocated: copy without
+			 * freeing; template_ce is remapped in zend_update_parent_ce. */
+			zend_generic_binding *binding = ce->generic_binding;
+			for (uint32_t i = 0; i < binding->num_args; i++) {
+				if (ZEND_TYPE_HAS_NAME(binding->args[i])) {
+					zend_string *type_name = ZEND_TYPE_NAME(binding->args[i]);
+					zend_accel_store_interned_string(type_name);
+					binding->args[i].ptr = type_name;
+				}
+			}
+			ce->generic_binding = zend_shared_memdup(binding,
+				sizeof(zend_generic_binding)
+					+ (binding->num_args - 1) * sizeof(zend_type));
+		}
+
 		ZEND_ASSERT(ce->backed_enum_table == NULL);
 	}
 
@@ -1269,6 +1336,15 @@ void zend_update_parent_ce(zend_class_entry *ce)
 						ce->interfaces[i] = tmp;
 					}
 				}
+			}
+		}
+
+		if (ce->generic_binding
+				&& ce->generic_binding->template_ce->type == ZEND_USER_CLASS) {
+			zend_class_entry *tmp =
+				zend_shared_alloc_get_xlat_entry(ce->generic_binding->template_ce);
+			if (tmp != NULL) {
+				ce->generic_binding->template_ce = tmp;
 			}
 		}
 
@@ -1442,6 +1518,10 @@ static void zend_accel_persist_class_table(HashTable *class_table)
 	    ZEND_HASH_MAP_FOREACH_BUCKET(class_table, p) {
 			if (EXPECTED(Z_TYPE(p->val) != IS_ALIAS_PTR)) {
 				ce = Z_PTR(p->val);
+				if (UNEXPECTED(ce->ce_flags2 & ZEND_ACC2_GENERIC_INSTANCE)) {
+					/* Bodies are shared with the template and JIT-ed there. */
+					continue;
+				}
 				ZEND_HASH_MAP_FOREACH_PTR(&ce->function_table, op_array) {
 					zend_accel_persist_jit_op_array(op_array, ce);
 				} ZEND_HASH_FOREACH_END();

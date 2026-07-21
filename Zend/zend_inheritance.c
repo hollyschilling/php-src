@@ -2458,8 +2458,12 @@ static void zend_add_trait_method(zend_class_entry *ce, zend_string *name, zend_
 
 	if ((existing_fn = zend_hash_find_ptr(&ce->function_table, key)) != NULL) {
 		/* if it is the same function with the same visibility and has not been assigned a class scope yet, regardless
-		 * of where it is coming from there is no conflict and we do not need to add it again */
+		 * of where it is coming from there is no conflict and we do not need to add it again.
+		 * The signature must match too: clones of one generic trait method share
+		 * their body across instantiations but carry substituted arg_info, and
+		 * e.g. Cache<int>::remember vs Cache<string>::remember must collide. */
 		if (existing_fn->op_array.opcodes == fn->op_array.opcodes &&
+			existing_fn->op_array.arg_info == fn->op_array.arg_info &&
 			(existing_fn->common.fn_flags & ZEND_ACC_PPP_MASK) == (fn->common.fn_flags & ZEND_ACC_PPP_MASK) &&
 			(existing_fn->common.scope->ce_flags & ZEND_ACC_TRAIT)) {
 			return;
@@ -3658,6 +3662,11 @@ ZEND_API zend_class_entry *zend_do_link_class(zend_class_entry *ce, zend_string 
 		parent = zend_fetch_class_by_name(
 			ce->parent_name, lc_parent_name,
 			ZEND_FETCH_CLASS_ALLOW_NEARLY_LINKED | ZEND_FETCH_CLASS_EXCEPTION | ZEND_FETCH_CLASS_NO_MODULE_GATE);
+		if (parent && UNEXPECTED(parent->ce_flags2 & ZEND_ACC2_GENERIC_TEMPLATE)) {
+			zend_throw_error(NULL, "Class %s cannot extend generic class %s without type arguments",
+				ZSTR_VAL(ce->name), ZSTR_VAL(parent->name));
+			return NULL;
+		}
 		if (!parent) {
 			check_unrecoverable_load_failure(ce);
 			return NULL;
@@ -3691,6 +3700,12 @@ ZEND_API zend_class_entry *zend_do_link_class(zend_class_entry *ce, zend_string 
 			}
 			if (UNEXPECTED(!(trait->ce_flags & ZEND_ACC_TRAIT))) {
 				zend_throw_error(NULL, "%s cannot use %s - it is not a trait", ZSTR_VAL(ce->name), ZSTR_VAL(trait->name));
+				free_alloca(traits_and_interfaces, use_heap);
+				return NULL;
+			}
+			if (UNEXPECTED(trait->ce_flags2 & ZEND_ACC2_GENERIC_TEMPLATE)) {
+				zend_throw_error(NULL, "%s cannot use generic trait %s without type arguments",
+					ZSTR_VAL(ce->name), ZSTR_VAL(trait->name));
 				free_alloca(traits_and_interfaces, use_heap);
 				return NULL;
 			}
@@ -3729,6 +3744,12 @@ ZEND_API zend_class_entry *zend_do_link_class(zend_class_entry *ce, zend_string 
 			if (UNEXPECTED(zend_module_inheritance_denied(ce, iface, ce->interface_names[i].name))) {
 				zend_throw_error(NULL, "Cannot implement interface %s of module %s from outside the module; import the module with 'use module'",
 					ZSTR_VAL(iface->name), ZSTR_VAL(iface->module_name));
+				free_alloca(traits_and_interfaces, use_heap);
+				return NULL;
+			}
+			if (UNEXPECTED(iface->ce_flags2 & ZEND_ACC2_GENERIC_TEMPLATE)) {
+				zend_throw_error(NULL, "%s cannot implement generic interface %s without type arguments",
+					ZSTR_VAL(ce->name), ZSTR_VAL(iface->name));
 				free_alloca(traits_and_interfaces, use_heap);
 				return NULL;
 			}
@@ -4091,6 +4112,12 @@ ZEND_API zend_class_entry *zend_try_early_bind(zend_class_entry *ce, zend_class_
 	inheritance_status status;
 	zend_class_entry *proto = NULL;
 	zend_class_entry *orig_linking_class;
+
+	if (UNEXPECTED(parent_ce->ce_flags2 & ZEND_ACC2_GENERIC_TEMPLATE)) {
+		/* Never early-bind against a generic template; the runtime link path
+		 * reports the missing type arguments. */
+		return NULL;
+	}
 
 	if (ce->ce_flags & ZEND_ACC_LINKED) {
 		ZEND_ASSERT(ce->parent == NULL);
