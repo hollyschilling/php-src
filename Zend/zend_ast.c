@@ -1856,6 +1856,7 @@ static ZEND_COLD void zend_ast_export_stmt(smart_str *str, zend_ast *ast, int in
 			case ZEND_AST_CLASS:
 			case ZEND_AST_USE_TRAIT:
 			case ZEND_AST_NAMESPACE:
+			case ZEND_AST_MODULE_DEF:
 			case ZEND_AST_DECLARE:
 				break;
 			case ZEND_AST_PROP_GROUP: {
@@ -2801,6 +2802,34 @@ simple_list:
 				smart_str_appends(str, "::");
 			}
 			zend_ast_export_name(str, ast->child[1], 0, indent);
+			break;
+		case ZEND_AST_MODULE_DECL:
+			smart_str_appends(str, "module ");
+			zend_ast_export_name(str, ast->child[0], 0, indent);
+			break;
+		case ZEND_AST_MODULE_DEF:
+			smart_str_appends(str, "module ");
+			zend_ast_export_name(str, ast->child[0], 0, indent);
+			smart_str_appends(str, " {\n");
+			zend_ast_export_stmt(str, ast->child[1], indent + 1);
+			zend_ast_export_indent(str, indent);
+			smart_str_appendc(str, '}');
+			break;
+		case ZEND_AST_MODULE_EXPORT:
+			smart_str_appends(str, "export ");
+			zend_ast_export_name(str, ast->child[0], 0, indent);
+			if (ast->child[1]) {
+				smart_str_appends(str, " as ");
+				zend_ast_export_name(str, ast->child[1], 0, indent);
+			}
+			break;
+		case ZEND_AST_USE_MODULE:
+			smart_str_appends(str, "use module ");
+			zend_ast_export_name(str, ast->child[0], 0, indent);
+			if (ast->child[1]) {
+				smart_str_appends(str, " as ");
+				zend_ast_export_name(str, ast->child[1], 0, indent);
+			}
 			break;
 		case ZEND_AST_NAMESPACE:
 			smart_str_appends(str, "namespace");
