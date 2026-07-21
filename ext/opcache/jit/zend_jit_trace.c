@@ -6134,6 +6134,64 @@ static zend_vm_opcode_handler_t zend_jit_trace(zend_jit_trace_rec *trace_buffer,
 							goto jit_failure;
 						}
 						goto done;
+					case ZEND_FETCH_OBJ_RECEIVER:
+						/* Scoped-borrow receiver fetch: emit for $this/CV
+						 * containers with a known class; other shapes run the
+						 * VM handler via the generic fallback. */
+						on_this = 0;
+						ce = NULL;
+						if (opline->op1_type == IS_UNUSED) {
+							op1_info = MAY_BE_OBJECT|MAY_BE_RC1|MAY_BE_RCN;
+							op1_addr = 0;
+							ce = op_array->scope;
+							on_this = 1;
+						} else if (opline->op1_type == IS_CV) {
+							op1_info = OP1_INFO();
+							if (!(op1_info & MAY_BE_OBJECT)) {
+								break;
+							}
+							op1_addr = OP1_REG_ADDR();
+							if (orig_op1_type != IS_UNKNOWN
+							 && (orig_op1_type & IS_TRACE_REFERENCE)) {
+								if (!zend_jit_fetch_reference(&ctx, opline, orig_op1_type, &op1_info, &op1_addr,
+										!ssa->var_info[ssa_op->op1_use].guarded_reference, 1)) {
+									goto jit_failure;
+								}
+								if (ssa->vars[ssa_op->op1_use].alias == NO_ALIAS) {
+									ssa->var_info[ssa_op->op1_def >= 0 ? ssa_op->op1_def : ssa_op->op1_use].guarded_reference = 1;
+								}
+							} else {
+								CHECK_OP1_TRACE_TYPE();
+							}
+							if (!(op1_info & MAY_BE_OBJECT)) {
+								break;
+							}
+							if (ssa->var_info && ssa->ops && ssa_op->op1_use >= 0) {
+								zend_ssa_var_info *op1_ssa = ssa->var_info + ssa_op->op1_use;
+								if (op1_ssa->ce && !op1_ssa->ce->create_object) {
+									ce = op1_ssa->ce;
+								}
+							}
+							if (!ce && op1_ce && !op1_ce->create_object) {
+								ce = op1_ce;
+							}
+						} else {
+							break;
+						}
+						if (!ce) {
+							break;
+						}
+						{
+							int r = zend_jit_fetch_obj_receiver(&ctx, opline, op_array,
+								op1_info, op1_addr, on_this, ce, RES_REG_ADDR());
+							if (r < 0) {
+								break;
+							}
+							if (!r) {
+								goto jit_failure;
+							}
+						}
+						goto done;
 					case ZEND_FETCH_STATIC_PROP_FUNC_ARG:
 						if (!JIT_G(current_frame)
 						 || !JIT_G(current_frame)->call
@@ -6269,6 +6327,13 @@ static zend_vm_opcode_handler_t zend_jit_trace(zend_jit_trace_rec *trace_buffer,
 						}
 						goto done;
 					case ZEND_FETCH_THIS:
+						if (opline->extended_value == ZEND_FETCH_THIS_WRITE) {
+							/* Property-write container $this: for a value-class
+							 * receiver the VM handler produces an INDIRECT into
+							 * the frame's This slot; the specialized copy+addref
+							 * load would break that. Use the VM handler. */
+							break;
+						}
 						delayed_fetch_this = 0;
 						if (ssa_op->result_def >= 0 && opline->result_type != IS_CV) {
 							if (zend_jit_may_delay_fetch_this(op_array, ssa, ssa_opcodes, ssa_op)) {
@@ -7042,7 +7107,17 @@ done:
 				}
 			}
 			if (init_opline) {
-				if (init_opline->opcode != ZEND_NEW
+				/* A frame whose receiver may be a value class can gain or lack
+				 * RELEASE_THIS in ways these static hints cannot capture:
+				 * separation takes ownership of $this mid-call, and a value
+				 * class constructor binds $this borrowed (NEW skips the
+				 * addref). Leave such frames on the generic flag-tested path. */
+				bool may_be_value_class = p->func && p->func->common.scope
+					&& (p->func->common.scope->ce_flags2 & ZEND_ACC2_VALUE_CLASS);
+
+				if (may_be_value_class) {
+					/* neither NO_NEED_RELEASE_THIS nor ALWAYS_RELEASE_THIS */
+				} else if (init_opline->opcode != ZEND_NEW
 				 && (init_opline->opcode != ZEND_INIT_METHOD_CALL
 				  || init_opline->op1_type == IS_UNDEF
 				  || (!(p->info & ZEND_JIT_TRACE_FAKE_INIT_CALL)
