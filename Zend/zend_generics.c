@@ -37,10 +37,12 @@ typedef struct {
 } zend_generic_name_slice;
 
 /* Strict structural parse of a mangled name: BASE '<' ARG (',' ARG)* '>'
- * with no whitespace; args may nest. Returns false on any malformation. */
-static bool zend_generics_parse_name(
+ * with no whitespace; args may nest. Returns false on any malformation.
+ * When allow_spread is set (compiler-generated deferred refs only), an arg
+ * may carry a "..." pack-expansion prefix; instantiation keys never may. */
+static bool zend_generics_parse_name_ex(
 		const zend_string *name, zend_generic_name_slice *base,
-		zend_generic_name_slice *args, uint32_t *num_args)
+		zend_generic_name_slice *args, uint32_t *num_args, bool allow_spread)
 {
 	const char *s = ZSTR_VAL(name);
 	size_t len = ZSTR_LEN(name);
@@ -84,6 +86,13 @@ static bool zend_generics_parse_name(
 			args[count].len = p - arg_start;
 			count++;
 			arg_start = p + 1;
+		} else if (c == '.') {
+			/* Accept exactly "..." as an arg prefix when spreads are legal. */
+			if (!allow_spread || depth != 0 || p != arg_start
+					|| p + 3 >= s + len || p[1] != '.' || p[2] != '.') {
+				return false;
+			}
+			p += 2;
 		} else if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
 				|| (c >= '0' && c <= '9') || c == '_' || c == '\\'
 				|| (unsigned char) c >= 0x80 || c == ',')) {
@@ -95,6 +104,13 @@ static bool zend_generics_parse_name(
 	}
 	*num_args = count;
 	return true;
+}
+
+static zend_always_inline bool zend_generics_parse_name(
+		const zend_string *name, zend_generic_name_slice *base,
+		zend_generic_name_slice *args, uint32_t *num_args)
+{
+	return zend_generics_parse_name_ex(name, base, args, num_args, /* allow_spread */ false);
 }
 
 static uint32_t zend_generics_scalar_mask(const zend_generic_name_slice *slice)
@@ -131,6 +147,46 @@ static uint32_t zend_generics_param_index(
 		}
 	}
 	return (uint32_t) -1;
+}
+
+/* Maps a template param index onto its argument slice in a binding of
+ * num_args arguments: params before the pack bind left-to-right, params
+ * after it right-to-left, and the pack takes the middle slice (>= 1 by the
+ * arity check). Identity mapping when the template declares no pack. */
+static void zend_generics_param_arg_slice(
+		const zend_generic_params *gp, uint32_t num_args,
+		uint32_t param_idx, uint32_t *start, uint32_t *count)
+{
+	uint32_t pack = gp->pack_index;
+	if (pack == (uint32_t) -1 || param_idx < pack) {
+		*start = param_idx;
+		*count = 1;
+		return;
+	}
+	uint32_t pack_count = num_args - (gp->num_params - 1);
+	if (param_idx == pack) {
+		*start = pack;
+		*count = pack_count;
+	} else {
+		*start = param_idx + pack_count - 1;
+		*count = 1;
+	}
+}
+
+/* Runtime form for the VM's type-param fetch: the opcode carries the param
+ * index; with a pack in the template the binding index of a post-pack param
+ * shifts by the instantiation's pack size. Packs themselves are compile-time
+ * rejected in fetchable positions. */
+ZEND_API uint32_t zend_generics_binding_arg_index(
+		const zend_class_entry *scope_ce, uint32_t param_idx)
+{
+	const zend_generic_binding *binding = scope_ce->generic_binding;
+	const zend_generic_params *gp = binding->template_ce->generic_params;
+	uint32_t start, count;
+
+	zend_generics_param_arg_slice(gp, binding->num_args, param_idx, &start, &count);
+	ZEND_ASSERT(count == 1 && "packs cannot appear in fetchable positions");
+	return start;
 }
 
 /* Local equivalent of zend_inheritance.c's zend_type_copy_ctor (which is
@@ -175,7 +231,11 @@ static bool zend_generics_substitute_single(
 		return false;
 	}
 
-	const zend_type arg = binding->args[idx];
+	uint32_t arg_start, arg_count;
+	zend_generics_param_arg_slice(template_ce->generic_params,
+		binding->num_args, idx, &arg_start, &arg_count);
+	ZEND_ASSERT(arg_count == 1 && "packs cannot appear in type positions");
+	const zend_type arg = binding->args[arg_start];
 	/* Preserve surrounding MAY_BE_* bits (e.g. nullability of "?T"). */
 	uint32_t extra_mask = ZEND_TYPE_FULL_MASK(*type) & _ZEND_TYPE_MAY_BE_MASK;
 
@@ -221,7 +281,11 @@ static bool zend_generics_substitute_type(
 			if (ZEND_TYPE_HAS_NAME(*list_type)) {
 				uint32_t idx = zend_generics_param_index(template_ce, ZEND_TYPE_NAME(*list_type));
 				if (idx != (uint32_t) -1) {
-					if (!ZEND_TYPE_HAS_NAME(binding->args[idx])) {
+					uint32_t arg_start, arg_count;
+					zend_generics_param_arg_slice(template_ce->generic_params,
+						binding->num_args, idx, &arg_start, &arg_count);
+					ZEND_ASSERT(arg_count == 1 && "packs cannot appear in type positions");
+					if (!ZEND_TYPE_HAS_NAME(binding->args[arg_start])) {
 						zend_throw_error(NULL,
 							"Cannot stamp %s: scalar type argument for parameter %s "
 							"is used inside a composite type",
@@ -231,9 +295,9 @@ static bool zend_generics_substitute_type(
 					}
 					if (take_refs) {
 						zend_string_release(ZEND_TYPE_NAME(*list_type));
-						list_type->ptr = zend_string_copy(ZEND_TYPE_NAME(binding->args[idx]));
+						list_type->ptr = zend_string_copy(ZEND_TYPE_NAME(binding->args[arg_start]));
 					} else {
-						list_type->ptr = ZEND_TYPE_NAME(binding->args[idx]);
+						list_type->ptr = ZEND_TYPE_NAME(binding->args[arg_start]);
 					}
 				}
 			}
@@ -474,49 +538,6 @@ static zend_class_entry *zend_generics_stamp_ce(
 		}
 	}
 
-	/* Iterator/ArrayAccess dispatch caches: the memcpy shares the template's
-	 * structs, whose zend_function pointers reference the template's methods.
-	 * Internal dispatch (foreach, dim handlers) would then run with the
-	 * template's scope and fail protected/private access against members
-	 * declared on the instantiation. Rebuild them against the clones, keyed on
-	 * which slots the template resolved (cf. the opcache persist fixup). */
-	if (ce->iterator_funcs_ptr) {
-		const zend_class_iterator_funcs *tpl_funcs = ce->iterator_funcs_ptr;
-		zend_class_iterator_funcs *funcs =
-			zend_arena_alloc(&CG(arena), sizeof(zend_class_iterator_funcs));
-		memset(funcs, 0, sizeof(zend_class_iterator_funcs));
-		if (tpl_funcs->zf_new_iterator) {
-			funcs->zf_new_iterator = zend_hash_str_find_ptr(
-				&ce->function_table, "getiterator", sizeof("getiterator") - 1);
-		}
-		if (tpl_funcs->zf_rewind) {
-			funcs->zf_rewind = zend_hash_str_find_ptr(
-				&ce->function_table, "rewind", sizeof("rewind") - 1);
-			funcs->zf_valid = zend_hash_str_find_ptr(
-				&ce->function_table, "valid", sizeof("valid") - 1);
-			funcs->zf_key = zend_hash_find_ptr(
-				&ce->function_table, ZSTR_KNOWN(ZEND_STR_KEY));
-			funcs->zf_current = zend_hash_str_find_ptr(
-				&ce->function_table, "current", sizeof("current") - 1);
-			funcs->zf_next = zend_hash_str_find_ptr(
-				&ce->function_table, "next", sizeof("next") - 1);
-		}
-		ce->iterator_funcs_ptr = funcs;
-	}
-	if (ce->arrayaccess_funcs_ptr) {
-		zend_class_arrayaccess_funcs *funcs =
-			zend_arena_alloc(&CG(arena), sizeof(zend_class_arrayaccess_funcs));
-		funcs->zf_offsetget = zend_hash_str_find_ptr(
-			&ce->function_table, "offsetget", sizeof("offsetget") - 1);
-		funcs->zf_offsetexists = zend_hash_str_find_ptr(
-			&ce->function_table, "offsetexists", sizeof("offsetexists") - 1);
-		funcs->zf_offsetset = zend_hash_str_find_ptr(
-			&ce->function_table, "offsetset", sizeof("offsetset") - 1);
-		funcs->zf_offsetunset = zend_hash_str_find_ptr(
-			&ce->function_table, "offsetunset", sizeof("offsetunset") - 1);
-		ce->arrayaccess_funcs_ptr = funcs;
-	}
-
 	/* static members */
 	if (ce->default_static_members_table) {
 		zval *dst = emalloc(sizeof(zval) * ce->default_static_members_count);
@@ -578,10 +599,9 @@ static zend_class_entry *zend_generics_stamp_ce(
 			}
 		}
 	}
+	/* Rebuilt by the caller once the layout is final (a deferred-parent graft
+	 * rebases property offsets after this clone). */
 	ce->properties_info_table = NULL;
-	if (ce->default_properties_count) {
-		zend_build_properties_info_table(ce);
-	}
 
 	/* constants */
 	if (!(HT_FLAGS(&ce->constants_table) & HASH_FLAG_UNINITIALIZED)) {
@@ -617,6 +637,56 @@ static zend_class_entry *zend_generics_stamp_ce(
 	return ce;
 }
 
+/* Iterator/ArrayAccess dispatch caches: the stamp memcpy shares the
+ * template's structs, whose zend_function pointers reference the template's
+ * methods. Internal dispatch (foreach, dim handlers) would then run with the
+ * template's scope and fail protected/private access against members declared
+ * on the instantiation. Rebuild them against the instance's function table,
+ * keyed on which slots the TEMPLATE resolved (cf. the opcache persist fixup).
+ * Runs after any parent graft and interface resolution: caches installed
+ * fresh by interface_gets_implemented handlers during those steps belong to
+ * slots the template did not have and are left untouched. */
+static void zend_generics_rebuild_dispatch_ptrs(
+		zend_class_entry *ce, const zend_class_entry *template_ce)
+{
+	if (template_ce->iterator_funcs_ptr) {
+		const zend_class_iterator_funcs *tpl_funcs = template_ce->iterator_funcs_ptr;
+		zend_class_iterator_funcs *funcs =
+			zend_arena_alloc(&CG(arena), sizeof(zend_class_iterator_funcs));
+		memset(funcs, 0, sizeof(zend_class_iterator_funcs));
+		if (tpl_funcs->zf_new_iterator) {
+			funcs->zf_new_iterator = zend_hash_str_find_ptr(
+				&ce->function_table, "getiterator", sizeof("getiterator") - 1);
+		}
+		if (tpl_funcs->zf_rewind) {
+			funcs->zf_rewind = zend_hash_str_find_ptr(
+				&ce->function_table, "rewind", sizeof("rewind") - 1);
+			funcs->zf_valid = zend_hash_str_find_ptr(
+				&ce->function_table, "valid", sizeof("valid") - 1);
+			funcs->zf_key = zend_hash_find_ptr(
+				&ce->function_table, ZSTR_KNOWN(ZEND_STR_KEY));
+			funcs->zf_current = zend_hash_str_find_ptr(
+				&ce->function_table, "current", sizeof("current") - 1);
+			funcs->zf_next = zend_hash_str_find_ptr(
+				&ce->function_table, "next", sizeof("next") - 1);
+		}
+		ce->iterator_funcs_ptr = funcs;
+	}
+	if (template_ce->arrayaccess_funcs_ptr) {
+		zend_class_arrayaccess_funcs *funcs =
+			zend_arena_alloc(&CG(arena), sizeof(zend_class_arrayaccess_funcs));
+		funcs->zf_offsetget = zend_hash_str_find_ptr(
+			&ce->function_table, "offsetget", sizeof("offsetget") - 1);
+		funcs->zf_offsetexists = zend_hash_str_find_ptr(
+			&ce->function_table, "offsetexists", sizeof("offsetexists") - 1);
+		funcs->zf_offsetset = zend_hash_str_find_ptr(
+			&ce->function_table, "offsetset", sizeof("offsetset") - 1);
+		funcs->zf_offsetunset = zend_hash_str_find_ptr(
+			&ce->function_table, "offsetunset", sizeof("offsetunset") - 1);
+		ce->arrayaccess_funcs_ptr = funcs;
+	}
+}
+
 static bool zend_generics_check_bounds(
 		const zend_class_entry *template_ce, const zend_generic_binding *binding,
 		const zend_string *display_name, bool use_autoload)
@@ -629,25 +699,7 @@ static bool zend_generics_check_bounds(
 		if (!param->bound_name) {
 			continue;
 		}
-		const zend_type arg = binding->args[i];
-		if (!ZEND_TYPE_HAS_NAME(arg)) {
-			zend_throw_error(NULL,
-				"Cannot stamp %s: scalar type argument does not satisfy the bound %s "
-				"of type parameter %s", ZSTR_VAL(display_name),
-				ZSTR_VAL(param->bound_name), ZSTR_VAL(param->name));
-			return false;
-		}
 
-		zend_class_entry *arg_ce = zend_lookup_class_ex(ZEND_TYPE_NAME(arg), NULL, lookup_flags);
-		if (!arg_ce) {
-			if (!EG(exception)) {
-				zend_throw_error(NULL,
-					"Cannot stamp %s: class %s for type parameter %s was not found",
-					ZSTR_VAL(display_name), ZSTR_VAL(ZEND_TYPE_NAME(arg)),
-					ZSTR_VAL(param->name));
-			}
-			return false;
-		}
 		zend_class_entry *bound_ce = zend_lookup_class_ex(param->bound_name, NULL, lookup_flags);
 		if (!bound_ce) {
 			if (!EG(exception)) {
@@ -678,12 +730,37 @@ static bool zend_generics_check_bounds(
 			return false;
 		}
 
-		if (!instanceof_function(arg_ce, bound_ce)) {
-			zend_throw_error(NULL,
-				"%s does not satisfy the bound %s of type parameter %s on %s",
-				ZSTR_VAL(arg_ce->name), ZSTR_VAL(bound_ce->name),
-				ZSTR_VAL(param->name), ZSTR_VAL(template_ce->name));
-			return false;
+		/* A pack bound applies to every argument in its slice. */
+		uint32_t arg_start, arg_count;
+		zend_generics_param_arg_slice(gp, binding->num_args, i, &arg_start, &arg_count);
+		for (uint32_t j = arg_start; j < arg_start + arg_count; j++) {
+			const zend_type arg = binding->args[j];
+			if (!ZEND_TYPE_HAS_NAME(arg)) {
+				zend_throw_error(NULL,
+					"Cannot stamp %s: scalar type argument does not satisfy the bound %s "
+					"of type parameter %s", ZSTR_VAL(display_name),
+					ZSTR_VAL(param->bound_name), ZSTR_VAL(param->name));
+				return false;
+			}
+
+			zend_class_entry *arg_ce = zend_lookup_class_ex(ZEND_TYPE_NAME(arg), NULL, lookup_flags);
+			if (!arg_ce) {
+				if (!EG(exception)) {
+					zend_throw_error(NULL,
+						"Cannot stamp %s: class %s for type parameter %s was not found",
+						ZSTR_VAL(display_name), ZSTR_VAL(ZEND_TYPE_NAME(arg)),
+						ZSTR_VAL(param->name));
+				}
+				return false;
+			}
+
+			if (!instanceof_function(arg_ce, bound_ce)) {
+				zend_throw_error(NULL,
+					"%s does not satisfy the bound %s of type parameter %s on %s",
+					ZSTR_VAL(arg_ce->name), ZSTR_VAL(bound_ce->name),
+					ZSTR_VAL(param->name), ZSTR_VAL(template_ce->name));
+				return false;
+			}
 		}
 	}
 	return true;
@@ -850,10 +927,21 @@ static const char *zend_generics_scalar_type_name(uint32_t type_mask)
 	}
 }
 
-/* Substitute this instantiation's type arguments into a deferred interface
- * reference such as "App\Collection<T>". Args are bare (params or concrete)
- * by construction, so substitution depth cannot grow. Returns an owned,
- * non-interned string. */
+static void zend_generics_append_binding_arg(smart_str *buf, const zend_type arg)
+{
+	if (ZEND_TYPE_HAS_NAME(arg)) {
+		smart_str_append(buf, ZEND_TYPE_NAME(arg));
+	} else {
+		smart_str_appends(buf,
+			zend_generics_scalar_type_name(ZEND_TYPE_PURE_MASK(arg)));
+	}
+}
+
+/* Substitute this instantiation's type arguments into a deferred inheritance
+ * reference such as "App\Collection<T>" or "App\Merger<...Ts>". Args are
+ * bare (params, a spread of the pack, or concrete) by construction, so
+ * substitution depth cannot grow; a spread splices in the pack's whole
+ * argument slice. Returns an owned, non-interned string. */
 static zend_string *zend_generics_substitute_deferred_ref(
 		zend_string *ref, const zend_class_entry *template_ce,
 		const zend_generic_binding *binding)
@@ -861,7 +949,8 @@ static zend_string *zend_generics_substitute_deferred_ref(
 	zend_generic_name_slice base_slice;
 	zend_generic_name_slice arg_slices[ZEND_GENERICS_MAX_ARGS];
 	uint32_t num_args;
-	bool ok = zend_generics_parse_name(ref, &base_slice, arg_slices, &num_args);
+	bool ok = zend_generics_parse_name_ex(ref, &base_slice, arg_slices, &num_args,
+		/* allow_spread */ true);
 	ZEND_ASSERT(ok && "deferred refs are compiler-generated");
 	const zend_generic_params *gp = template_ce->generic_params;
 
@@ -873,6 +962,26 @@ static zend_string *zend_generics_substitute_deferred_ref(
 			smart_str_appendc(&buf, ',');
 		}
 		const zend_generic_name_slice *slice = &arg_slices[i];
+
+		if (slice->len > 3 && slice->start[0] == '.') {
+			/* "...Ts": splice in the pack's argument slice. The compiler only
+			 * emits a spread of the declaring template's own pack. */
+			ZEND_ASSERT(gp->pack_index != (uint32_t) -1
+				&& zend_binary_strcasecmp(slice->start + 3, slice->len - 3,
+					ZSTR_VAL(gp->params[gp->pack_index].name),
+					ZSTR_LEN(gp->params[gp->pack_index].name)) == 0);
+			uint32_t arg_start, arg_count;
+			zend_generics_param_arg_slice(gp, binding->num_args,
+				gp->pack_index, &arg_start, &arg_count);
+			for (uint32_t j = 0; j < arg_count; j++) {
+				if (j) {
+					smart_str_appendc(&buf, ',');
+				}
+				zend_generics_append_binding_arg(&buf, binding->args[arg_start + j]);
+			}
+			continue;
+		}
+
 		uint32_t param_idx = (uint32_t) -1;
 		if (!memchr(slice->start, '\\', slice->len) && !memchr(slice->start, '<', slice->len)) {
 			for (uint32_t j = 0; j < gp->num_params; j++) {
@@ -884,13 +993,11 @@ static zend_string *zend_generics_substitute_deferred_ref(
 			}
 		}
 		if (param_idx != (uint32_t) -1) {
-			const zend_type arg = binding->args[param_idx];
-			if (ZEND_TYPE_HAS_NAME(arg)) {
-				smart_str_append(&buf, ZEND_TYPE_NAME(arg));
-			} else {
-				smart_str_appends(&buf,
-					zend_generics_scalar_type_name(ZEND_TYPE_PURE_MASK(arg)));
-			}
+			uint32_t arg_start, arg_count;
+			zend_generics_param_arg_slice(gp, binding->num_args,
+				param_idx, &arg_start, &arg_count);
+			ZEND_ASSERT(arg_count == 1 && "bare pack refs are compile-time rejected");
+			zend_generics_append_binding_arg(&buf, binding->args[arg_start]);
 		} else {
 			smart_str_appendl(&buf, slice->start, slice->len);
 		}
@@ -976,6 +1083,66 @@ static bool zend_generics_resolve_deferred_interfaces(
 	return true;
 }
 
+/* Graft the deferred (param-dependent) parent under a freshly stamped
+ * instantiation: substitute this binding's arguments into the template's
+ * deferred extends reference, stamp/locate the parent instantiation, and run
+ * ordinary inheritance against it. The template linked parentless, so the
+ * clone holds only own members; the graft merges parent members, inherits
+ * the constructor, and runs the per-instantiation compatibility checks. */
+static bool zend_generics_graft_parent(
+		zend_class_entry *ce, const zend_class_entry *template_ce,
+		const zend_generic_binding *binding, bool use_autoload)
+{
+	zend_string *sub = zend_generics_substitute_deferred_ref(
+		template_ce->generic_params->deferred_parent, template_ce, binding);
+	zend_class_entry *parent = zend_lookup_class_ex(sub, NULL,
+		use_autoload ? 0 : ZEND_FETCH_CLASS_NO_AUTOLOAD);
+	if (!parent) {
+		if (!EG(exception)) {
+			zend_throw_error(NULL, "Cannot stamp %s: parent class %s was not found",
+				ZSTR_VAL(ce->name), ZSTR_VAL(sub));
+		}
+		zend_string_release(sub);
+		return false;
+	}
+	/* Keep the common shape failures catchable; ordinary linking reports the
+	 * same conditions as fatals. */
+	if (parent->ce_flags & (ZEND_ACC_INTERFACE | ZEND_ACC_TRAIT | ZEND_ACC_ENUM)) {
+		zend_throw_error(NULL, "Cannot stamp %s: cannot extend %s %s",
+			ZSTR_VAL(ce->name),
+			(parent->ce_flags & ZEND_ACC_INTERFACE) ? "interface"
+				: (parent->ce_flags & ZEND_ACC_TRAIT) ? "trait" : "enum",
+			ZSTR_VAL(parent->name));
+		zend_string_release(sub);
+		return false;
+	}
+	if (parent->ce_flags & ZEND_ACC_FINAL) {
+		zend_throw_error(NULL, "Cannot stamp %s: cannot extend final class %s",
+			ZSTR_VAL(ce->name), ZSTR_VAL(parent->name));
+		zend_string_release(sub);
+		return false;
+	}
+	zend_string_release(sub);
+
+	zend_do_inheritance_ex(ce, parent, /* checked */ false);
+	if (UNEXPECTED(EG(exception))) {
+		return false;
+	}
+
+	/* Parent interfaces are merged by the link path, not by
+	 * zend_do_inheritance_ex; append the flattened, deduped set here. */
+	ce->ce_flags |= ZEND_ACC_RESOLVED_INTERFACES;
+	for (uint32_t i = 0; i < parent->num_interfaces; i++) {
+		if (!zend_generics_ce_implements_ptr(ce, parent->interfaces[i])) {
+			zend_do_implement_interface(ce, parent->interfaces[i]);
+			if (UNEXPECTED(EG(exception))) {
+				return false;
+			}
+		}
+	}
+	return true;
+}
+
 static zend_class_entry *zend_generics_stamp_instantiation_impl(
 		zend_string *name, zend_string *lc_name, bool use_autoload)
 {
@@ -1000,7 +1167,17 @@ static zend_class_entry *zend_generics_stamp_instantiation_impl(
 		zend_throw_error(NULL, "Class %s is not generic", ZSTR_VAL(template_ce->name));
 		return NULL;
 	}
-	if (template_ce->generic_params->num_params != num_args) {
+	if (template_ce->generic_params->pack_index != (uint32_t) -1) {
+		/* The pack binds at least one argument; every other param exactly
+		 * one, so num_params doubles as the minimum arity. */
+		if (num_args < template_ce->generic_params->num_params) {
+			zend_throw_error(NULL,
+				"Generic class %s expects at least %u type argument%s, %u given",
+				ZSTR_VAL(template_ce->name), template_ce->generic_params->num_params,
+				template_ce->generic_params->num_params == 1 ? "" : "s", num_args);
+			return NULL;
+		}
+	} else if (template_ce->generic_params->num_params != num_args) {
 		zend_throw_error(NULL,
 			"Generic class %s expects %u type argument%s, %u given",
 			ZSTR_VAL(template_ce->name), template_ce->generic_params->num_params,
@@ -1056,16 +1233,49 @@ static zend_class_entry *zend_generics_stamp_instantiation_impl(
 		return NULL;
 	}
 
-	if (template_ce->generic_params->num_deferred_interfaces
+	const zend_generic_params *gp = template_ce->generic_params;
+
+	/* The clone is fully built at this point, so any failure below destroys
+	 * it properly instead of leaking it with the request arena. */
+	if (gp->deferred_parent
+			&& !zend_generics_graft_parent(ce, template_ce, binding, use_autoload)) {
+		goto fail_destroy;
+	}
+
+	if (gp->num_deferred_interfaces
 			&& !zend_generics_resolve_deferred_interfaces(ce, template_ce, binding, use_autoload)) {
-		/* The clone is fully built at this point, so it can be destroyed
-		 * properly instead of leaking with the request arena. */
-		zval zv_ce;
-		ZVAL_PTR(&zv_ce, ce);
-		destroy_zend_class(&zv_ce);
-		zend_string_release(display);
-		zend_string_release(lc_key);
-		return NULL;
+		goto fail_destroy;
+	}
+
+	if (gp->deferred_parent || gp->num_deferred_interfaces) {
+		/* Method-compatibility checks against the grafted parent (or the
+		 * resolved interfaces) may have recorded delayed obligations for
+		 * types that were not loaded yet; settle them now, as the runtime
+		 * link path does. */
+		zend_resolve_delayed_variance_obligations_ex(ce);
+		if (UNEXPECTED(EG(exception))) {
+			goto fail_destroy;
+		}
+	}
+
+	if (gp->deferred_parent) {
+		zend_inheritance_check_override(ce);
+		if ((ce->ce_flags & ZEND_ACC_IMPLICIT_ABSTRACT_CLASS)
+				&& !(ce->ce_flags & (ZEND_ACC_INTERFACE | ZEND_ACC_EXPLICIT_ABSTRACT_CLASS))
+				&& !(template_ce->ce_flags & ZEND_ACC_IMPLICIT_ABSTRACT_CLASS)) {
+			/* The grafted parent left abstract methods unimplemented. */
+			zend_verify_abstract_class(ce);
+			if (UNEXPECTED(EG(exception))) {
+				goto fail_destroy;
+			}
+		}
+	}
+
+	/* Final layout is settled (a graft rebases property offsets and adds
+	 * parent members); build the derived tables. */
+	zend_generics_rebuild_dispatch_ptrs(ce, template_ce);
+	if (ce->default_properties_count) {
+		zend_build_properties_info_table(ce);
 	}
 
 	zv = zend_hash_add_ptr(EG(class_table), lc_key, ce);
@@ -1076,6 +1286,14 @@ static zend_class_entry *zend_generics_stamp_instantiation_impl(
 	zend_string_release(lc_key);
 
 	return ce;
+
+fail_destroy:;
+	zval zv_ce;
+	ZVAL_PTR(&zv_ce, ce);
+	destroy_zend_class(&zv_ce);
+	zend_string_release(display);
+	zend_string_release(lc_key);
+	return NULL;
 }
 
 ZEND_API zend_class_entry *zend_generics_stamp_instantiation(

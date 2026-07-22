@@ -270,6 +270,7 @@ static YYSIZE_T zend_yytnamerr(char*, const char*);
 %type <ast> static_var class_statement trait_adaptation trait_precedence trait_alias
 %type <ast> absolute_trait_method_reference trait_method_reference property echo_expr
 %type <ast> new_dereferenceable new_non_dereferenceable anonymous_class class_name class_name_reference simple_variable
+%type <ast> inheritance_class_name inheritance_class_name_list
 %type <ast> internal_functions_in_yacc
 %type <ast> scalar backticks_expr lexical_var function_call member_name property_name
 %type <ast> variable_class_name dereferenceable_scalar constant class_constant
@@ -739,6 +740,7 @@ generic_arg_list:
 generic_arg:
 		name								{ $$ = $1; }
 	|	name generic_type_args				{ $$ = zend_ast_create(ZEND_AST_GENERIC_TYPE, $1, $2); }
+	|	T_ELLIPSIS name						{ $$ = zend_ast_create(ZEND_AST_GENERIC_ARG_SPREAD, $2); }
 ;
 
 generic_param_list:
@@ -753,6 +755,14 @@ generic_param:
 			{ $$ = zend_ast_create_ex(ZEND_AST_GENERIC_PARAM, ZEND_GENERIC_BOUND_IMPLEMENTS, $1, $3); }
 	|	T_STRING T_EXTENDS name
 			{ $$ = zend_ast_create_ex(ZEND_AST_GENERIC_PARAM, ZEND_GENERIC_BOUND_EXTENDS, $1, $3); }
+	|	T_ELLIPSIS T_STRING
+			{ $$ = zend_ast_create_ex(ZEND_AST_GENERIC_PARAM, ZEND_GENERIC_PARAM_PACK, $2, NULL); }
+	|	T_ELLIPSIS T_STRING T_IMPLEMENTS name
+			{ $$ = zend_ast_create_ex(ZEND_AST_GENERIC_PARAM,
+				  ZEND_GENERIC_BOUND_IMPLEMENTS | ZEND_GENERIC_PARAM_PACK, $2, $4); }
+	|	T_ELLIPSIS T_STRING T_EXTENDS name
+			{ $$ = zend_ast_create_ex(ZEND_AST_GENERIC_PARAM,
+				  ZEND_GENERIC_BOUND_EXTENDS | ZEND_GENERIC_PARAM_PACK, $2, $4); }
 ;
 
 class_modifiers:
@@ -868,17 +878,32 @@ enum_case_expr:
 
 extends_from:
 		%empty				{ $$ = NULL; }
-	|	T_EXTENDS class_name	{ $$ = $2; }
+	|	T_EXTENDS inheritance_class_name	{ $$ = $2; }
 ;
 
 interface_extends_list:
 		%empty			        { $$ = NULL; }
-	|	T_EXTENDS class_name_list	{ $$ = $2; }
+	|	T_EXTENDS inheritance_class_name_list	{ $$ = $2; }
 ;
 
 implements_list:
 		%empty		        		{ $$ = NULL; }
-	|	T_IMPLEMENTS class_name_list	{ $$ = $2; }
+	|	T_IMPLEMENTS inheritance_class_name_list	{ $$ = $2; }
+;
+
+/* Class references in declaration headers (extends/implements): no
+ * expression ambiguity exists here, so a plain '<' opens generic type
+ * arguments even when the lexer's bounded lookahead declined to emit
+ * T_GENERIC_OPEN (e.g. pack spreads, or a following "implements"). */
+inheritance_class_name:
+		class_name					{ $$ = $1; }
+	|	name '<' generic_arg_list '>'
+			{ $$ = zend_ast_create(ZEND_AST_GENERIC_TYPE, $1, $3); }
+;
+
+inheritance_class_name_list:
+		inheritance_class_name { $$ = zend_ast_create_list(1, ZEND_AST_NAME_LIST, $1); }
+	|	inheritance_class_name_list ',' inheritance_class_name { $$ = zend_ast_list_add($1, $3); }
 ;
 
 foreach_variable:

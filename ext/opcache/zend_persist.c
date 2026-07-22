@@ -1261,6 +1261,10 @@ zend_class_entry *zend_persist_class_entry(zend_class_entry *orig_ce)
 				deferred = zend_shared_memdup(generic_params->deferred_interfaces,
 					sizeof(zend_string *) * generic_params->num_deferred_interfaces);
 			}
+			if (generic_params->deferred_parent) {
+				/* Interned in place; the pointer rides the struct memdup. */
+				zend_accel_store_interned_string(generic_params->deferred_parent);
+			}
 			/* Arena-allocated at compile time: copy without freeing. */
 			ce->generic_params = zend_shared_memdup(generic_params,
 				sizeof(zend_generic_params)

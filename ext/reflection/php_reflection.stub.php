@@ -291,6 +291,8 @@ class ReflectionClass implements Reflector
 
     public function getGenericInterfaceNames(): array {}
 
+    public function getGenericParentName(): ?string {}
+
     /** @tentative-return-type */
     public function isCloneable(): bool {}
 

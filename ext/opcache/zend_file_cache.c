@@ -983,6 +983,9 @@ static void zend_file_cache_serialize_class(zval                     *zv,
 				SERIALIZE_STR(deferred[i]);
 			}
 		}
+		if (generic_params->deferred_parent) {
+			SERIALIZE_STR(generic_params->deferred_parent);
+		}
 	}
 
 	SERIALIZE_PTR(ce->constructor);
@@ -1882,6 +1885,9 @@ static void zend_file_cache_unserialize_class(zval                    *zv,
 			for (uint32_t i = 0; i < ce->generic_params->num_deferred_interfaces; i++) {
 				UNSERIALIZE_STR(ce->generic_params->deferred_interfaces[i]);
 			}
+		}
+		if (ce->generic_params->deferred_parent) {
+			UNSERIALIZE_STR(ce->generic_params->deferred_parent);
 		}
 	}
 

@@ -646,6 +646,9 @@ void zend_persist_class_entry_calc(zend_class_entry *ce)
 				}
 				ADD_SIZE(sizeof(zend_string *) * ce->generic_params->num_deferred_interfaces);
 			}
+			if (ce->generic_params->deferred_parent) {
+				ADD_INTERNED_STRING(ce->generic_params->deferred_parent);
+			}
 			ADD_SIZE(sizeof(zend_generic_params)
 				+ (ce->generic_params->num_params - 1) * sizeof(zend_generic_param));
 		}

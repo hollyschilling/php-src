@@ -1,5 +1,5 @@
 /* This is a generated file, edit php_reflection.stub.php instead.
- * Stub hash: f8a160fa3e1cfa151ad0b806fb45984c2f5d9b4d
+ * Stub hash: 5bf0962a010896c2ad0aa2bcba8799ffb4428fd4
  * Has decl header: yes */
 
 ZEND_BEGIN_ARG_WITH_TENTATIVE_RETURN_TYPE_INFO_EX(arginfo_class_Reflection_getModifierNames, 0, 1, IS_ARRAY, 0)
@@ -218,6 +218,9 @@ ZEND_BEGIN_ARG_WITH_RETURN_OBJ_INFO_EX(arginfo_class_ReflectionClass_getGenericT
 ZEND_END_ARG_INFO()
 
 #define arginfo_class_ReflectionClass_getGenericInterfaceNames arginfo_class_ReflectionFunctionAbstract_getClosureUsedVariables
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_ReflectionClass_getGenericParentName, 0, 0, IS_STRING, 1)
+ZEND_END_ARG_INFO()
 
 #define arginfo_class_ReflectionClass_isCloneable arginfo_class_ReflectionFunctionAbstract_inNamespace
 
@@ -725,8 +728,7 @@ ZEND_END_ARG_INFO()
 ZEND_BEGIN_ARG_WITH_RETURN_OBJ_INFO_EX(arginfo_class_ReflectionFiber_getFiber, 0, 0, Fiber, 0)
 ZEND_END_ARG_INFO()
 
-ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_ReflectionFiber_getExecutingFile, 0, 0, IS_STRING, 1)
-ZEND_END_ARG_INFO()
+#define arginfo_class_ReflectionFiber_getExecutingFile arginfo_class_ReflectionClass_getGenericParentName
 
 ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_ReflectionFiber_getExecutingLine, 0, 0, IS_LONG, 1)
 ZEND_END_ARG_INFO()
@@ -842,6 +844,7 @@ ZEND_METHOD(ReflectionClass, getGenericTypeParameters);
 ZEND_METHOD(ReflectionClass, getGenericTypeArguments);
 ZEND_METHOD(ReflectionClass, getGenericTemplate);
 ZEND_METHOD(ReflectionClass, getGenericInterfaceNames);
+ZEND_METHOD(ReflectionClass, getGenericParentName);
 ZEND_METHOD(ReflectionClass, isCloneable);
 ZEND_METHOD(ReflectionClass, getFileName);
 ZEND_METHOD(ReflectionClass, getStartLine);
@@ -1151,6 +1154,7 @@ static const zend_function_entry class_ReflectionClass_methods[] = {
 	ZEND_ME(ReflectionClass, getGenericTypeArguments, arginfo_class_ReflectionClass_getGenericTypeArguments, ZEND_ACC_PUBLIC)
 	ZEND_ME(ReflectionClass, getGenericTemplate, arginfo_class_ReflectionClass_getGenericTemplate, ZEND_ACC_PUBLIC)
 	ZEND_ME(ReflectionClass, getGenericInterfaceNames, arginfo_class_ReflectionClass_getGenericInterfaceNames, ZEND_ACC_PUBLIC)
+	ZEND_ME(ReflectionClass, getGenericParentName, arginfo_class_ReflectionClass_getGenericParentName, ZEND_ACC_PUBLIC)
 	ZEND_ME(ReflectionClass, isCloneable, arginfo_class_ReflectionClass_isCloneable, ZEND_ACC_PUBLIC)
 	ZEND_ME(ReflectionClass, getFileName, arginfo_class_ReflectionClass_getFileName, ZEND_ACC_PUBLIC)
 	ZEND_ME(ReflectionClass, getStartLine, arginfo_class_ReflectionClass_getStartLine, ZEND_ACC_PUBLIC)

@@ -1829,6 +1829,7 @@ check_fetch_type:
 					"Cannot resolve a type parameter when no generic binding is in scope");
 				return NULL;
 			}
+			param_idx = zend_generics_binding_arg_index(scope, param_idx);
 			ZEND_ASSERT(param_idx < scope->generic_binding->num_args);
 			zend_type arg = scope->generic_binding->args[param_idx];
 			if (UNEXPECTED(!ZEND_TYPE_HAS_NAME(arg))) {

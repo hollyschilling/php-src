@@ -402,6 +402,9 @@ ZEND_API void destroy_zend_class(zval *zv)
 					for (uint32_t i = 0; i < ce->generic_params->num_deferred_interfaces; i++) {
 						zend_string_release_ex(ce->generic_params->deferred_interfaces[i], 0);
 					}
+					if (ce->generic_params->deferred_parent) {
+						zend_string_release_ex(ce->generic_params->deferred_parent, 0);
+					}
 				}
 			}
 
