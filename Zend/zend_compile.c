@@ -3087,6 +3087,22 @@ static inline void zend_set_class_name_op1(zend_op *opline, znode *class_node) /
 
 /* If the AST is a bare single-label name matching a type parameter of the
  * class currently being compiled, return its index; otherwise (uint32_t)-1. */
+/* Returns the canonical name of the METHOD-level type parameter a bare
+ * single-label name refers to, or NULL. */
+static zend_string *zend_active_method_type_param(const zend_string *name)
+{
+	if (CG(active_op_array) && CG(active_op_array)->generic_params
+			&& !memchr(ZSTR_VAL(name), '\\', ZSTR_LEN(name))) {
+		const zend_generic_params *mgp = CG(active_op_array)->generic_params;
+		for (uint32_t i = 0; i < mgp->num_params; i++) {
+			if (zend_string_equals_ci(mgp->params[i].name, name)) {
+				return mgp->params[i].name;
+			}
+		}
+	}
+	return NULL;
+}
+
 static uint32_t zend_compile_type_param_index(const zend_ast *name_ast)
 {
 	if (name_ast->kind != ZEND_AST_ZVAL || name_ast->attr != ZEND_NAME_NOT_FQ
@@ -3115,6 +3131,25 @@ static uint32_t zend_compile_type_param_index(const zend_ast *name_ast)
 	return (uint32_t) -1;
 }
 
+static zend_string *zend_resolve_generic_type_ast_ex(
+	zend_ast *ast, bool allow_params, bool *uses_params, bool *uses_method_params);
+static void zend_append_generic_arg(
+	smart_str *buf, zend_ast *ast, bool allow_params, bool *uses_params, bool *uses_method_params);
+
+/* Build the method-symbol marker "\0" "\x01" SYM: a class reference whose
+ * arguments mention METHOD-level type parameters, resolved at run time
+ * against the executing method instantiation's binding. Consumes sym. */
+static zend_string *zend_mark_method_symbol(zend_string *sym)
+{
+	zend_string *marked = zend_string_alloc(2 + ZSTR_LEN(sym), 0);
+	ZSTR_VAL(marked)[0] = '\0';
+	ZSTR_VAL(marked)[1] = '\x01';
+	memcpy(ZSTR_VAL(marked) + 2, ZSTR_VAL(sym), ZSTR_LEN(sym));
+	ZSTR_VAL(marked)[ZSTR_LEN(marked)] = '\0';
+	zend_string_release(sym);
+	return marked;
+}
+
 static void zend_compile_class_ref(znode *result, zend_ast *name_ast, uint32_t fetch_flags) /* {{{ */
 {
 	uint32_t fetch_type;
@@ -3122,7 +3157,16 @@ static void zend_compile_class_ref(znode *result, zend_ast *name_ast, uint32_t f
 	if (name_ast->kind == ZEND_AST_GENERIC_TYPE) {
 		/* Mangled generic names are already fully qualified. */
 		result->op_type = IS_CONST;
-		zend_string *resolved = zend_resolve_class_name_ast(name_ast);
+		bool uses_method_params = false;
+		zend_string *resolved = zend_resolve_generic_type_ast_ex(
+			name_ast, /* allow_params */ false, NULL, &uses_method_params);
+		if (UNEXPECTED(uses_method_params)) {
+			/* "new Sequence<U>()" inside a generic method: symbolic until the
+			 * call-site binding is known; the marker routes the fetch through
+			 * runtime substitution (zend_generics_fetch_method_symbol). */
+			ZVAL_STR(&result->u.constant, zend_mark_method_symbol(resolved));
+			return;
+		}
 		const zend_ast *base_ast = name_ast->child[0];
 		if (UNEXPECTED(base_ast->kind == ZEND_AST_ZVAL
 				&& base_ast->attr == ZEND_NAME_MODULE)
@@ -3151,6 +3195,20 @@ static void zend_compile_class_ref(znode *result, zend_ast *name_ast, uint32_t f
 		result->u.op.num = ZEND_FETCH_CLASS_TYPE_PARAM | fetch_flags
 			| (param_idx << ZEND_FETCH_CLASS_TYPE_PARAM_SHIFT);
 		return;
+	}
+
+	if (name_ast->kind == ZEND_AST_ZVAL && name_ast->attr == ZEND_NAME_NOT_FQ
+			&& Z_TYPE_P(zend_ast_get_zval(name_ast)) == IS_STRING) {
+		zend_string *method_param =
+			zend_active_method_type_param(Z_STR_P(zend_ast_get_zval(name_ast)));
+		if (method_param) {
+			/* new U() inside a generic method: resolved at run time against
+			 * the executing method instantiation's binding. */
+			result->op_type = IS_CONST;
+			ZVAL_STR(&result->u.constant,
+				zend_mark_method_symbol(zend_string_copy(method_param)));
+			return;
+		}
 	}
 
 	if (name_ast->kind != ZEND_AST_ZVAL) {
@@ -5856,7 +5914,27 @@ static void zend_compile_method_call(znode *result, zend_ast *ast, uint32_t type
 		}
 	}
 
-	zend_compile_expr(&method_node, method_ast);
+	if (UNEXPECTED(method_ast->kind == ZEND_AST_GENERIC_TYPE)) {
+		/* Generic method call ($seq->map<Price>(...)): mangle the explicit
+		 * type arguments into the method-name literal; dispatch stamps the
+		 * instantiation on first miss. Arguments must be concrete. */
+		smart_str buf = {0};
+		const zend_ast_list *targs = zend_ast_get_list(method_ast->child[1]);
+		smart_str_append(&buf, zend_ast_get_str(method_ast->child[0]));
+		smart_str_appendc(&buf, '<');
+		for (uint32_t i = 0; i < targs->children; i++) {
+			if (i) {
+				smart_str_appendc(&buf, ',');
+			}
+			zend_append_generic_arg(&buf, targs->child[i],
+				/* allow_params */ false, NULL, NULL);
+		}
+		smart_str_appendc(&buf, '>');
+		method_node.op_type = IS_CONST;
+		ZVAL_STR(&method_node.u.constant, smart_str_extract(&buf));
+	} else {
+		zend_compile_expr(&method_node, method_ast);
+	}
 	opline = zend_emit_op(NULL, ZEND_INIT_METHOD_CALL, &obj_node, NULL);
 
 	if (method_node.op_type == IS_CONST) {
@@ -7727,16 +7805,16 @@ static bool zend_is_active_template_param(const zend_string *name)
 	return false;
 }
 
-static void zend_append_generic_type_ref(smart_str *buf, zend_ast *ast, bool allow_params, bool *uses_params);
+static void zend_append_generic_type_ref(smart_str *buf, zend_ast *ast, bool allow_params, bool *uses_params, bool *uses_method_params);
 
 /* When allow_params is true (deferred implements references), a bare type
  * parameter is emitted under its canonical declared name and *uses_params is
  * set; nested generic arguments still may not mention parameters (bare-only
  * restriction, so substitution depth cannot grow). */
-static void zend_append_generic_arg(smart_str *buf, zend_ast *ast, bool allow_params, bool *uses_params)
+static void zend_append_generic_arg(smart_str *buf, zend_ast *ast, bool allow_params, bool *uses_params, bool *uses_method_params)
 {
 	if (ast->kind == ZEND_AST_GENERIC_TYPE) {
-		zend_append_generic_type_ref(buf, ast, /* allow_params */ false, NULL);
+		zend_append_generic_type_ref(buf, ast, /* allow_params */ false, NULL, NULL);
 		return;
 	}
 
@@ -7789,6 +7867,19 @@ static void zend_append_generic_arg(smart_str *buf, zend_ast *ast, bool allow_pa
 				"Cannot use type parameter %s as a generic type argument "
 				"(type arguments must be concrete in this version)", ZSTR_VAL(name));
 		}
+		zend_string *method_param = zend_active_method_type_param(name);
+		if (method_param) {
+			/* Method-level type parameter: stays symbolic in the reference,
+			 * substituted per call-site instantiation at method-stamp time. */
+			if (!uses_method_params) {
+				zend_error_noreturn(E_COMPILE_ERROR,
+					"Cannot use method type parameter %s in this context",
+					ZSTR_VAL(name));
+			}
+			smart_str_append(buf, method_param);
+			*uses_method_params = true;
+			return;
+		}
 		uint8_t type_code = zend_lookup_builtin_type_by_name(name);
 		if (type_code != 0) {
 			/* Canonical scalar spellings so use-aliases and case converge. */
@@ -7815,7 +7906,7 @@ static void zend_append_generic_arg(smart_str *buf, zend_ast *ast, bool allow_pa
 	zend_string_release(resolved);
 }
 
-static void zend_append_generic_type_ref(smart_str *buf, zend_ast *ast, bool allow_params, bool *uses_params)
+static void zend_append_generic_type_ref(smart_str *buf, zend_ast *ast, bool allow_params, bool *uses_params, bool *uses_method_params)
 {
 	zend_ast *base_ast = ast->child[0];
 	const zend_ast_list *args = zend_ast_get_list(ast->child[1]);
@@ -7846,7 +7937,7 @@ static void zend_append_generic_type_ref(smart_str *buf, zend_ast *ast, bool all
 		if (i) {
 			smart_str_appendc(buf, ',');
 		}
-		zend_append_generic_arg(buf, args->child[i], allow_params, uses_params);
+		zend_append_generic_arg(buf, args->child[i], allow_params, uses_params, uses_method_params);
 	}
 	smart_str_appendc(buf, '>');
 }
@@ -7855,25 +7946,31 @@ static void zend_append_generic_type_ref(smart_str *buf, zend_ast *ast, bool all
  * fully-qualified base and class arguments (use-aliases applied), canonical
  * scalar spellings, no whitespace, declared argument order. The interned
  * result is both the display name and (lowercased) the class-table key. */
-static zend_string *zend_resolve_generic_type_ast_ex(zend_ast *ast, bool allow_params, bool *uses_params)
+static zend_string *zend_resolve_generic_type_ast_ex(zend_ast *ast, bool allow_params, bool *uses_params, bool *uses_method_params)
 {
 	smart_str buf = {0};
-	zend_append_generic_type_ref(&buf, ast, allow_params, uses_params);
+	zend_append_generic_type_ref(&buf, ast, allow_params, uses_params, uses_method_params);
 	return zend_new_interned_string(smart_str_extract(&buf));
 }
 
 static zend_string *zend_resolve_generic_type_ast(zend_ast *ast)
 {
-	return zend_resolve_generic_type_ast_ex(ast, /* allow_params */ false, NULL);
+	return zend_resolve_generic_type_ast_ex(ast, /* allow_params */ false, NULL, NULL);
 }
 
 static zend_type zend_compile_single_typename(zend_ast *ast)
 {
 	ZEND_ASSERT(!(ast->attr & ZEND_TYPE_NULLABLE));
 	if (ast->kind == ZEND_AST_GENERIC_TYPE) {
-		zend_string *mangled = zend_resolve_generic_type_ast(ast);
-		zend_alloc_ce_cache(mangled);
-		/* The type consumes the owned reference. */
+		bool uses_method_params = false;
+		zend_string *mangled = zend_resolve_generic_type_ast_ex(
+			ast, /* allow_params */ false, NULL, &uses_method_params);
+		if (!uses_method_params) {
+			zend_alloc_ce_cache(mangled);
+		}
+		/* Symbolic refs ("Sequence<U>") are substituted per instantiation at
+		 * method-stamp time; they are never class-table keys themselves.
+		 * The type consumes the owned reference. */
 		return (zend_type) ZEND_TYPE_INIT_CLASS(mangled, /* allow null */ false, 0);
 	}
 	if (ast->kind == ZEND_AST_TYPE) {
@@ -7927,6 +8024,15 @@ static zend_type zend_compile_single_typename(zend_ast *ast)
 							return (zend_type) ZEND_TYPE_INIT_CLASS(
 								zend_string_copy(gp->params[i].name), /* allow null */ false, 0);
 						}
+					}
+				}
+				if (ast->attr == ZEND_NAME_NOT_FQ) {
+					zend_string *method_param = zend_active_method_type_param(type_name);
+					if (method_param) {
+						/* Method-level type parameter: symbolic, substituted
+						 * per call-site instantiation at method-stamp time. */
+						return (zend_type) ZEND_TYPE_INIT_CLASS(
+							zend_string_copy(method_param), /* allow null */ false, 0);
 					}
 				}
 				class_name = zend_resolve_class_name_ast(ast);
@@ -9346,6 +9452,9 @@ static zend_string *zend_begin_func_decl(znode *result, zend_op_array *op_array,
 }
 /* }}} */
 
+static void zend_compile_method_generic_params(
+	zend_op_array *op_array, const zend_ast *params_ast, bool is_method);
+
 static zend_op_array *zend_compile_func_decl_ex(
 	znode *result, zend_ast *ast, enum func_decl_level level,
 	zend_string *property_info_name,
@@ -9425,6 +9534,12 @@ static zend_op_array *zend_compile_func_decl_ex(
 	}
 
 	CG(active_op_array) = op_array;
+
+	/* Method-level generic type parameters ("function map<U>(...)"): attach
+	 * before the signature compiles so type positions can intercept them. */
+	if (decl->child[5]) {
+		zend_compile_method_generic_params(op_array, decl->child[5], is_method);
+	}
 
 	zend_oparray_context_begin(&orig_oparray_context, op_array);
 	CG(context).active_property_info_name = property_info_name;
@@ -10330,7 +10445,7 @@ static void zend_compile_implements(zend_ast *ast) /* {{{ */
 		zend_string *name;
 		if (class_ast->kind == ZEND_AST_GENERIC_TYPE) {
 			bool uses_params = false;
-			name = zend_resolve_generic_type_ast_ex(class_ast, /* allow_params */ true, &uses_params);
+			name = zend_resolve_generic_type_ast_ex(class_ast, /* allow_params */ true, &uses_params, NULL);
 			if (uses_params) {
 				/* Param-dependent reference: resolved per instantiation at
 				 * stamp time; excluded from ordinary interface linking. */
@@ -10552,7 +10667,7 @@ static void zend_compile_extension_decl(zend_ast *ast) /* {{{ */
 }
 /* }}} */
 
-static void zend_compile_generic_params(zend_class_entry *ce, const zend_ast *params_ast)
+static zend_generic_params *zend_compile_generic_params_list(const zend_ast *params_ast, bool allow_pack)
 {
 	const zend_ast_list *list = zend_ast_get_list((zend_ast *) params_ast);
 	zend_generic_params *generic_params;
@@ -10587,6 +10702,11 @@ static void zend_compile_generic_params(zend_class_entry *ce, const zend_ast *pa
 		}
 
 		if (param_ast->attr & ZEND_GENERIC_PARAM_PACK) {
+			if (!allow_pack) {
+				zend_error_noreturn(E_COMPILE_ERROR,
+					"Generic methods cannot declare a type parameter pack "
+					"(parameter %s)", ZSTR_VAL(param_name));
+			}
 			if (generic_params->pack_index != (uint32_t) -1) {
 				zend_error_noreturn(E_COMPILE_ERROR,
 					"Generic class may declare at most one type parameter pack "
@@ -10607,8 +10727,47 @@ static void zend_compile_generic_params(zend_class_entry *ce, const zend_ast *pa
 		}
 	}
 
+	return generic_params;
+}
+
+static void zend_compile_generic_params(zend_class_entry *ce, const zend_ast *params_ast)
+{
+	ce->generic_params = zend_compile_generic_params_list(params_ast, /* allow_pack */ true);
 	ce->ce_flags2 |= ZEND_ACC2_GENERIC_TEMPLATE;
-	ce->generic_params = generic_params;
+}
+
+/* Generic METHOD prototype ("function map<U>(...)"): method-level type
+ * parameters, bound explicitly at each call site and substituted into a
+ * per-instantiation method clone (spike). */
+static void zend_compile_method_generic_params(
+		zend_op_array *op_array, const zend_ast *params_ast, bool is_method)
+{
+	if (!is_method) {
+		zend_error_noreturn(E_COMPILE_ERROR,
+			"Generic type parameters are only supported on methods");
+	}
+
+	zend_generic_params *gp =
+		zend_compile_generic_params_list(params_ast, /* allow_pack */ false);
+
+	/* A method parameter shadowing an enclosing class parameter would make
+	 * the two substitution passes ambiguous. */
+	if (CG(active_class_entry) && CG(active_class_entry)->generic_params) {
+		const zend_generic_params *cgp = CG(active_class_entry)->generic_params;
+		for (uint32_t i = 0; i < gp->num_params; i++) {
+			for (uint32_t j = 0; j < cgp->num_params; j++) {
+				if (zend_string_equals_ci(gp->params[i].name, cgp->params[j].name)) {
+					zend_error_noreturn(E_COMPILE_ERROR,
+						"Type parameter %s of method %s conflicts with a class "
+						"type parameter of the same name",
+						ZSTR_VAL(gp->params[i].name),
+						op_array->function_name ? ZSTR_VAL(op_array->function_name) : "{closure}");
+				}
+			}
+		}
+	}
+
+	op_array->generic_params = gp;
 }
 
 static zend_class_entry *zend_compile_class_decl(znode *result, const zend_ast *ast, bool toplevel) /* {{{ */
@@ -10725,7 +10884,7 @@ static zend_class_entry *zend_compile_class_decl(znode *result, const zend_ast *
 			 * link-time path via the mangled name. */
 			bool uses_params = false;
 			zend_string *name = zend_resolve_generic_type_ast_ex(
-				extends_ast, /* allow_params */ true, &uses_params);
+				extends_ast, /* allow_params */ true, &uses_params, NULL);
 			if (uses_params) {
 				ZEND_ASSERT(ce->generic_params != NULL);
 				ce->generic_params->deferred_parent = name;

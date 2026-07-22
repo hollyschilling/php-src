@@ -40,6 +40,17 @@ ZEND_API void zend_generics_substitute_closure_signature(
 ZEND_API uint32_t zend_generics_binding_arg_index(
 		const zend_class_entry *scope_ce, uint32_t param_idx);
 
+/* Generic METHODS (spike): stamp (or fetch the cached) instantiation of a
+ * generic method for a mangled call name such as "map<App\Price>". Returns
+ * NULL with an exception set on any structural failure. */
+ZEND_API zend_function *zend_generics_get_method_instantiation(
+		zend_class_entry *ce, zend_string *method_name, zend_string *lc_name);
+
+/* Resolve a compiler-emitted method-symbol class reference ("U",
+ * "Sequence<U>") against the executing method instantiation's binding (and,
+ * secondarily, the scope's class binding). Owned string or NULL + throw. */
+ZEND_API zend_string *zend_generics_resolve_method_symbol(const char *sym, size_t sym_len);
+
 END_EXTERN_C()
 
 #endif /* ZEND_GENERICS_H */

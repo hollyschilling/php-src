@@ -653,6 +653,14 @@ struct _zend_op_array {
 	 * NULL if none. */
 	HashTable *surface_grants;
 
+	/* Generic METHOD support (spike; runtime-only, cleared at opcache
+	 * persist). generic_params: the declared method-level type parameters
+	 * on a template method ("function map<U>(...)"); generic_binding: the
+	 * bound method-level type arguments on a stamped instantiation clone.
+	 * (Forward-declared: the structs live in zend.h.) */
+	struct _zend_generic_params *generic_params;
+	struct _zend_generic_binding *generic_binding;
+
 	void *reserved[ZEND_MAX_RESERVED_RESOURCES];
 };
 

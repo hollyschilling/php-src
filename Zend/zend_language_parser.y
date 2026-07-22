@@ -1250,16 +1250,16 @@ attributed_class_statement:
 			  $$ = zend_ast_create(ZEND_AST_CLASS_CONST_GROUP, $4, NULL, $3);
 			  $$->attr = flags;
 			  if (surfaces) { $$ = zend_ast_create(ZEND_AST_SURFACE_MEMBER, $$, surfaces); } }
-	|	method_modifiers function returns_ref identifier backup_doc_comment '(' parameter_list ')'
+	|	method_modifiers function returns_ref identifier generic_params backup_doc_comment '(' parameter_list ')'
 		optional_receiver_modifier return_type backup_fn_flags method_body backup_fn_flags
 			{ zend_ast *surfaces = zend_surface_names_from_modifiers($1);
 			  uint32_t flags = $1 ? zend_modifier_list_to_flags(ZEND_MODIFIER_TARGET_METHOD, $1) : ZEND_ACC_PUBLIC;
 			  if ($1 && !flags && EG(exception)) { YYERROR; }
 			  if (surfaces && !zend_surface_member_modifiers_valid(flags)) { YYERROR; }
 			  if (!(flags & ZEND_ACC_PPP_MASK)) { flags |= ZEND_ACC_PUBLIC; }
-			  $$ = zend_ast_create_decl(ZEND_AST_METHOD, $3 | flags | $13, $2, $5,
-				  zend_ast_get_str($4), $7, NULL, $12, $10, NULL); CG(extra_fn_flags) = $11;
-			  if ($9) { $$->attr |= ZEND_FN_IS_MUTATING; }
+			  $$ = zend_ast_create_decl_ex(ZEND_AST_METHOD, $3 | flags | $14, $2, $6,
+				  zend_ast_get_str($4), $8, NULL, $13, $11, NULL, $5); CG(extra_fn_flags) = $12;
+			  if ($10) { $$->attr |= ZEND_FN_IS_MUTATING; }
 			  if (surfaces) { $$ = zend_ast_create(ZEND_AST_SURFACE_MEMBER, $$, surfaces); } }
 	|	enum_case { $$ = $1; }
 ;
@@ -1886,6 +1886,9 @@ callable_variable:
 			{ $$ = zend_ast_create(ZEND_AST_DIM, $1, $3); }
 	|	array_object_dereferenceable T_OBJECT_OPERATOR property_name argument_list
 			{ $$ = zend_ast_create(ZEND_AST_METHOD_CALL, $1, $3, $4); }
+	|	array_object_dereferenceable T_OBJECT_OPERATOR T_STRING T_GENERIC_OPEN generic_arg_list '>' argument_list
+			{ $$ = zend_ast_create(ZEND_AST_METHOD_CALL, $1,
+				  zend_ast_create(ZEND_AST_GENERIC_TYPE, $3, $5), $7); }
 	|	array_object_dereferenceable T_NULLSAFE_OBJECT_OPERATOR property_name argument_list
 			{ $$ = zend_ast_create(ZEND_AST_NULLSAFE_METHOD_CALL, $1, $3, $4); }
 	|	function_call { $$ = $1; }

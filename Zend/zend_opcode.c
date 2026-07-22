@@ -69,6 +69,8 @@ void init_op_array(zend_op_array *op_array, zend_function_type type, int initial
 	op_array->attributes = NULL;
 	op_array->extension_imports = NULL;
 	op_array->surface_grants = NULL;
+	op_array->generic_params = NULL;
+	op_array->generic_binding = NULL;
 
 	op_array->arg_info = NULL;
 	op_array->num_args = 0;

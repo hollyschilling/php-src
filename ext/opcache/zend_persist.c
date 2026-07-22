@@ -448,6 +448,13 @@ static void zend_persist_op_array_ex(zend_op_array *op_array, zend_persistent_sc
 	zend_op *persist_ptr;
 	zval *orig_literals = NULL;
 
+	/* Generic-method SPIKE: method-level generic params are arena-allocated
+	 * and runtime-only; never carry the pointers into SHM. Generic methods
+	 * on persisted scripts therefore degrade to "not generic" under opcache
+	 * until persistence is implemented. */
+	op_array->generic_params = NULL;
+	op_array->generic_binding = NULL;
+
 	if (op_array->refcount && --(*op_array->refcount) == 0) {
 		efree(op_array->refcount);
 	}

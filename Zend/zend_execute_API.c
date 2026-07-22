@@ -158,6 +158,7 @@ void init_executor(void) /* {{{ */
 	zend_hash_init(&EG(autoload_current_classnames), 8, NULL, NULL, 0);
 	EG(extension_autoload_attempted) = NULL;
 	EG(generics_stamping) = NULL;
+	EG(generics_method_cache) = NULL;
 
 	EG(ticks_count) = 0;
 
@@ -518,6 +519,11 @@ void shutdown_executor(void) /* {{{ */
 			zend_hash_destroy(EG(extension_autoload_attempted));
 			FREE_HASHTABLE(EG(extension_autoload_attempted));
 			EG(extension_autoload_attempted) = NULL;
+		}
+		if (EG(generics_method_cache)) {
+			zend_hash_destroy(EG(generics_method_cache));
+			FREE_HASHTABLE(EG(generics_method_cache));
+			EG(generics_method_cache) = NULL;
 		}
 		if (EG(generics_stamping)) {
 			zend_hash_destroy(EG(generics_stamping));
@@ -2003,6 +2009,22 @@ static zend_never_inline zend_class_entry *zend_fetch_class_via_module(const zen
 zend_class_entry *zend_fetch_class_by_name(zend_string *class_name, zend_string *key, uint32_t fetch_type) /* {{{ */
 {
 	if (UNEXPECTED(ZSTR_LEN(class_name) > 0 && ZSTR_VAL(class_name)[0] == '\0')) {
+		if (ZSTR_LEN(class_name) > 1 && ZSTR_VAL(class_name)[1] == '\x01') {
+			/* Method-symbol marker ("\0\x01" SYM): a class reference whose
+			 * arguments mention METHOD-level type parameters; substitute
+			 * against the executing method instantiation, then resolve. */
+			zend_string *resolved = zend_generics_resolve_method_symbol(
+				ZSTR_VAL(class_name) + 2, ZSTR_LEN(class_name) - 2);
+			if (!resolved) {
+				return NULL;
+			}
+			zend_class_entry *ce = zend_lookup_class_ex(resolved, NULL, fetch_type);
+			if (!ce) {
+				report_class_fetch_error(resolved, fetch_type);
+			}
+			zend_string_release(resolved);
+			return ce;
+		}
 		return zend_fetch_class_via_module(class_name, fetch_type);
 	}
 

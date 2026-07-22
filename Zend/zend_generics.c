@@ -1313,3 +1313,392 @@ ZEND_API zend_class_entry *zend_generics_stamp_instantiation(
 	zend_hash_del(EG(generics_stamping), lc_name);
 	return ce;
 }
+
+/* ---- Generic METHODS (spike): explicit-args instantiation of method-level
+ * type parameters ("function map<U>(...)" called as "$seq->map<Price>()").
+ * Method clones live in a per-request cache, never in class tables (immutable
+ * SHM classes cannot take runtime insertions). ---- */
+
+/* Looks up a bare name in one (params, binding) space; fills the bound arg. */
+static bool zend_generics_space_lookup(
+		const zend_generic_params *gp, const zend_generic_binding *binding,
+		const char *name, size_t name_len, const zend_type **out)
+{
+	if (!gp || !binding || memchr(name, '\\', name_len)) {
+		return false;
+	}
+	for (uint32_t i = 0; i < gp->num_params; i++) {
+		if (zend_binary_strcasecmp(name, name_len,
+				ZSTR_VAL(gp->params[i].name), ZSTR_LEN(gp->params[i].name)) == 0) {
+			uint32_t start, count;
+			zend_generics_param_arg_slice(gp, binding->num_args, i, &start, &count);
+			ZEND_ASSERT(count == 1 && "packs cannot appear in fetchable positions");
+			*out = &binding->args[start];
+			return true;
+		}
+	}
+	return false;
+}
+
+/* Substitute a symbolic class reference ("U", "Sequence<U>") against the
+ * method space and, secondarily, the class space. Returns an owned string,
+ * or NULL with an exception (bare scalar in class position). */
+static zend_string *zend_generics_substitute_symbol_str(
+		const char *sym, size_t sym_len,
+		const zend_generic_params *mgp, const zend_generic_binding *mbind,
+		const zend_generic_params *cgp, const zend_generic_binding *cbind)
+{
+	const zend_type *arg;
+
+	if (!memchr(sym, '<', sym_len)) {
+		if (zend_generics_space_lookup(mgp, mbind, sym, sym_len, &arg)
+				|| zend_generics_space_lookup(cgp, cbind, sym, sym_len, &arg)) {
+			if (!ZEND_TYPE_HAS_NAME(*arg)) {
+				zend_throw_error(NULL, "Cannot use scalar type argument %s as a class",
+					zend_generics_scalar_type_name(ZEND_TYPE_PURE_MASK(*arg)));
+				return NULL;
+			}
+			return zend_string_copy(ZEND_TYPE_NAME(*arg));
+		}
+		return zend_string_init(sym, sym_len, 0);
+	}
+
+	zend_string *tmp = zend_string_init(sym, sym_len, 0);
+	zend_generic_name_slice base_slice;
+	zend_generic_name_slice arg_slices[ZEND_GENERICS_MAX_ARGS];
+	uint32_t num_args;
+	bool ok = zend_generics_parse_name(tmp, &base_slice, arg_slices, &num_args);
+	ZEND_ASSERT(ok && "method symbols are compiler-generated");
+
+	smart_str buf = {0};
+	smart_str_appendl(&buf, base_slice.start, base_slice.len);
+	smart_str_appendc(&buf, '<');
+	for (uint32_t i = 0; i < num_args; i++) {
+		if (i) {
+			smart_str_appendc(&buf, ',');
+		}
+		const zend_generic_name_slice *slice = &arg_slices[i];
+		if (!memchr(slice->start, '<', slice->len)
+				&& (zend_generics_space_lookup(mgp, mbind, slice->start, slice->len, &arg)
+					|| zend_generics_space_lookup(cgp, cbind, slice->start, slice->len, &arg))) {
+			zend_generics_append_binding_arg(&buf, *arg);
+		} else {
+			smart_str_appendl(&buf, slice->start, slice->len);
+		}
+	}
+	smart_str_appendc(&buf, '>');
+	zend_string_release(tmp);
+	return smart_str_extract(&buf);
+}
+
+ZEND_API zend_string *zend_generics_resolve_method_symbol(const char *sym, size_t sym_len)
+{
+	const zend_execute_data *ex = EG(current_execute_data);
+	const zend_function *func = ex ? ex->func : NULL;
+	const zend_generic_params *mgp = NULL;
+	const zend_generic_binding *mbind = NULL;
+	const zend_generic_params *cgp = NULL;
+	const zend_generic_binding *cbind = NULL;
+
+	if (func && ZEND_USER_CODE(func->common.type)) {
+		mgp = func->op_array.generic_params;
+		mbind = func->op_array.generic_binding;
+		const zend_class_entry *scope = func->common.scope;
+		if (scope && scope->generic_binding) {
+			cbind = scope->generic_binding;
+			cgp = cbind->template_ce->generic_params;
+		}
+	}
+	if (!mbind && !cbind) {
+		zend_throw_error(NULL,
+			"Cannot resolve a method type parameter when no generic method binding is in scope");
+		return NULL;
+	}
+	return zend_generics_substitute_symbol_str(sym, sym_len, mgp, mbind, cgp, cbind);
+}
+
+/* Does this type mention a method-level parameter (bare or inside a
+ * composite name)? */
+static bool zend_generics_method_type_uses_params(
+		zend_type type, const zend_generic_params *mgp)
+{
+	if (!ZEND_TYPE_HAS_NAME(type)) {
+		return false;
+	}
+	zend_string *name = ZEND_TYPE_NAME(type);
+	const char *lt = memchr(ZSTR_VAL(name), '<', ZSTR_LEN(name));
+	if (!lt) {
+		for (uint32_t i = 0; i < mgp->num_params; i++) {
+			if (zend_string_equals_ci(mgp->params[i].name, name)) {
+				return true;
+			}
+		}
+		return false;
+	}
+	/* Composite: any bare arg matching a method param. */
+	for (uint32_t i = 0; i < mgp->num_params; i++) {
+		const char *p = lt + 1;
+		const char *end = ZSTR_VAL(name) + ZSTR_LEN(name);
+		size_t plen = ZSTR_LEN(mgp->params[i].name);
+		while (p < end) {
+			const char *comma = memchr(p, ',', end - p);
+			size_t alen = (comma ? comma : end - 1) - p;
+			if (alen == plen && zend_binary_strcasecmp(p, alen,
+					ZSTR_VAL(mgp->params[i].name), plen) == 0) {
+				return true;
+			}
+			if (!comma) break;
+			p = comma + 1;
+		}
+	}
+	return false;
+}
+
+static void zend_generics_method_cache_dtor(zval *zv)
+{
+	zend_function *fn = Z_PTR_P(zv);
+
+	/* Composite substituted signature names ("Sequence<Price>") are owned by
+	 * the clone; bare swaps borrow the binding's names and the rest is the
+	 * base's. Identify ours by pointer against the stashed original entries
+	 * and the binding args, and release before the generic dtor runs. */
+	if (fn->type == ZEND_USER_FUNCTION
+			&& (fn->common.fn_flags2 & ZEND_ACC2_GENERIC_SUBST_ARG_INFO)
+			&& fn->op_array.generic_binding) {
+		const zend_generic_binding *binding = fn->op_array.generic_binding;
+		uint32_t total = fn->op_array.num_args;
+		uint32_t has_ret = (fn->common.fn_flags & ZEND_ACC_HAS_RETURN_TYPE) ? 1 : 0;
+		zend_arg_info *entries = fn->op_array.arg_info - has_ret;
+		total += has_ret;
+		if (fn->common.fn_flags & ZEND_ACC_VARIADIC) {
+			total++;
+		}
+		/* The stashed pointer is the base's arg_info (return-entry offset
+		 * applied), mirroring the ZEND_ACC2_GENERIC_SUBST_ARG_INFO layout. */
+		const zend_arg_info *orig =
+			*(zend_arg_info **) ((char *) entries - sizeof(zend_arg_info *));
+		const zend_arg_info *orig_base = orig - has_ret;
+		for (uint32_t i = 0; i < total; i++) {
+			if (!ZEND_TYPE_HAS_NAME(entries[i].type)) {
+				continue;
+			}
+			zend_string *name = ZEND_TYPE_NAME(entries[i].type);
+			if (ZEND_TYPE_HAS_NAME(orig_base[i].type)
+					&& name == ZEND_TYPE_NAME(orig_base[i].type)) {
+				continue; /* base's */
+			}
+			bool borrowed = false;
+			for (uint32_t j = 0; j < binding->num_args; j++) {
+				if (ZEND_TYPE_HAS_NAME(binding->args[j])
+						&& name == ZEND_TYPE_NAME(binding->args[j])) {
+					borrowed = true;
+					break;
+				}
+			}
+			if (!borrowed) {
+				zend_string_release(name);
+			}
+		}
+	}
+
+	zend_function_dtor(zv);
+}
+
+ZEND_API zend_function *zend_generics_get_method_instantiation(
+		zend_class_entry *ce, zend_string *method_name, zend_string *lc_name)
+{
+	zend_generic_name_slice base_slice;
+	zend_generic_name_slice arg_slices[ZEND_GENERICS_MAX_ARGS];
+	uint32_t num_args;
+
+	if (!EG(generics_method_cache)) {
+		ALLOC_HASHTABLE(EG(generics_method_cache));
+		zend_hash_init(EG(generics_method_cache), 8, NULL,
+			zend_generics_method_cache_dtor, 0);
+	}
+
+	zend_string *cache_key = zend_strpprintf(0, "%p:%s", (void *) ce, ZSTR_VAL(lc_name));
+	zval *zv = zend_hash_find(EG(generics_method_cache), cache_key);
+	if (zv) {
+		zend_string_release(cache_key);
+		return (zend_function *) Z_PTR_P(zv);
+	}
+
+	/* Args come from the display-cased spelling (the binding's class names
+	 * become display names of stamped instantiations); the base method is
+	 * looked up under the lowercased key. */
+	if (!zend_generics_parse_name(method_name, &base_slice, arg_slices, &num_args)) {
+		zend_throw_error(NULL, "Malformed generic method name \"%s\"", ZSTR_VAL(method_name));
+		zend_string_release(cache_key);
+		return NULL;
+	}
+
+	zend_function *base = zend_hash_str_find_ptr(&ce->function_table,
+		ZSTR_VAL(lc_name), base_slice.len);
+	if (!base) {
+		zend_throw_error(NULL, "Call to undefined method %s::%.*s()",
+			ZSTR_VAL(ce->name), (int) base_slice.len, ZSTR_VAL(method_name));
+		zend_string_release(cache_key);
+		return NULL;
+	}
+	if (base->type != ZEND_USER_FUNCTION || !base->op_array.generic_params) {
+		zend_throw_error(NULL, "Method %s::%.*s() is not generic",
+			ZSTR_VAL(ce->name), (int) base_slice.len, ZSTR_VAL(method_name));
+		zend_string_release(cache_key);
+		return NULL;
+	}
+
+	const zend_generic_params *mgp = base->op_array.generic_params;
+	if (mgp->num_params != num_args) {
+		zend_throw_error(NULL,
+			"Generic method %s::%s() expects %u type argument%s, %u given",
+			ZSTR_VAL(ce->name), ZSTR_VAL(base->common.function_name),
+			mgp->num_params, mgp->num_params == 1 ? "" : "s", num_args);
+		zend_string_release(cache_key);
+		return NULL;
+	}
+
+	/* Build the method binding (mirrors the class-stamp binding build). */
+	zend_generic_binding *binding = zend_arena_alloc(&CG(arena),
+		sizeof(zend_generic_binding) + (num_args - 1) * sizeof(zend_type));
+	binding->template_ce = ce;
+	binding->num_args = num_args;
+	for (uint32_t i = 0; i < num_args; i++) {
+		uint32_t scalar_mask = zend_generics_scalar_mask(&arg_slices[i]);
+		if (scalar_mask) {
+			binding->args[i] = (zend_type) ZEND_TYPE_INIT_MASK(scalar_mask);
+		} else {
+			zend_string *arg_name = zend_new_interned_string(
+				zend_string_init(arg_slices[i].start, arg_slices[i].len, 0));
+			zend_alloc_ce_cache(arg_name);
+			binding->args[i] = (zend_type) ZEND_TYPE_INIT_CLASS(arg_name, 0, 0);
+		}
+	}
+
+	/* Bounds, per method parameter (no packs on methods). */
+	for (uint32_t i = 0; i < mgp->num_params; i++) {
+		const zend_generic_param *param = &mgp->params[i];
+		if (!param->bound_name) {
+			continue;
+		}
+		if (!ZEND_TYPE_HAS_NAME(binding->args[i])) {
+			zend_throw_error(NULL,
+				"Cannot bind %s::%s(): scalar type argument does not satisfy the bound %s "
+				"of type parameter %s", ZSTR_VAL(ce->name), ZSTR_VAL(method_name),
+				ZSTR_VAL(param->bound_name), ZSTR_VAL(param->name));
+			goto fail;
+		}
+		zend_class_entry *arg_ce = zend_lookup_class(ZEND_TYPE_NAME(binding->args[i]));
+		zend_class_entry *bound_ce = arg_ce ? zend_lookup_class(param->bound_name) : NULL;
+		if (!arg_ce || !bound_ce) {
+			if (!EG(exception)) {
+				zend_throw_error(NULL, "Cannot bind %s::%s(): class %s was not found",
+					ZSTR_VAL(ce->name), ZSTR_VAL(method_name),
+					!arg_ce ? ZSTR_VAL(ZEND_TYPE_NAME(binding->args[i]))
+						: ZSTR_VAL(param->bound_name));
+			}
+			goto fail;
+		}
+		if (!instanceof_function(arg_ce, bound_ce)) {
+			zend_throw_error(NULL,
+				"%s does not satisfy the bound %s of type parameter %s on %s::%s()",
+				ZSTR_VAL(arg_ce->name), ZSTR_VAL(bound_ce->name),
+				ZSTR_VAL(param->name), ZSTR_VAL(ce->name),
+				ZSTR_VAL(base->common.function_name));
+			goto fail;
+		}
+	}
+
+	/* Clone the method header; opcodes stay shared with the base. */
+	{
+		zend_op_array *new_fn = zend_arena_alloc(&CG(arena), sizeof(zend_op_array));
+		memcpy(new_fn, &base->op_array, sizeof(zend_op_array));
+		if (new_fn->refcount) {
+			(*new_fn->refcount)++;
+		}
+		/* Display-cased mangled name for diagnostics ("map<App\Price>"). */
+		new_fn->function_name = zend_string_copy(method_name);
+		new_fn->fn_flags &= ~ZEND_ACC_IMMUTABLE;
+		ZEND_MAP_PTR_INIT(new_fn->run_time_cache, NULL);
+		ZEND_MAP_PTR_INIT(new_fn->static_variables_ptr, NULL);
+		new_fn->generic_binding = binding;
+
+		/* Substitute method params into the signature, if mentioned. */
+		if (new_fn->arg_info) {
+			uint32_t total = new_fn->num_args;
+			uint32_t has_ret = (new_fn->fn_flags & ZEND_ACC_HAS_RETURN_TYPE) ? 1 : 0;
+			zend_arg_info *tpl_base = new_fn->arg_info - has_ret;
+			total += has_ret;
+			if (new_fn->fn_flags & ZEND_ACC_VARIADIC) {
+				total++;
+			}
+
+			bool uses = false;
+			for (uint32_t i = 0; i < total; i++) {
+				if (zend_generics_method_type_uses_params(tpl_base[i].type, mgp)) {
+					uses = true;
+					break;
+				}
+			}
+			if (uses) {
+				char *block = zend_arena_alloc(&CG(arena),
+					sizeof(zend_arg_info *) + total * sizeof(zend_arg_info));
+				*(zend_arg_info **) block = base->op_array.arg_info;
+				zend_arg_info *entries = (zend_arg_info *) (block + sizeof(zend_arg_info *));
+				memcpy(entries, tpl_base, total * sizeof(zend_arg_info));
+				for (uint32_t i = 0; i < total; i++) {
+					zend_type *type = &entries[i].type;
+					if (!ZEND_TYPE_HAS_NAME(*type)
+							|| !zend_generics_method_type_uses_params(*type, mgp)) {
+						continue;
+					}
+					zend_string *tname = ZEND_TYPE_NAME(*type);
+					uint32_t extra = ZEND_TYPE_FULL_MASK(*type) & _ZEND_TYPE_MAY_BE_MASK;
+					if (!memchr(ZSTR_VAL(tname), '<', ZSTR_LEN(tname))) {
+						/* Bare U: swap in the bound argument. */
+						const zend_type *arg;
+						bool found = zend_generics_space_lookup(mgp, binding,
+							ZSTR_VAL(tname), ZSTR_LEN(tname), &arg);
+						ZEND_ASSERT(found);
+						if (ZEND_TYPE_HAS_NAME(*arg)) {
+							/* No ref taken: entries are never destroyed (the
+							 * base's original arg_info is restored first). */
+							type->ptr = ZEND_TYPE_NAME(*arg);
+							type->type_mask = _ZEND_TYPE_NAME_BIT | extra;
+						} else {
+							type->ptr = NULL;
+							type->type_mask = ZEND_TYPE_PURE_MASK(*arg) | extra;
+						}
+					} else {
+						/* Composite ("Sequence<U>"): string substitution.
+						 * The clone owns the new name; the cache dtor
+						 * releases it by pointer identity. */
+						zend_string *sub = zend_generics_substitute_symbol_str(
+							ZSTR_VAL(tname), ZSTR_LEN(tname), mgp, binding, NULL, NULL);
+						if (!sub) {
+							goto fail;
+						}
+						zend_alloc_ce_cache(sub);
+						type->ptr = sub;
+						type->type_mask = _ZEND_TYPE_NAME_BIT | extra;
+					}
+				}
+				new_fn->arg_info = entries + has_ret;
+				new_fn->fn_flags2 |= ZEND_ACC2_GENERIC_SUBST_ARG_INFO;
+			}
+		}
+
+		zv = zend_hash_add_new_ptr(EG(generics_method_cache), cache_key, new_fn);
+		zend_string_release(cache_key);
+		return (zend_function *) new_fn;
+	}
+
+fail:
+	for (uint32_t i = 0; i < num_args; i++) {
+		if (ZEND_TYPE_HAS_NAME(binding->args[i])) {
+			zend_string_release(ZEND_TYPE_NAME(binding->args[i]));
+		}
+	}
+	zend_string_release(cache_key);
+	return NULL;
+}
