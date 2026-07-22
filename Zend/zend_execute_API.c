@@ -2003,6 +2003,22 @@ static zend_never_inline zend_class_entry *zend_fetch_class_via_module(const zen
 zend_class_entry *zend_fetch_class_by_name(zend_string *class_name, zend_string *key, uint32_t fetch_type) /* {{{ */
 {
 	if (UNEXPECTED(ZSTR_LEN(class_name) > 0 && ZSTR_VAL(class_name)[0] == '\0')) {
+		if (ZSTR_LEN(class_name) > 1 && ZSTR_VAL(class_name)[1] == '\x01') {
+			/* Symbolic generic marker ("\0\x01" SYM): substitute against the
+			 * executing scope's binding, then resolve. */
+			zend_string *resolved = zend_generics_resolve_type_symbol(
+				ZSTR_VAL(class_name) + 2, ZSTR_LEN(class_name) - 2);
+			if (!resolved) {
+				return NULL;
+			}
+			zend_class_entry *marked_ce = zend_lookup_class_ex(resolved, NULL, fetch_type);
+			if (!marked_ce) {
+				report_class_fetch_error(resolved, fetch_type);
+			}
+			zend_string_release(resolved);
+			return marked_ce;
+		}
+		/* Module provenance marker ("\0" FQMN "\0" FQCN). */
 		return zend_fetch_class_via_module(class_name, fetch_type);
 	}
 
