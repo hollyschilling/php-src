@@ -317,13 +317,14 @@ static zend_string *zend_generics_request_type_name(zend_string *name)
 }
 
 /* Register an owned substituted composite name on the binding; released with
- * the instance (zend_opcode.c). Deduped: closures re-substitute the same few
- * names per creation. The binding is logically mutable here even where the
- * substitution walk is const. */
+ * the instance (zend_opcode.c). The binding is logically mutable here even
+ * where the substitution walk is const. */
 static zend_string *zend_generics_binding_own_name(
 		const zend_generic_binding *cbinding, zend_string *name)
 {
 	zend_generic_binding *binding = (zend_generic_binding *) cbinding;
+	/* Dedup: closures re-substitute per creation; the same scope produces the
+	 * same few names, which must not accumulate. */
 	for (uint32_t i = 0; i < binding->num_owned_names; i++) {
 		if (zend_string_equals(binding->owned_names[i], name)) {
 			zend_string_release(name);
@@ -442,7 +443,8 @@ static bool zend_generics_substitute_single(
 	return true;
 }
 
-/* Does `type` reference any template parameter (at any list depth)? */
+/* Does `type` reference any template parameter (at any list depth), either
+ * bare ("T") or inside a composite reference ("C<T>")? */
 static bool zend_generics_type_uses_params(
 		zend_type type, const zend_class_entry *template_ce)
 {
@@ -1654,7 +1656,8 @@ static void zend_generics_collect_op_array(
 			total++;
 		}
 		for (uint32_t i = 0; i < total; i++) {
-			zend_generics_collect_type_names(base[i].type, candidates, owner_gp);
+			zend_generics_collect_type_names(base[i].type, candidates,
+				op_array->generic_params ? op_array->generic_params : owner_gp);
 		}
 	}
 	if (op_array->literals) {
@@ -3219,7 +3222,7 @@ ZEND_API zend_string *zend_generics_resolve_method_symbol(const char *sym, size_
 	}
 	if (!mbind && !cbind) {
 		zend_throw_error(NULL,
-			"Cannot resolve a method type parameter when no generic method binding is in scope");
+			"Cannot resolve a symbolic generic type reference when no generic binding is in scope");
 		return NULL;
 	}
 	return zend_generics_substitute_symbol_str(sym, sym_len, mgp, mbind, cgp, cbind);
@@ -3371,6 +3374,9 @@ ZEND_API zend_function *zend_generics_get_method_instantiation(
 		sizeof(zend_generic_binding) + (num_args - 1) * sizeof(zend_type));
 	binding->template_ce = ce;
 	binding->num_args = num_args;
+	binding->num_owned_names = 0;
+	binding->owned_names_cap = 0;
+	binding->owned_names = NULL;
 	for (uint32_t i = 0; i < num_args; i++) {
 		uint32_t scalar_mask = zend_generics_scalar_mask(&arg_slices[i]);
 		if (scalar_mask) {
