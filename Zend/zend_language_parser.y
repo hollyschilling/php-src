@@ -1767,8 +1767,14 @@ function_call:
 		}
 	|	class_name T_PAAMAYIM_NEKUDOTAYIM member_name argument_list
 			{ $$ = zend_ast_create(ZEND_AST_STATIC_CALL, $1, $3, $4); }
+	|	class_name T_PAAMAYIM_NEKUDOTAYIM T_STRING T_GENERIC_OPEN generic_arg_list '>' argument_list
+			{ $$ = zend_ast_create(ZEND_AST_STATIC_CALL, $1,
+				  zend_ast_create(ZEND_AST_GENERIC_TYPE, $3, $5), $7); }
 	|	variable_class_name T_PAAMAYIM_NEKUDOTAYIM member_name argument_list
 			{ $$ = zend_ast_create(ZEND_AST_STATIC_CALL, $1, $3, $4); }
+	|	variable_class_name T_PAAMAYIM_NEKUDOTAYIM T_STRING T_GENERIC_OPEN generic_arg_list '>' argument_list
+			{ $$ = zend_ast_create(ZEND_AST_STATIC_CALL, $1,
+				  zend_ast_create(ZEND_AST_GENERIC_TYPE, $3, $5), $7); }
 	|	callable_expr { $<num>$ = CG(zend_lineno); } argument_list {
 			$$ = zend_ast_create(ZEND_AST_CALL, $1, $3);
 			$$->lineno = $<num>2;

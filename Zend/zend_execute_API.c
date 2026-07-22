@@ -1829,6 +1829,22 @@ check_fetch_type:
 			return ce;
 		case ZEND_FETCH_CLASS_TYPE_PARAM: {
 			uint32_t param_idx = fetch_type >> ZEND_FETCH_CLASS_TYPE_PARAM_SHIFT;
+			zend_type arg;
+			if (fetch_type & ZEND_FETCH_CLASS_TYPE_PARAM_METHOD) {
+				/* Method-space parameter (function map<U>): resolved against
+				 * the executing method instantiation's binding. */
+				const zend_execute_data *ex = EG(current_execute_data);
+				const zend_function *func = ex ? ex->func : NULL;
+				if (UNEXPECTED(!func || !ZEND_USER_CODE(func->common.type)
+						|| !func->op_array.generic_binding)) {
+					zend_throw_or_error(fetch_type, NULL,
+						"Cannot resolve a method type parameter when no generic method binding is in scope");
+					return NULL;
+				}
+				ZEND_ASSERT(param_idx < func->op_array.generic_binding->num_args);
+				arg = func->op_array.generic_binding->args[param_idx];
+				goto have_type_param;
+			}
 			scope = zend_get_executed_scope();
 			if (UNEXPECTED(!scope || !scope->generic_binding)) {
 				zend_throw_or_error(fetch_type, NULL,
@@ -1837,7 +1853,8 @@ check_fetch_type:
 			}
 			param_idx = zend_generics_binding_arg_index(scope, param_idx);
 			ZEND_ASSERT(param_idx < scope->generic_binding->num_args);
-			zend_type arg = scope->generic_binding->args[param_idx];
+			arg = scope->generic_binding->args[param_idx];
+have_type_param:;
 			if (UNEXPECTED(!ZEND_TYPE_HAS_NAME(arg))) {
 				zend_string *type_str = zend_type_to_string(arg);
 				zend_throw_or_error(fetch_type, NULL,
@@ -2013,7 +2030,7 @@ zend_class_entry *zend_fetch_class_by_name(zend_string *class_name, zend_string 
 			/* Method-symbol marker ("\0\x01" SYM): a class reference whose
 			 * arguments mention METHOD-level type parameters; substitute
 			 * against the executing method instantiation, then resolve. */
-			zend_string *resolved = zend_generics_resolve_method_symbol(
+			zend_string *resolved = zend_generics_resolve_type_symbol(
 				ZSTR_VAL(class_name) + 2, ZSTR_LEN(class_name) - 2);
 			if (!resolved) {
 				return NULL;

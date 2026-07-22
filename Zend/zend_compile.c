@@ -2011,6 +2011,9 @@ static void zend_ensure_valid_class_fetch_type(uint32_t fetch_type) /* {{{ */
 }
 /* }}} */
 
+static uint32_t zend_compile_type_param_index(const zend_ast *name_ast);
+static uint32_t zend_compile_method_type_param_index(const zend_ast *name_ast);
+
 static bool zend_try_compile_const_expr_resolve_class_name(zval *zv, zend_ast *class_ast) /* {{{ */
 {
 	uint32_t fetch_type;
@@ -2024,6 +2027,13 @@ static bool zend_try_compile_const_expr_resolve_class_name(zval *zv, zend_ast *c
 
 	if (Z_TYPE_P(class_name) != IS_STRING) {
 		zend_error_noreturn(E_COMPILE_ERROR, "Illegal class name");
+	}
+
+	if (zend_compile_type_param_index(class_ast) != (uint32_t) -1
+			|| zend_compile_method_type_param_index(class_ast) != (uint32_t) -1) {
+		/* T::class / U::class bind per instantiation: not a constant;
+		 * compiled as a runtime fetch instead of folded. */
+		return false;
 	}
 
 	fetch_type = zend_get_class_fetch_type(Z_STR_P(class_name));
@@ -3088,6 +3098,27 @@ static inline void zend_set_class_name_op1(zend_op *opline, znode *class_node) /
 
 /* If the AST is a bare single-label name matching a type parameter of the
  * class currently being compiled, return its index; otherwise (uint32_t)-1. */
+/* Index of the METHOD-level type parameter a bare name AST refers to, or
+ * (uint32_t)-1. */
+static uint32_t zend_compile_method_type_param_index(const zend_ast *name_ast)
+{
+	if (name_ast->kind != ZEND_AST_ZVAL || name_ast->attr != ZEND_NAME_NOT_FQ
+			|| !CG(active_op_array) || !CG(active_op_array)->generic_params) {
+		return (uint32_t) -1;
+	}
+	const zval *zv = zend_ast_get_zval((zend_ast *) name_ast);
+	if (Z_TYPE_P(zv) != IS_STRING || memchr(Z_STRVAL_P(zv), '\\', Z_STRLEN_P(zv))) {
+		return (uint32_t) -1;
+	}
+	const zend_generic_params *mgp = CG(active_op_array)->generic_params;
+	for (uint32_t i = 0; i < mgp->num_params; i++) {
+		if (zend_string_equals_ci(mgp->params[i].name, Z_STR_P(zv))) {
+			return i;
+		}
+	}
+	return (uint32_t) -1;
+}
+
 /* Returns the canonical name of the METHOD-level type parameter a bare
  * single-label name refers to, or NULL. */
 static zend_string *zend_active_method_type_param(const zend_string *name)
@@ -3204,18 +3235,15 @@ static void zend_compile_class_ref(znode *result, zend_ast *name_ast, uint32_t f
 		return;
 	}
 
-	if (name_ast->kind == ZEND_AST_ZVAL && name_ast->attr == ZEND_NAME_NOT_FQ
-			&& Z_TYPE_P(zend_ast_get_zval(name_ast)) == IS_STRING) {
-		zend_string *method_param =
-			zend_active_method_type_param(Z_STR_P(zend_ast_get_zval(name_ast)));
-		if (method_param) {
-			/* new U() inside a generic method: resolved at run time against
-			 * the executing method instantiation's binding. */
-			result->op_type = IS_CONST;
-			ZVAL_STR(&result->u.constant,
-				zend_mark_method_symbol(zend_string_copy(method_param)));
-			return;
-		}
+	uint32_t method_param_idx = zend_compile_method_type_param_index(name_ast);
+	if (method_param_idx != (uint32_t) -1) {
+		/* new U() / instanceof U / U::... resolve through the executing
+		 * method instantiation's binding; opcodes stay shared. */
+		result->op_type = IS_UNUSED;
+		result->u.op.num = ZEND_FETCH_CLASS_TYPE_PARAM
+			| ZEND_FETCH_CLASS_TYPE_PARAM_METHOD | fetch_flags
+			| (method_param_idx << ZEND_FETCH_CLASS_TYPE_PARAM_SHIFT);
+		return;
 	}
 
 	if (name_ast->kind != ZEND_AST_ZVAL) {
@@ -6024,7 +6052,27 @@ static void zend_compile_static_call(znode *result, zend_ast *ast, uint32_t type
 	zend_short_circuiting_mark_inner(class_ast);
 	zend_compile_class_ref(&class_node, class_ast, ZEND_FETCH_CLASS_EXCEPTION);
 
-	zend_compile_expr(&method_node, method_ast);
+	if (UNEXPECTED(method_ast->kind == ZEND_AST_GENERIC_TYPE)) {
+		/* Generic static call (Seq::of<Price>(...)): mangle the explicit
+		 * type arguments into the method-name literal, mirroring the
+		 * instance-call form. Arguments must be concrete. */
+		smart_str buf = {0};
+		const zend_ast_list *targs = zend_ast_get_list(method_ast->child[1]);
+		smart_str_append(&buf, zend_ast_get_str(method_ast->child[0]));
+		smart_str_appendc(&buf, '<');
+		for (uint32_t i = 0; i < targs->children; i++) {
+			if (i) {
+				smart_str_appendc(&buf, ',');
+			}
+			zend_append_generic_arg(&buf, targs->child[i],
+				/* allow_params */ false, NULL, NULL);
+		}
+		smart_str_appendc(&buf, '>');
+		method_node.op_type = IS_CONST;
+		ZVAL_STR(&method_node.u.constant, smart_str_extract(&buf));
+	} else {
+		zend_compile_expr(&method_node, method_ast);
+	}
 
 	if (method_node.op_type == IS_CONST) {
 		zval *name = &method_node.u.constant;
@@ -9576,6 +9624,12 @@ static zend_op_array *zend_compile_func_decl_ex(
 	 * before the signature compiles so type positions can intercept them. */
 	if (decl->child[5]) {
 		zend_compile_method_generic_params(op_array, decl->child[5], is_method);
+	} else if ((decl->kind == ZEND_AST_CLOSURE || decl->kind == ZEND_AST_ARROW_FUNC)
+			&& orig_op_array && orig_op_array->generic_params) {
+		/* Closures nested in a generic method see its type parameters; the
+		 * pointer is shared (no template flag) and the signature substitutes
+		 * at closure creation against the creating instantiation's binding. */
+		op_array->generic_params = orig_op_array->generic_params;
 	}
 
 	zend_oparray_context_begin(&orig_oparray_context, op_array);
@@ -10805,6 +10859,7 @@ static void zend_compile_method_generic_params(
 	}
 
 	op_array->generic_params = gp;
+	op_array->fn_flags2 |= ZEND_ACC2_GENERIC_METHOD_TEMPLATE;
 }
 
 static zend_class_entry *zend_compile_class_decl(znode *result, const zend_ast *ast, bool toplevel) /* {{{ */
@@ -13117,6 +13172,17 @@ static void zend_compile_class_name(znode *result, const zend_ast *ast) /* {{{ *
 		return;
 	}
 
+	uint32_t method_param_idx = zend_compile_method_type_param_index(class_ast);
+	if (method_param_idx != (uint32_t) -1) {
+		/* U::class resolves at runtime through the executing method
+		 * instantiation's binding. */
+		zend_op *opline = zend_emit_op_tmp(result, ZEND_FETCH_CLASS_NAME, NULL, NULL);
+		opline->op1.num = ZEND_FETCH_CLASS_TYPE_PARAM
+			| ZEND_FETCH_CLASS_TYPE_PARAM_METHOD
+			| (method_param_idx << ZEND_FETCH_CLASS_TYPE_PARAM_SHIFT);
+		return;
+	}
+
 	uint32_t param_idx = zend_compile_type_param_index(class_ast);
 	if (param_idx != (uint32_t) -1) {
 		/* T::class resolves at runtime through the scope's generic binding. */
@@ -13406,6 +13472,14 @@ static void zend_compile_const_expr_class_name(zend_ast **ast_ptr) /* {{{ */
 	}
 
 	zend_string *class_name = zend_ast_get_str(class_ast);
+
+	if (zend_compile_type_param_index(class_ast) != (uint32_t) -1
+			|| zend_compile_method_type_param_index(class_ast) != (uint32_t) -1) {
+		zend_error_noreturn(E_COMPILE_ERROR,
+			"Cannot use type parameter %s::class in a constant expression",
+			ZSTR_VAL(class_name));
+	}
+
 	uint32_t fetch_type = zend_get_class_fetch_type(class_name);
 
 	switch (fetch_type) {

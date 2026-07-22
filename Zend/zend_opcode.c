@@ -625,6 +625,18 @@ ZEND_API void destroy_op_array(zend_op_array *op_array)
 		return;
 	}
 
+	if (UNEXPECTED(op_array->fn_flags2 & ZEND_ACC2_GENERIC_METHOD_TEMPLATE)
+			&& op_array->generic_params) {
+		/* Release is a no-op for the (usual) interned case; the arena owns
+		 * the struct. Clones cleared the flag, so this runs exactly once. */
+		for (uint32_t i = 0; i < op_array->generic_params->num_params; i++) {
+			zend_string_release_ex(op_array->generic_params->params[i].name, 0);
+			if (op_array->generic_params->params[i].bound_name) {
+				zend_string_release_ex(op_array->generic_params->params[i].bound_name, 0);
+			}
+		}
+	}
+
 	if (UNEXPECTED(op_array->fn_flags2 & ZEND_ACC2_GENERIC_SUBST_ARG_INFO)) {
 		/* This header carries an arena-allocated, type-substituted arg_info
 		 * (generic instantiation clone). Its entries own nothing the arena and

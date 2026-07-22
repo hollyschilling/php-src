@@ -459,6 +459,105 @@ ZEND_API void zend_generics_substitute_closure_signature(
 	op_array->fn_flags2 |= ZEND_ACC2_GENERIC_SUBST_ARG_INFO;
 }
 
+static bool zend_generics_space_lookup(
+	const zend_generic_params *gp, const zend_generic_binding *binding,
+	const char *name, size_t name_len, const zend_type **out);
+static zend_string *zend_generics_substitute_symbol_str(
+	const char *sym, size_t sym_len,
+	const zend_generic_params *mgp, const zend_generic_binding *mbind,
+	const zend_generic_params *cgp, const zend_generic_binding *cbind);
+static bool zend_generics_method_type_uses_params(
+	zend_type type, const zend_generic_params *mgp);
+
+/* Closure creation, method-space pass: substitute the creating method
+ * instantiation's type arguments (function map<U>) into the closure's
+ * signature copy. Runs after (or independent of) the class-space pass. */
+ZEND_API void zend_generics_substitute_closure_method_signature(
+		zend_op_array *op_array)
+{
+	const zend_execute_data *ex = EG(current_execute_data);
+	const zend_function *creator = ex ? ex->func : NULL;
+
+	if (op_array->type != ZEND_USER_FUNCTION || !op_array->arg_info
+			|| !op_array->generic_params || op_array->generic_binding
+			|| !creator || !ZEND_USER_CODE(creator->common.type)
+			|| creator->op_array.generic_params != op_array->generic_params
+			|| !creator->op_array.generic_binding) {
+		return;
+	}
+	const zend_generic_params *mgp = op_array->generic_params;
+	const zend_generic_binding *mbind = creator->op_array.generic_binding;
+
+	uint32_t total = op_array->num_args;
+	uint32_t has_ret = (op_array->fn_flags & ZEND_ACC_HAS_RETURN_TYPE) ? 1 : 0;
+	zend_arg_info *base = op_array->arg_info - has_ret;
+	total += has_ret;
+	if (op_array->fn_flags & ZEND_ACC_VARIADIC) {
+		total++;
+	}
+
+	bool uses = false;
+	for (uint32_t i = 0; i < total; i++) {
+		if (zend_generics_method_type_uses_params(base[i].type, mgp)) {
+			uses = true;
+			break;
+		}
+	}
+	if (!uses) {
+		/* The executing binding travels for body references either way. */
+		op_array->generic_binding = creator->op_array.generic_binding;
+		return;
+	}
+
+	zend_arg_info *entries;
+	if (op_array->fn_flags2 & ZEND_ACC2_GENERIC_SUBST_ARG_INFO) {
+		/* The class-space pass already made a private copy. */
+		entries = base;
+	} else {
+		char *block = zend_arena_alloc(&CG(arena),
+			sizeof(zend_arg_info *) + total * sizeof(zend_arg_info));
+		*(zend_arg_info **) block = op_array->arg_info;
+		entries = (zend_arg_info *) (block + sizeof(zend_arg_info *));
+		memcpy(entries, base, total * sizeof(zend_arg_info));
+		op_array->arg_info = entries + has_ret;
+		op_array->fn_flags2 |= ZEND_ACC2_GENERIC_SUBST_ARG_INFO;
+	}
+	for (uint32_t i = 0; i < total; i++) {
+		zend_type *type = &entries[i].type;
+		if (!ZEND_TYPE_HAS_NAME(*type)
+				|| !zend_generics_method_type_uses_params(*type, mgp)) {
+			continue;
+		}
+		zend_string *tname = ZEND_TYPE_NAME(*type);
+		uint32_t extra = ZEND_TYPE_FULL_MASK(*type) & _ZEND_TYPE_MAY_BE_MASK;
+		if (!memchr(ZSTR_VAL(tname), '<', ZSTR_LEN(tname))) {
+			const zend_type *arg;
+			bool found = zend_generics_space_lookup(mgp, mbind,
+				ZSTR_VAL(tname), ZSTR_LEN(tname), &arg);
+			ZEND_ASSERT(found);
+			if (ZEND_TYPE_HAS_NAME(*arg)) {
+				type->ptr = ZEND_TYPE_NAME(*arg);
+				type->type_mask = _ZEND_TYPE_NAME_BIT | extra;
+			} else {
+				type->ptr = NULL;
+				type->type_mask = ZEND_TYPE_PURE_MASK(*arg) | extra;
+			}
+		} else {
+			zend_string *sub = zend_generics_substitute_symbol_str(
+				ZSTR_VAL(tname), ZSTR_LEN(tname), mgp, mbind, NULL, NULL);
+			if (!sub) {
+				return;
+			}
+			zend_alloc_ce_cache(sub);
+			sub = zend_generics_binding_own_name(mbind, sub);
+			type->ptr = sub;
+			type->type_mask = _ZEND_TYPE_NAME_BIT | extra;
+		}
+	}
+	/* Body references (new U, U::class) resolve through this binding. */
+	op_array->generic_binding = creator->op_array.generic_binding;
+}
+
 static zend_op_array *zend_generics_clone_method(
 		zend_op_array *tpl_fn, zend_class_entry *ce,
 		const zend_class_entry *template_ce, const zend_generic_binding *binding,
@@ -475,6 +574,9 @@ static zend_op_array *zend_generics_clone_method(
 	}
 	new_fn->scope = ce;
 	new_fn->fn_flags &= ~ZEND_ACC_IMMUTABLE;
+	/* Clones share the method template's generic_params; only the declaring
+	 * op_array releases them. */
+	new_fn->fn_flags2 &= ~ZEND_ACC2_GENERIC_METHOD_TEMPLATE;
 	ZEND_MAP_PTR_INIT(new_fn->run_time_cache, NULL);
 	ZEND_MAP_PTR_INIT(new_fn->static_variables_ptr, NULL);
 
@@ -1501,7 +1603,7 @@ static zend_string *zend_generics_substitute_symbol_str(
 	return smart_str_extract(&buf);
 }
 
-ZEND_API zend_string *zend_generics_resolve_method_symbol(const char *sym, size_t sym_len)
+ZEND_API zend_string *zend_generics_resolve_type_symbol(const char *sym, size_t sym_len)
 {
 	const zend_execute_data *ex = EG(current_execute_data);
 	const zend_function *func = ex ? ex->func : NULL;
@@ -1739,6 +1841,7 @@ ZEND_API zend_function *zend_generics_get_method_instantiation(
 		/* Display-cased mangled name for diagnostics ("map<App\Price>"). */
 		new_fn->function_name = zend_string_copy(method_name);
 		new_fn->fn_flags &= ~ZEND_ACC_IMMUTABLE;
+		new_fn->fn_flags2 &= ~ZEND_ACC2_GENERIC_METHOD_TEMPLATE;
 		ZEND_MAP_PTR_INIT(new_fn->run_time_cache, NULL);
 		ZEND_MAP_PTR_INIT(new_fn->static_variables_ptr, NULL);
 		new_fn->generic_binding = binding;

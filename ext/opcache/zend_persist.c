@@ -448,12 +448,30 @@ static void zend_persist_op_array_ex(zend_op_array *op_array, zend_persistent_sc
 	zend_op *persist_ptr;
 	zval *orig_literals = NULL;
 
-	/* Generic-method SPIKE: method-level generic params are arena-allocated
-	 * and runtime-only; never carry the pointers into SHM. Generic methods
-	 * on persisted scripts therefore degrade to "not generic" under opcache
-	 * until persistence is implemented. */
-	op_array->generic_params = NULL;
-	op_array->generic_binding = NULL;
+	/* Method-level generic params: shared between the declaring template
+	 * op_array and its clones (class stamps, trait copies); the xlat table
+	 * dedupes so the struct persists once. Method INSTANTIATION clones
+	 * (generic_binding set) live only in the per-request cache and never
+	 * reach persist. */
+	ZEND_ASSERT(op_array->generic_binding == NULL);
+	if (op_array->generic_params) {
+		zend_generic_params *gp = zend_shared_alloc_get_xlat_entry(op_array->generic_params);
+		if (!gp) {
+			ZEND_ASSERT(op_array->generic_params->deferred_interfaces == NULL
+				&& op_array->generic_params->deferred_parent == NULL);
+			/* Arena-allocated at compile time: copy without freeing. */
+			gp = zend_shared_memdup_put(op_array->generic_params,
+				sizeof(zend_generic_params)
+					+ (op_array->generic_params->num_params - 1) * sizeof(zend_generic_param));
+			for (uint32_t i = 0; i < gp->num_params; i++) {
+				zend_accel_store_interned_string(gp->params[i].name);
+				if (gp->params[i].bound_name) {
+					zend_accel_store_interned_string(gp->params[i].bound_name);
+				}
+			}
+		}
+		op_array->generic_params = gp;
+	}
 
 	if (op_array->refcount && --(*op_array->refcount) == 0) {
 		efree(op_array->refcount);

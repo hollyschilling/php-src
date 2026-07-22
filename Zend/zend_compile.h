@@ -478,6 +478,11 @@ typedef struct _zend_oparray_context {
 /* restored by destroy_op_array before the final free     |     |     |     */
 #define ZEND_ACC2_GENERIC_SUBST_ARG_INFO (1 << 3)  /*     |  X  |     |     */
 
+/* Generic METHOD prototype ("function map<U>"): set on the declaring
+ * op_array only; clones (class stamps, method instantiations) clear it so
+ * the shared generic_params are released exactly once.  |     |     |     */
+#define ZEND_ACC2_GENERIC_METHOD_TEMPLATE (1 << 4) /*     |  X  |     |     */
+
 #define ZEND_ACC_PPP_MASK  (ZEND_ACC_PUBLIC | ZEND_ACC_PROTECTED | ZEND_ACC_PRIVATE)
 #define ZEND_ACC_PPP_SET_MASK  (ZEND_ACC_PUBLIC_SET | ZEND_ACC_PROTECTED_SET | ZEND_ACC_PRIVATE_SET)
 
@@ -1151,6 +1156,10 @@ ZEND_API zend_string *zend_type_to_string(zend_type type);
 #define ZEND_FETCH_CLASS_ALLOW_NEARLY_LINKED 0x0800
 /* Skip the module acquisition gate (dynamic paths, inheritance does its own). */
 #define ZEND_FETCH_CLASS_NO_MODULE_GATE 0x1000
+/* ZEND_FETCH_CLASS_TYPE_PARAM index addresses the executing FUNCTION's
+ * method-level type parameters (function map<U>) instead of the scope
+ * class's. */
+#define ZEND_FETCH_CLASS_TYPE_PARAM_METHOD 0x2000
 
 /* These should not clash with ZEND_ACC_PPP_MASK and ZEND_ACC_PPP_SET_MASK */
 #define ZEND_PARAM_REF      (1<<3)

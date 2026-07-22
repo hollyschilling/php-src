@@ -33,6 +33,12 @@ ZEND_API void zend_generics_preload_stamp_all(void);
 ZEND_API void zend_generics_substitute_closure_signature(
 		zend_op_array *op_array, const zend_class_entry *scope);
 
+/* Closure creation: substitute the creating METHOD instantiation's type
+ * arguments (function map<U>) into the closure's signature copy, and hand
+ * the binding to the closure for body references. */
+ZEND_API void zend_generics_substitute_closure_method_signature(
+		zend_op_array *op_array);
+
 /* Maps a template type-parameter index (as carried by
  * ZEND_FETCH_CLASS_TYPE_PARAM opcodes) to the argument index in the scope's
  * binding. Identity without a pack; with one, post-pack params shift by the
@@ -54,7 +60,7 @@ ZEND_API zend_function *zend_generics_get_method_instantiation(
 /* Resolve a compiler-emitted method-symbol class reference ("U",
  * "Sequence<U>") against the executing method instantiation's binding (and,
  * secondarily, the scope's class binding). Owned string or NULL + throw. */
-ZEND_API zend_string *zend_generics_resolve_method_symbol(const char *sym, size_t sym_len);
+ZEND_API zend_string *zend_generics_resolve_type_symbol(const char *sym, size_t sym_len);
 
 END_EXTERN_C()
 
