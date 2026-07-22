@@ -24,6 +24,7 @@
 #include "zend_compile.h"
 #include "zend_constants.h"
 #include "zend_extension_methods.h"
+#include "zend_generics.h"
 #include "zend_surfaces.h"
 #include "zend_llist.h"
 #include "zend_API.h"
@@ -3157,13 +3158,19 @@ static void zend_compile_class_ref(znode *result, zend_ast *name_ast, uint32_t f
 	if (name_ast->kind == ZEND_AST_GENERIC_TYPE) {
 		/* Mangled generic names are already fully qualified. */
 		result->op_type = IS_CONST;
+		bool uses_params = false;
 		bool uses_method_params = false;
 		zend_string *resolved = zend_resolve_generic_type_ast_ex(
-			name_ast, /* allow_params */ false, NULL, &uses_method_params);
-		if (UNEXPECTED(uses_method_params)) {
-			/* "new Sequence<U>()" inside a generic method: symbolic until the
-			 * call-site binding is known; the marker routes the fetch through
-			 * runtime substitution (zend_generics_fetch_method_symbol). */
+			name_ast, /* allow_params */ true, &uses_params, &uses_method_params);
+		if (UNEXPECTED(uses_params || uses_method_params)) {
+			/* "new C<T>()" in a template body / "new Sequence<U>()" in a
+			 * generic method: symbolic until the executing binding is known;
+			 * the marker routes the fetch through runtime substitution. */
+			if (UNEXPECTED(name_ast->child[0]->kind == ZEND_AST_ZVAL
+					&& name_ast->child[0]->attr == ZEND_NAME_MODULE)) {
+				zend_error_noreturn(E_COMPILE_ERROR,
+					"Module-qualified generic references cannot mention type parameters");
+			}
 			ZVAL_STR(&result->u.constant, zend_mark_method_symbol(resolved));
 			return;
 		}
@@ -7824,14 +7831,15 @@ static void zend_append_generic_arg(smart_str *buf, zend_ast *ast, bool allow_pa
 		 * the pack's per-instantiation arguments splice in at stamp time. */
 		zend_ast *inner = ast->child[0];
 		zend_string *inner_name = zend_ast_get_str(inner);
-		if (!allow_params) {
+		const zend_generic_params *gp = CG(active_class_entry)
+			? CG(active_class_entry)->generic_params : NULL;
+		if (!allow_params || !gp) {
 			zend_error_noreturn(E_COMPILE_ERROR,
 				"Cannot use ... in a generic type argument "
 				"(type arguments must be concrete in this version)");
 		}
-		const zend_generic_params *gp = CG(active_class_entry)->generic_params;
 		if (inner->attr != ZEND_NAME_NOT_FQ
-				|| !gp || gp->pack_index == (uint32_t) -1
+				|| gp->pack_index == (uint32_t) -1
 				|| !zend_string_equals_ci(
 					gp->params[gp->pack_index].name, inner_name)) {
 			zend_error_noreturn(E_COMPILE_ERROR,
@@ -7962,15 +7970,17 @@ static zend_type zend_compile_single_typename(zend_ast *ast)
 {
 	ZEND_ASSERT(!(ast->attr & ZEND_TYPE_NULLABLE));
 	if (ast->kind == ZEND_AST_GENERIC_TYPE) {
+		bool uses_params = false;
 		bool uses_method_params = false;
 		zend_string *mangled = zend_resolve_generic_type_ast_ex(
-			ast, /* allow_params */ false, NULL, &uses_method_params);
-		if (!uses_method_params) {
+			ast, /* allow_params */ true, &uses_params, &uses_method_params);
+		if (!uses_params && !uses_method_params) {
 			zend_alloc_ce_cache(mangled);
 		}
-		/* Symbolic refs ("Sequence<U>") are substituted per instantiation at
-		 * method-stamp time; they are never class-table keys themselves.
-		 * The type consumes the owned reference. */
+		/* Symbolic refs ("C<T>" with the template's own parameters,
+		 * "Sequence<U>" with a method's) are substituted per instantiation
+		 * at class- respectively method-stamp time; they are never
+		 * class-table keys themselves. The type consumes the owned ref. */
 		return (zend_type) ZEND_TYPE_INIT_CLASS(mangled, /* allow null */ false, 0);
 	}
 	if (ast->kind == ZEND_AST_TYPE) {
@@ -8411,6 +8421,33 @@ static zend_type zend_compile_typename_ex(
 
 	if ((type_mask & MAY_BE_NEVER) && (ZEND_TYPE_IS_COMPLEX(type) || type_mask != MAY_BE_NEVER)) {
 		zend_error_noreturn(E_COMPILE_ERROR, "never can only be used as a standalone type");
+	}
+
+	if (ZEND_TYPE_HAS_LIST(type)) {
+		/* Param-dependent composite members ("Vec<T>|X") would need
+		 * per-instantiation list substitution; reject at declaration so no
+		 * partially-stamped instantiation can arise from it. Bare "T|X" is
+		 * likewise unsupported in this version. */
+		const zend_type *list_type;
+		ZEND_TYPE_LIST_FOREACH(ZEND_TYPE_LIST(type), list_type) {
+			if (!ZEND_TYPE_HAS_NAME(*list_type)) {
+				continue;
+			}
+			zend_string *member = ZEND_TYPE_NAME(*list_type);
+			bool symbolic = CG(active_class_entry)
+				&& CG(active_class_entry)->generic_params
+				&& zend_generics_name_mentions_params(member,
+					CG(active_class_entry)->generic_params);
+			if (!symbolic && CG(active_op_array) && CG(active_op_array)->generic_params) {
+				symbolic = zend_generics_name_mentions_params(member,
+					CG(active_op_array)->generic_params);
+			}
+			if (symbolic) {
+				zend_error_noreturn(E_COMPILE_ERROR,
+					"Parameterized type %s is not supported inside a composite type "
+					"(in this version)", ZSTR_VAL(member));
+			}
+		} ZEND_TYPE_LIST_FOREACH_END();
 	}
 
 	ast->attr = orig_ast_attr;

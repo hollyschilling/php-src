@@ -218,6 +218,35 @@ static void zend_generics_type_copy_ctor(zend_type *type, bool take_refs)
 	}
 }
 
+static zend_string *zend_generics_substitute_deferred_ref(
+	zend_string *ref, const zend_class_entry *template_ce,
+	const zend_generic_binding *binding);
+
+
+/* Register an owned substituted composite name on the binding; released with
+ * the instance (zend_opcode.c). The binding is logically mutable here even
+ * where the substitution walk is const. */
+static zend_string *zend_generics_binding_own_name(
+		const zend_generic_binding *cbinding, zend_string *name)
+{
+	zend_generic_binding *binding = (zend_generic_binding *) cbinding;
+	/* Dedup: closures re-substitute per creation; the same scope produces the
+	 * same few names, which must not accumulate. */
+	for (uint32_t i = 0; i < binding->num_owned_names; i++) {
+		if (zend_string_equals(binding->owned_names[i], name)) {
+			zend_string_release(name);
+			return binding->owned_names[i];
+		}
+	}
+	if (binding->num_owned_names == binding->owned_names_cap) {
+		binding->owned_names_cap = binding->owned_names_cap ? binding->owned_names_cap * 2 : 4;
+		binding->owned_names = erealloc(binding->owned_names,
+			binding->owned_names_cap * sizeof(zend_string *));
+	}
+	binding->owned_names[binding->num_owned_names++] = name;
+	return name;
+}
+
 /* Substitute template type parameters in a single-name type in place.
  * Returns true if a substitution happened. The result owns its strings. */
 static bool zend_generics_substitute_single(
@@ -229,6 +258,23 @@ static bool zend_generics_substitute_single(
 	}
 	uint32_t idx = zend_generics_param_index(template_ce, ZEND_TYPE_NAME(*type));
 	if (idx == (uint32_t) -1) {
+		zend_string *tname = ZEND_TYPE_NAME(*type);
+		if (zend_generics_name_mentions_params(tname, template_ce->generic_params)) {
+			/* Composite reference mentioning template params ("C<T>"):
+			 * substitute at the string level. The binding owns the new name
+			 * in the never-destroyed arg_info case; prop/const types release
+			 * theirs through zend_type_release as usual. */
+			zend_string *sub = zend_generics_substitute_deferred_ref(
+				tname, template_ce, binding);
+			zend_alloc_ce_cache(sub);
+			if (!take_refs) {
+				sub = zend_generics_binding_own_name(binding, sub);
+			}
+			uint32_t extra_mask2 = ZEND_TYPE_FULL_MASK(*type) & _ZEND_TYPE_MAY_BE_MASK;
+			type->ptr = sub;
+			type->type_mask = _ZEND_TYPE_NAME_BIT | extra_mask2;
+			return true;
+		}
 		return false;
 	}
 
@@ -251,7 +297,42 @@ static bool zend_generics_substitute_single(
 	return true;
 }
 
-/* Does `type` reference any template parameter (at any list depth)? */
+/* Does a composite (mangled) name mention any of gp's parameters as a bare
+ * argument? Accepts an optional "..." spread prefix per argument. */
+ZEND_API bool zend_generics_name_mentions_params(
+		const zend_string *name, const zend_generic_params *gp)
+{
+	const char *lt = memchr(ZSTR_VAL(name), '<', ZSTR_LEN(name));
+	if (!lt) {
+		return false;
+	}
+	const char *end = ZSTR_VAL(name) + ZSTR_LEN(name);
+	const char *p = lt + 1;
+	while (p < end) {
+		const char *comma = memchr(p, ',', end - p);
+		const char *arg_end = comma ? comma : end - 1;
+		const char *a = p;
+		if (arg_end - a > 3 && a[0] == '.' && a[1] == '.' && a[2] == '.') {
+			a += 3;
+		}
+		if (!memchr(a, '<', arg_end - a) && !memchr(a, '\\', arg_end - a)) {
+			for (uint32_t i = 0; i < gp->num_params; i++) {
+				if (zend_binary_strcasecmp(a, arg_end - a,
+						ZSTR_VAL(gp->params[i].name), ZSTR_LEN(gp->params[i].name)) == 0) {
+					return true;
+				}
+			}
+		}
+		if (!comma) {
+			break;
+		}
+		p = comma + 1;
+	}
+	return false;
+}
+
+/* Does `type` reference any template parameter (at any list depth), either
+ * bare ("T") or inside a composite reference ("C<T>")? */
 static bool zend_generics_type_uses_params(
 		zend_type type, const zend_class_entry *template_ce)
 {
@@ -264,8 +345,14 @@ static bool zend_generics_type_uses_params(
 		} ZEND_TYPE_LIST_FOREACH_END();
 		return false;
 	}
-	return ZEND_TYPE_HAS_NAME(type)
-		&& zend_generics_param_index(template_ce, ZEND_TYPE_NAME(type)) != (uint32_t) -1;
+	if (!ZEND_TYPE_HAS_NAME(type)) {
+		return false;
+	}
+	if (zend_generics_param_index(template_ce, ZEND_TYPE_NAME(type)) != (uint32_t) -1) {
+		return true;
+	}
+	return zend_generics_name_mentions_params(
+		ZEND_TYPE_NAME(type), template_ce->generic_params);
 }
 
 /* Copy `type` with substitution applied, owning all strings. Throws (and
@@ -280,6 +367,14 @@ static bool zend_generics_substitute_type(
 		zend_type *list_type;
 		ZEND_TYPE_LIST_FOREACH_MUTABLE(ZEND_TYPE_LIST(*type), list_type) {
 			if (ZEND_TYPE_HAS_NAME(*list_type)) {
+				if (zend_generics_name_mentions_params(
+						ZEND_TYPE_NAME(*list_type), template_ce->generic_params)) {
+					zend_throw_error(NULL,
+						"Cannot stamp %s: parameterized type %s is not supported "
+						"inside a composite type",
+						ZSTR_VAL(display_name), ZSTR_VAL(ZEND_TYPE_NAME(*list_type)));
+					return false;
+				}
 				uint32_t idx = zend_generics_param_index(template_ce, ZEND_TYPE_NAME(*list_type));
 				if (idx != (uint32_t) -1) {
 					uint32_t arg_start, arg_count;
@@ -767,22 +862,28 @@ static bool zend_generics_check_bounds(
 	return true;
 }
 
-static void zend_generics_collect_type_names(zend_type type, HashTable *candidates)
+static void zend_generics_collect_type_names(
+		zend_type type, HashTable *candidates, const zend_generic_params *owner_gp)
 {
 	if (ZEND_TYPE_HAS_LIST(type)) {
 		const zend_type *list_type;
 		ZEND_TYPE_LIST_FOREACH(ZEND_TYPE_LIST(type), list_type) {
-			zend_generics_collect_type_names(*list_type, candidates);
+			zend_generics_collect_type_names(*list_type, candidates, owner_gp);
 		} ZEND_TYPE_LIST_FOREACH_END();
 	} else if (ZEND_TYPE_HAS_NAME(type)) {
 		zend_string *name = ZEND_TYPE_NAME(type);
-		if (memchr(ZSTR_VAL(name), '<', ZSTR_LEN(name))) {
+		if (memchr(ZSTR_VAL(name), '<', ZSTR_LEN(name))
+				/* Symbolic template positions ("C<T>") are per-instantiation;
+				 * only concrete names are preload-stampable. */
+				&& !(owner_gp && zend_generics_name_mentions_params(name, owner_gp))) {
 			zend_hash_add_empty_element(candidates, name);
 		}
 	}
 }
 
-static void zend_generics_collect_op_array(const zend_op_array *op_array, HashTable *candidates)
+static void zend_generics_collect_op_array(
+		const zend_op_array *op_array, HashTable *candidates,
+		const zend_generic_params *owner_gp)
 {
 	if (op_array->type != ZEND_USER_FUNCTION) {
 		return;
@@ -798,7 +899,8 @@ static void zend_generics_collect_op_array(const zend_op_array *op_array, HashTa
 			total++;
 		}
 		for (uint32_t i = 0; i < total; i++) {
-			zend_generics_collect_type_names(base[i].type, candidates);
+			zend_generics_collect_type_names(base[i].type, candidates,
+				op_array->generic_params ? op_array->generic_params : owner_gp);
 		}
 	}
 	if (op_array->literals) {
@@ -816,7 +918,7 @@ static void zend_generics_collect_op_array(const zend_op_array *op_array, HashTa
 		}
 	}
 	for (uint32_t i = 0; i < op_array->num_dynamic_func_defs; i++) {
-		zend_generics_collect_op_array(op_array->dynamic_func_defs[i], candidates);
+		zend_generics_collect_op_array(op_array->dynamic_func_defs[i], candidates, owner_gp);
 	}
 }
 
@@ -845,12 +947,14 @@ ZEND_API void zend_generics_preload_stamp_all(void)
 			const zend_property_info *prop_info;
 			ZEND_HASH_MAP_FOREACH_PTR(&scan_ce->properties_info, prop_info) {
 				if (prop_info->ce == scan_ce) {
-					zend_generics_collect_type_names(prop_info->type, &candidates);
+					zend_generics_collect_type_names(prop_info->type, &candidates,
+						scan_ce->generic_params);
 					if (prop_info->hooks) {
 						for (uint32_t i = 0; i < ZEND_PROPERTY_HOOK_COUNT; i++) {
 							if (prop_info->hooks[i]) {
 								zend_generics_collect_op_array(
-									&prop_info->hooks[i]->op_array, &candidates);
+									&prop_info->hooks[i]->op_array, &candidates,
+									scan_ce->generic_params);
 							}
 						}
 					}
@@ -859,20 +963,22 @@ ZEND_API void zend_generics_preload_stamp_all(void)
 			const zend_class_constant *c;
 			ZEND_HASH_MAP_FOREACH_PTR(&scan_ce->constants_table, c) {
 				if (c->ce == scan_ce) {
-					zend_generics_collect_type_names(c->type, &candidates);
+					zend_generics_collect_type_names(c->type, &candidates,
+						scan_ce->generic_params);
 				}
 			} ZEND_HASH_FOREACH_END();
 			const zend_op_array *method;
 			ZEND_HASH_MAP_FOREACH_PTR(&scan_ce->function_table, method) {
 				if (method->scope == scan_ce) {
-					zend_generics_collect_op_array(method, &candidates);
+					zend_generics_collect_op_array(method, &candidates,
+						scan_ce->generic_params);
 				}
 			} ZEND_HASH_FOREACH_END();
 		} ZEND_HASH_FOREACH_END();
 
 		const zend_op_array *fn;
 		ZEND_HASH_MAP_FOREACH_PTR(EG(function_table), fn) {
-			zend_generics_collect_op_array(fn, &candidates);
+			zend_generics_collect_op_array(fn, &candidates, NULL);
 		} ZEND_HASH_FOREACH_END();
 
 		zend_string *candidate;
@@ -1198,6 +1304,9 @@ static zend_class_entry *zend_generics_stamp_instantiation_impl(
 		sizeof(zend_generic_binding) + (num_args - 1) * sizeof(zend_type));
 	binding->template_ce = template_ce;
 	binding->num_args = num_args;
+	binding->num_owned_names = 0;
+	binding->owned_names_cap = 0;
+	binding->owned_names = NULL;
 	for (uint32_t i = 0; i < num_args; i++) {
 		uint32_t scalar_mask = zend_generics_scalar_mask(&arg_slices[i]);
 		if (scalar_mask) {
@@ -1412,7 +1521,7 @@ ZEND_API zend_string *zend_generics_resolve_method_symbol(const char *sym, size_
 	}
 	if (!mbind && !cbind) {
 		zend_throw_error(NULL,
-			"Cannot resolve a method type parameter when no generic method binding is in scope");
+			"Cannot resolve a symbolic generic type reference when no generic binding is in scope");
 		return NULL;
 	}
 	return zend_generics_substitute_symbol_str(sym, sym_len, mgp, mbind, cgp, cbind);
@@ -1571,6 +1680,9 @@ ZEND_API zend_function *zend_generics_get_method_instantiation(
 		sizeof(zend_generic_binding) + (num_args - 1) * sizeof(zend_type));
 	binding->template_ce = ce;
 	binding->num_args = num_args;
+	binding->num_owned_names = 0;
+	binding->owned_names_cap = 0;
+	binding->owned_names = NULL;
 	for (uint32_t i = 0; i < num_args; i++) {
 		uint32_t scalar_mask = zend_generics_scalar_mask(&arg_slices[i]);
 		if (scalar_mask) {

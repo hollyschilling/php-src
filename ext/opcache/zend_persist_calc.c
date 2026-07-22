@@ -661,6 +661,12 @@ void zend_persist_class_entry_calc(zend_class_entry *ce)
 					ce->generic_binding->args[i].ptr = type_name;
 				}
 			}
+			if (ce->generic_binding->owned_names) {
+				for (uint32_t i = 0; i < ce->generic_binding->num_owned_names; i++) {
+					ADD_INTERNED_STRING(ce->generic_binding->owned_names[i]);
+				}
+				ADD_SIZE(sizeof(zend_string *) * ce->generic_binding->num_owned_names);
+			}
 			ADD_SIZE(sizeof(zend_generic_binding)
 				+ (ce->generic_binding->num_args - 1) * sizeof(zend_type));
 		}

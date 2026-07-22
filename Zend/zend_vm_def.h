@@ -8461,7 +8461,21 @@ ZEND_VM_C_LABEL(try_instanceof):
 		if (OP2_TYPE == IS_CONST) {
 			ce = CACHED_PTR(opline->extended_value);
 			if (UNEXPECTED(ce == NULL)) {
-				ce = zend_lookup_class_ex(Z_STR_P(RT_CONSTANT(opline, opline->op2)), Z_STR_P(RT_CONSTANT(opline, opline->op2) + 1), ZEND_FETCH_CLASS_NO_AUTOLOAD);
+				zval *class_const = RT_CONSTANT(opline, opline->op2);
+				if (UNEXPECTED(Z_STRVAL_P(class_const)[0] == '\0' && Z_STRLEN_P(class_const) > 0)) {
+					/* Symbolic generic reference ("Vec<T>" in a template
+					 * body): substitute against the executing binding. The
+					 * cache slot lives in the per-clone run-time cache, so
+					 * caching stays correct across instantiations. */
+					ce = zend_fetch_class_by_name(Z_STR_P(class_const), Z_STR_P(class_const + 1),
+						ZEND_FETCH_CLASS_NO_AUTOLOAD | ZEND_FETCH_CLASS_SILENT);
+					if (UNEXPECTED(EG(exception))) {
+						FREE_OP1();
+						HANDLE_EXCEPTION();
+					}
+				} else {
+					ce = zend_lookup_class_ex(Z_STR_P(class_const), Z_STR_P(class_const + 1), ZEND_FETCH_CLASS_NO_AUTOLOAD);
+				}
 				if (EXPECTED(ce)) {
 					CACHE_PTR(opline->extended_value, ce);
 				}
