@@ -1804,7 +1804,10 @@ static void zend_ensure_valid_class_fetch_type(uint32_t fetch_type) /* {{{ */
 			zend_error_noreturn(E_COMPILE_ERROR, "Cannot use \"%s\" when no class scope is active",
 				fetch_type == ZEND_FETCH_CLASS_SELF ? "self" :
 				fetch_type == ZEND_FETCH_CLASS_PARENT ? "parent" : "static");
-		} else if (fetch_type == ZEND_FETCH_CLASS_PARENT && !ce->parent_name) {
+		} else if (fetch_type == ZEND_FETCH_CLASS_PARENT && !ce->parent_name
+				&& !(ce->generic_params && ce->generic_params->deferred_parent)) {
+			/* A deferred (param-dependent) parent exists per instantiation;
+			 * "parent" resolves through the executing scope at run time. */
 			zend_error_noreturn(E_COMPILE_ERROR,
 				"Cannot use \"parent\" when current class scope has no parent");
 		}
@@ -2889,6 +2892,11 @@ static uint32_t zend_compile_type_param_index(const zend_ast *name_ast)
 	const zend_generic_params *gp = CG(active_class_entry)->generic_params;
 	for (uint32_t i = 0; i < gp->num_params; i++) {
 		if (zend_string_equals_ci(gp->params[i].name, name)) {
+			if (UNEXPECTED(i == gp->pack_index)) {
+				zend_error_noreturn(E_COMPILE_ERROR,
+					"Type parameter pack %s cannot be used as a type",
+					ZSTR_VAL(gp->params[i].name));
+			}
 			return i;
 		}
 	}
@@ -7441,6 +7449,32 @@ static void zend_append_generic_arg(smart_str *buf, zend_ast *ast, bool allow_pa
 		return;
 	}
 
+	if (ast->kind == ZEND_AST_GENERIC_ARG_SPREAD) {
+		/* "...Ts": expansion of the declaring template's type-parameter pack.
+		 * Only meaningful in deferred implements/extends references, where
+		 * the pack's per-instantiation arguments splice in at stamp time. */
+		zend_ast *inner = ast->child[0];
+		zend_string *inner_name = zend_ast_get_str(inner);
+		if (!allow_params) {
+			zend_error_noreturn(E_COMPILE_ERROR,
+				"Cannot use ... in a generic type argument "
+				"(type arguments must be concrete in this version)");
+		}
+		const zend_generic_params *gp = CG(active_class_entry)->generic_params;
+		if (inner->attr != ZEND_NAME_NOT_FQ
+				|| !gp || gp->pack_index == (uint32_t) -1
+				|| !zend_string_equals_ci(
+					gp->params[gp->pack_index].name, inner_name)) {
+			zend_error_noreturn(E_COMPILE_ERROR,
+				"Only a type parameter pack can be expanded with ... "
+				"(%s is not the declaring class's pack)", ZSTR_VAL(inner_name));
+		}
+		smart_str_appendl(buf, "...", 3);
+		smart_str_append(buf, gp->params[gp->pack_index].name);
+		*uses_params = true;
+		return;
+	}
+
 	zend_string *name = zend_ast_get_str(ast);
 	if (ast->attr == ZEND_NAME_NOT_FQ) {
 		if (zend_is_active_template_param(name)) {
@@ -7448,6 +7482,11 @@ static void zend_append_generic_arg(smart_str *buf, zend_ast *ast, bool allow_pa
 				const zend_generic_params *gp = CG(active_class_entry)->generic_params;
 				for (uint32_t i = 0; i < gp->num_params; i++) {
 					if (zend_string_equals_ci(gp->params[i].name, name)) {
+						if (UNEXPECTED(i == gp->pack_index)) {
+							zend_error_noreturn(E_COMPILE_ERROR,
+								"Type parameter pack %s must be expanded with ... "
+								"in a generic type argument", ZSTR_VAL(name));
+						}
 						smart_str_append(buf, gp->params[i].name);
 						*uses_params = true;
 						return;
@@ -7589,6 +7628,11 @@ static zend_type zend_compile_single_typename(zend_ast *ast)
 					const zend_generic_params *gp = CG(active_class_entry)->generic_params;
 					for (uint32_t i = 0; i < gp->num_params; i++) {
 						if (zend_string_equals_ci(gp->params[i].name, type_name)) {
+							if (UNEXPECTED(i == gp->pack_index)) {
+								zend_error_noreturn(E_COMPILE_ERROR,
+									"Type parameter pack %s cannot be used as a type",
+									ZSTR_VAL(gp->params[i].name));
+							}
 							return (zend_type) ZEND_TYPE_INIT_CLASS(
 								zend_string_copy(gp->params[i].name), /* allow null */ false, 0);
 						}
@@ -7623,10 +7667,16 @@ static zend_type zend_compile_single_typename(zend_ast *ast)
 					}
 				} else {
 					ZEND_ASSERT(fetch_type == ZEND_FETCH_CLASS_PARENT);
-					/* Scope might be unknown for unbound closures and traits */
-					if (substitute_self_parent) {
+					/* Scope might be unknown for unbound closures and traits.
+					 * A deferred (param-dependent) parent leaves parent_name
+					 * NULL; the "parent" type then stays symbolic, resolved
+					 * against the executing scope like in traits. */
+					if (substitute_self_parent && CG(active_class_entry)->parent_name) {
 						class_name = CG(active_class_entry)->parent_name;
-						ZEND_ASSERT(class_name && "must know class name when resolving parent type at compile time");
+					} else if (substitute_self_parent) {
+						ZEND_ASSERT(CG(active_class_entry)->generic_params
+							&& CG(active_class_entry)->generic_params->deferred_parent
+							&& "must know class name when resolving parent type at compile time");
 					}
 				}
 				zend_string_addref(class_name);
@@ -9805,6 +9855,8 @@ static void zend_compile_generic_params(zend_class_entry *ce, const zend_ast *pa
 	generic_params->num_params = list->children;
 	generic_params->num_deferred_interfaces = 0;
 	generic_params->deferred_interfaces = NULL;
+	generic_params->deferred_parent = NULL;
+	generic_params->pack_index = (uint32_t) -1;
 
 	for (uint32_t i = 0; i < list->children; i++) {
 		const zend_ast *param_ast = list->child[i];
@@ -9825,8 +9877,17 @@ static void zend_compile_generic_params(zend_class_entry *ce, const zend_ast *pa
 			}
 		}
 
+		if (param_ast->attr & ZEND_GENERIC_PARAM_PACK) {
+			if (generic_params->pack_index != (uint32_t) -1) {
+				zend_error_noreturn(E_COMPILE_ERROR,
+					"Generic class may declare at most one type parameter pack "
+					"(parameter %s)", ZSTR_VAL(param_name));
+			}
+			generic_params->pack_index = i;
+		}
+
 		generic_params->params[i].name = zend_new_interned_string(zend_string_copy(param_name));
-		generic_params->params[i].bound_kind = param_ast->attr;
+		generic_params->params[i].bound_kind = param_ast->attr & ZEND_GENERIC_BOUND_MASK;
 		if (bound_ast) {
 			zend_string *bound_name = zend_resolve_const_class_name_reference(bound_ast,
 				param_ast->attr == ZEND_GENERIC_BOUND_EXTENDS
@@ -9930,9 +9991,7 @@ static void zend_compile_class_decl(znode *result, const zend_ast *ast, bool top
 	}
 
 	/* Set the active class entry before resolving extends/implements so that
-	 * generic references there see the class's own type parameters (and
-	 * param-dependent inheritance errors cleanly rather than mangling T as a
-	 * class name). */
+	 * generic references there see the class's own type parameters. */
 	CG(active_class_entry) = ce;
 
 	if (generic_params_ast) {
@@ -9940,9 +9999,24 @@ static void zend_compile_class_decl(znode *result, const zend_ast *ast, bool top
 	}
 
 	if (extends_ast) {
-		ce->parent_name = extends_ast->kind == ZEND_AST_GENERIC_TYPE
-			? zend_resolve_class_name_ast(extends_ast)
-			: zend_resolve_const_class_name_reference(extends_ast, "class name");
+		if (extends_ast->kind == ZEND_AST_GENERIC_TYPE) {
+			/* A parent reference whose arguments mention type parameters
+			 * (bare only, mirroring zend_compile_implements) is deferred:
+			 * the template links parentless and the parent instantiation is
+			 * grafted at stamp time. Concrete arguments keep the ordinary
+			 * link-time path via the mangled name. */
+			bool uses_params = false;
+			zend_string *name = zend_resolve_generic_type_ast_ex(
+				extends_ast, /* allow_params */ true, &uses_params);
+			if (uses_params) {
+				ZEND_ASSERT(ce->generic_params != NULL);
+				ce->generic_params->deferred_parent = name;
+			} else {
+				ce->parent_name = name;
+			}
+		} else {
+			ce->parent_name = zend_resolve_const_class_name_reference(extends_ast, "class name");
+		}
 	}
 
 	if (decl->child[3]) {
@@ -9984,7 +10058,9 @@ static void zend_compile_class_decl(znode *result, const zend_ast *ast, bool top
 #endif
 	 && !(CG(compiler_options) & ZEND_COMPILE_WITHOUT_EXECUTION)) {
 		if (toplevel) {
-			if (extends_ast) {
+			/* A deferred (param-dependent) parent leaves parent_name NULL:
+			 * the template links parentless below. */
+			if (ce->parent_name) {
 				zend_class_entry *parent_ce = zend_lookup_class_ex(
 					ce->parent_name, NULL, ZEND_FETCH_CLASS_NO_AUTOLOAD);
 
@@ -10005,7 +10081,7 @@ static void zend_compile_class_decl(znode *result, const zend_ast *ast, bool top
 			} else {
 				goto link_unbound;
 			}
-		} else if (!extends_ast) {
+		} else if (!ce->parent_name) {
 link_unbound:
 			/* Link unbound simple class */
 			zend_build_properties_info_table(ce);
@@ -10058,7 +10134,7 @@ link_unbound:
 				/* We currently don't early-bind classes that implement interfaces or use traits */
 			 && !ce->num_interfaces && !ce->num_traits && !ce->num_hooked_prop_variance_checks
 		) {
-			if (!extends_ast) {
+			if (!ce->parent_name) {
 				/* Use empty string for classes without parents to avoid new handler, and special
 				 * handling of zend_early_binding. */
 				opline->op2_type = IS_CONST;

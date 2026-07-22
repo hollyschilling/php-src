@@ -1083,6 +1083,10 @@ ZEND_API zend_string *zend_type_to_string(zend_type type);
 #define ZEND_GENERIC_BOUND_NONE       0
 #define ZEND_GENERIC_BOUND_IMPLEMENTS 1
 #define ZEND_GENERIC_BOUND_EXTENDS    2
+#define ZEND_GENERIC_BOUND_MASK       0x3
+/* The parameter is a pack ("<...Ts>"); AST attr only, stored as
+ * zend_generic_params.pack_index. */
+#define ZEND_GENERIC_PARAM_PACK       (1<<2)
 
 /* ZEND_FETCH_ flags in class name AST of new const expression must not clash with ZEND_NAME_ flags */
 #define ZEND_CONST_EXPR_NEW_FETCH_TYPE_SHIFT 2

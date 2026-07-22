@@ -2312,6 +2312,12 @@ void zend_inheritance_check_override(const zend_class_entry *ce)
 		return;
 	}
 
+	if (ce->generic_params && ce->generic_params->deferred_parent) {
+		/* The template links parentless; #[\Override] is checked per
+		 * instantiation once the deferred parent has been grafted. */
+		return;
+	}
+
 	ZEND_HASH_MAP_FOREACH_PTR(&ce->function_table, zend_function *f) {
 		if (f->common.fn_flags & ZEND_ACC_OVERRIDE) {
 			ZEND_ASSERT(f->type != ZEND_INTERNAL_FUNCTION);
@@ -3316,6 +3322,33 @@ static void resolve_delayed_variance_obligations(zend_class_entry *ce) {
 
 	ce->ce_flags &= ~ZEND_ACC_UNRESOLVED_VARIANCE;
 	ce->ce_flags |= ZEND_ACC_LINKED;
+	zend_hash_index_del(all_obligations, num_key);
+}
+
+/* Generics stamping: resolve delayed variance obligations recorded while
+ * grafting a deferred parent under a stamped instantiation. Unlike the
+ * link-path resolver above, the class is already LINKED and surface
+ * registration must not be repeated; the caller runs its own override
+ * check. */
+ZEND_API void zend_resolve_delayed_variance_obligations_ex(zend_class_entry *ce)
+{
+	load_delayed_classes(ce);
+	if (!(ce->ce_flags & ZEND_ACC_UNRESOLVED_VARIANCE)) {
+		return;
+	}
+
+	HashTable *all_obligations = CG(delayed_variance_obligations);
+	zend_ulong num_key = (zend_ulong) (uintptr_t) ce;
+	ZEND_ASSERT(all_obligations != NULL);
+	const HashTable *obligations = zend_hash_index_find_ptr(all_obligations, num_key);
+	ZEND_ASSERT(obligations != NULL);
+
+	const variance_obligation *obligation;
+	ZEND_HASH_FOREACH_PTR(obligations, obligation) {
+		check_variance_obligation(obligation);
+	} ZEND_HASH_FOREACH_END();
+
+	ce->ce_flags &= ~ZEND_ACC_UNRESOLVED_VARIANCE;
 	zend_hash_index_del(all_obligations, num_key);
 }
 

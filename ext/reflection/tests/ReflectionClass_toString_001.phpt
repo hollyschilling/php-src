@@ -30,7 +30,7 @@ Class [ <internal:Reflection> class ReflectionClass implements Stringable, Refle
     Property [ public string $name ]
   }
 
-  - Methods [70] {
+  - Methods [71] {
     Method [ <internal:Reflection> private method __clone ] {
 
       - Parameters [0] {
@@ -127,6 +127,13 @@ Class [ <internal:Reflection> class ReflectionClass implements Stringable, Refle
       - Parameters [0] {
       }
       - Return [ array ]
+    }
+
+    Method [ <internal:Reflection> public method getGenericParentName ] {
+
+      - Parameters [0] {
+      }
+      - Return [ ?string ]
     }
 
     Method [ <internal:Reflection> public method isCloneable ] {

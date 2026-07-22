@@ -1,9 +1,10 @@
 --TEST--
-Generics M3: param-dependent inheritance (extends Vec<T>) is rejected, not silently mis-resolved
+Generics: nested param-dependent inheritance arguments stay rejected (bare-args-only restriction)
 --FILE--
 <?php
+class Box<T> {}
 class Vec<T> {}
-class MyVec<T> extends Vec<T> {}
+class MyVec<T> extends Vec<Box<T>> {}
 ?>
 --EXPECTF--
 Fatal error: Cannot use type parameter T as a generic type argument (type arguments must be concrete in this version) in %s on line %d

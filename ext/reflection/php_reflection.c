@@ -4960,6 +4960,7 @@ ZEND_METHOD(ReflectionClass, getGenericTypeParameters)
 			add_assoc_null(&entry, "boundKind");
 			add_assoc_null(&entry, "bound");
 		}
+		add_assoc_bool(&entry, "variadic", i == generic_params->pack_index);
 		add_next_index_zval(return_value, &entry);
 	}
 }
@@ -5019,6 +5020,23 @@ ZEND_METHOD(ReflectionClass, getGenericInterfaceNames)
 		add_next_index_str(return_value,
 			zend_string_copy(ce->generic_params->deferred_interfaces[i]));
 	}
+}
+/* }}} */
+
+/* {{{ Returns a template's param-dependent parent reference (unsubstituted,
+       e.g. "Vec<T>"), or null. Concrete parents answer via getParentClass. */
+ZEND_METHOD(ReflectionClass, getGenericParentName)
+{
+	reflection_object *intern;
+	zend_class_entry *ce;
+
+	ZEND_PARSE_PARAMETERS_NONE();
+	GET_REFLECTION_OBJECT_PTR(ce);
+
+	if (!ce->generic_params || !ce->generic_params->deferred_parent) {
+		RETURN_NULL();
+	}
+	RETURN_STR_COPY(ce->generic_params->deferred_parent);
 }
 /* }}} */
 

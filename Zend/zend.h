@@ -165,6 +165,13 @@ typedef struct _zend_generic_params {
 	 * interface_names and resolved per instantiation at stamp time. */
 	uint32_t num_deferred_interfaces;
 	zend_string **deferred_interfaces;
+	/* extends reference whose arguments mention type parameters (bare only,
+	 * e.g. "App\Vec<T>"); the template links parentless and the parent is
+	 * grafted per instantiation at stamp time. NULL otherwise. */
+	zend_string *deferred_parent;
+	/* Index of the type-parameter pack ("<...Ts>"), or (uint32_t)-1. At most
+	 * one pack; it binds at least one argument. */
+	uint32_t pack_index;
 	zend_generic_param params[1];
 } zend_generic_params;
 
