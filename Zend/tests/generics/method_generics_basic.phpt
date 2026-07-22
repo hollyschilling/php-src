@@ -1,13 +1,5 @@
 --TEST--
-SPIKE: generic methods with explicit type arguments — $seq->map<Price>($fn): Sequence<Price>
---SKIPIF--
-<?php
-/* SPIKE cut: opcache persist clears method-level generic params; generic
- * methods degrade to non-generic under opcache until persistence lands. */
-if (function_exists('opcache_get_status') && opcache_get_status() !== false) {
-    die('skip generic methods are not persisted under opcache (spike)');
-}
-?>
+Generic methods: explicit type arguments — $seq->map<Price>($fn): Sequence<Price>
 --FILE--
 <?php
 declare(strict_types=1);

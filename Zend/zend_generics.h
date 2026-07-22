@@ -33,6 +33,12 @@ ZEND_API void zend_generics_preload_stamp_all(void);
 ZEND_API void zend_generics_substitute_closure_signature(
 		zend_op_array *op_array, const zend_class_entry *scope);
 
+/* Closure creation: substitute the creating METHOD instantiation's type
+ * arguments (function map<U>) into the closure's signature copy, and hand
+ * the binding to the closure for body references. */
+ZEND_API void zend_generics_substitute_closure_method_signature(
+		zend_op_array *op_array);
+
 /* Teardown for an op_array flagged ZEND_ACC2_GENERIC_SUBST_ARG_INFO: releases
  * what its arg_info copy owns and restores the template's array. */
 ZEND_API void zend_generics_release_substituted_arg_info(zend_op_array *op_array);
@@ -51,8 +57,10 @@ ZEND_API void zend_generics_dup_substituted_arg_info(zend_op_array *op_array);
 ZEND_API bool zend_generics_name_mentions_params(
 		const zend_string *name, const zend_generic_params *gp);
 
-/* Resolve a compiler-emitted symbolic generic class reference against the
- * executing scope's binding. Owned string, or NULL with an exception. */
+/* Resolve a compiler-emitted symbolic generic class reference ("T", "C<T>",
+ * "U", "Sequence<U>") against the executing method instantiation's binding
+ * (if any) and, secondarily, the scope's class binding. Owned string, or
+ * NULL with an exception. */
 ZEND_API zend_string *zend_generics_resolve_type_symbol(const char *sym, size_t sym_len);
 
 ZEND_API uint32_t zend_generics_binding_arg_index(
@@ -92,11 +100,6 @@ ZEND_API extern void (*zend_generics_jit_clone_hook)(zend_op_array *op_array);
  * NULL with an exception set on any structural failure. */
 ZEND_API zend_function *zend_generics_get_method_instantiation(
 		zend_class_entry *ce, zend_string *method_name, zend_string *lc_name);
-
-/* Resolve a compiler-emitted method-symbol class reference ("U",
- * "Sequence<U>") against the executing method instantiation's binding (and,
- * secondarily, the scope's class binding). Owned string or NULL + throw. */
-ZEND_API zend_string *zend_generics_resolve_method_symbol(const char *sym, size_t sym_len);
 
 END_EXTERN_C()
 

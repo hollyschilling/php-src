@@ -428,12 +428,17 @@ typedef struct _zend_oparray_context {
 /* restored by destroy_op_array before the final free     |     |     |     */
 #define ZEND_ACC2_GENERIC_SUBST_ARG_INFO (1 << 3)  /*     |  X  |     |     */
 /*                                                        |     |     |     */
-/* Function Flags 2 (fn_flags2) (unused: 1-2, 4 [claimed  |     |     |     */
-/* on other roadmap branches], 6-31)                      |     |     |     */
+/* Function Flags 2 (fn_flags2) (unused: 1-2, 6-31)       |     |     |     */
 /* ============================                           |     |     |     */
 /*                                                        |     |     |     */
 /* Function forbids dynamic calls                         |     |     |     */
 #define ZEND_ACC2_FORBID_DYN_CALLS       (1 << 0)  /*     |  X  |     |     */
+/*                                                        |     |     |     */
+/* Generic METHOD prototype ("function map<U>"): set on   |     |     |     */
+/* the declaring op_array only; clones (class stamps,     |     |     |     */
+/* method instantiations) clear it so the shared          |     |     |     */
+/* generic_params are released exactly once.              |     |     |     */
+#define ZEND_ACC2_GENERIC_METHOD_TEMPLATE (1 << 4) /*     |  X  |     |     */
 /*                                                        |     |     |     */
 /* Closure/arrow-fn op_array declared inside a generic    |     |     |     */
 /* template: its per-creation copies carry per-binding    |     |     |     */
@@ -1090,6 +1095,10 @@ ZEND_API zend_string *zend_type_to_string(zend_type type);
 #define ZEND_FETCH_CLASS_EXCEPTION   0x0200
 #define ZEND_FETCH_CLASS_ALLOW_UNLINKED 0x0400
 #define ZEND_FETCH_CLASS_ALLOW_NEARLY_LINKED 0x0800
+/* ZEND_FETCH_CLASS_TYPE_PARAM index addresses the executing FUNCTION's
+ * method-level type parameters (function map<U>) instead of the scope
+ * class's. */
+#define ZEND_FETCH_CLASS_TYPE_PARAM_METHOD 0x2000
 
 /* These should not clash with ZEND_ACC_PPP_MASK and ZEND_ACC_PPP_SET_MASK */
 #define ZEND_PARAM_REF      (1<<3)
