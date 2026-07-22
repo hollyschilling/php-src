@@ -352,6 +352,19 @@ static void zend_persist_op_array_calc_ex(zend_op_array *op_array)
 		ADD_INTERNED_STRING(op_array->module_name);
 	}
 
+	if (op_array->generic_params
+			&& !zend_shared_alloc_get_xlat_entry(op_array->generic_params)) {
+		zend_shared_alloc_register_xlat_entry(op_array->generic_params, op_array->generic_params);
+		for (uint32_t i = 0; i < op_array->generic_params->num_params; i++) {
+			ADD_INTERNED_STRING(op_array->generic_params->params[i].name);
+			if (op_array->generic_params->params[i].bound_name) {
+				ADD_INTERNED_STRING(op_array->generic_params->params[i].bound_name);
+			}
+		}
+		ADD_SIZE(sizeof(zend_generic_params)
+			+ (op_array->generic_params->num_params - 1) * sizeof(zend_generic_param));
+	}
+
 	if (op_array->arg_info) {
 		zend_arg_info *arg_info = op_array->arg_info;
 		uint32_t num_args = op_array->num_args;

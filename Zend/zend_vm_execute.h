@@ -18904,6 +18904,20 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_FUNC_CCONV ZEND_FETCH_CLASS_N
 			ZVAL_STR_COPY(EX_VAR(opline->result.var), called_scope->name);
 			break;
 		case ZEND_FETCH_CLASS_TYPE_PARAM: {
+			zend_type type_arg;
+			if (opline->op1.num & ZEND_FETCH_CLASS_TYPE_PARAM_METHOD) {
+				/* Method-space parameter (U::class in function map<U>). */
+				const zend_op_array *fn = &EX(func)->op_array;
+				if (UNEXPECTED(EX(func)->type != ZEND_USER_FUNCTION || !fn->generic_binding)) {
+					SAVE_OPLINE();
+					zend_throw_error(NULL,
+						"Cannot resolve a method type parameter when no generic method binding is in scope");
+					ZVAL_UNDEF(EX_VAR(opline->result.var));
+					HANDLE_EXCEPTION();
+				}
+				type_arg = fn->generic_binding->args[
+					opline->op1.num >> ZEND_FETCH_CLASS_TYPE_PARAM_SHIFT];
+			} else {
 			if (UNEXPECTED(!scope->generic_binding)) {
 				SAVE_OPLINE();
 				zend_throw_error(NULL,
@@ -18913,7 +18927,8 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_FUNC_CCONV ZEND_FETCH_CLASS_N
 			}
 			uint32_t param_idx = zend_generics_binding_arg_index(
 				scope, fetch_type >> ZEND_FETCH_CLASS_TYPE_PARAM_SHIFT);
-			zend_type type_arg = scope->generic_binding->args[param_idx];
+			type_arg = scope->generic_binding->args[param_idx];
+			}
 			if (ZEND_TYPE_HAS_NAME(type_arg)) {
 				ZVAL_STR_COPY(EX_VAR(opline->result.var), ZEND_TYPE_NAME(type_arg));
 			} else {
@@ -34032,6 +34047,20 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_FUNC_CCONV ZEND_FETCH_CLASS_N
 			ZVAL_STR_COPY(EX_VAR(opline->result.var), called_scope->name);
 			break;
 		case ZEND_FETCH_CLASS_TYPE_PARAM: {
+			zend_type type_arg;
+			if (opline->op1.num & ZEND_FETCH_CLASS_TYPE_PARAM_METHOD) {
+				/* Method-space parameter (U::class in function map<U>). */
+				const zend_op_array *fn = &EX(func)->op_array;
+				if (UNEXPECTED(EX(func)->type != ZEND_USER_FUNCTION || !fn->generic_binding)) {
+					SAVE_OPLINE();
+					zend_throw_error(NULL,
+						"Cannot resolve a method type parameter when no generic method binding is in scope");
+					ZVAL_UNDEF(EX_VAR(opline->result.var));
+					HANDLE_EXCEPTION();
+				}
+				type_arg = fn->generic_binding->args[
+					opline->op1.num >> ZEND_FETCH_CLASS_TYPE_PARAM_SHIFT];
+			} else {
 			if (UNEXPECTED(!scope->generic_binding)) {
 				SAVE_OPLINE();
 				zend_throw_error(NULL,
@@ -34041,7 +34070,8 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_FUNC_CCONV ZEND_FETCH_CLASS_N
 			}
 			uint32_t param_idx = zend_generics_binding_arg_index(
 				scope, fetch_type >> ZEND_FETCH_CLASS_TYPE_PARAM_SHIFT);
-			zend_type type_arg = scope->generic_binding->args[param_idx];
+			type_arg = scope->generic_binding->args[param_idx];
+			}
 			if (ZEND_TYPE_HAS_NAME(type_arg)) {
 				ZVAL_STR_COPY(EX_VAR(opline->result.var), ZEND_TYPE_NAME(type_arg));
 			} else {
@@ -42624,6 +42654,20 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_FUNC_CCONV ZEND_FETCH_CLASS_N
 			ZVAL_STR_COPY(EX_VAR(opline->result.var), called_scope->name);
 			break;
 		case ZEND_FETCH_CLASS_TYPE_PARAM: {
+			zend_type type_arg;
+			if (opline->op1.num & ZEND_FETCH_CLASS_TYPE_PARAM_METHOD) {
+				/* Method-space parameter (U::class in function map<U>). */
+				const zend_op_array *fn = &EX(func)->op_array;
+				if (UNEXPECTED(EX(func)->type != ZEND_USER_FUNCTION || !fn->generic_binding)) {
+					SAVE_OPLINE();
+					zend_throw_error(NULL,
+						"Cannot resolve a method type parameter when no generic method binding is in scope");
+					ZVAL_UNDEF(EX_VAR(opline->result.var));
+					HANDLE_EXCEPTION();
+				}
+				type_arg = fn->generic_binding->args[
+					opline->op1.num >> ZEND_FETCH_CLASS_TYPE_PARAM_SHIFT];
+			} else {
 			if (UNEXPECTED(!scope->generic_binding)) {
 				SAVE_OPLINE();
 				zend_throw_error(NULL,
@@ -42633,7 +42677,8 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_FUNC_CCONV ZEND_FETCH_CLASS_N
 			}
 			uint32_t param_idx = zend_generics_binding_arg_index(
 				scope, fetch_type >> ZEND_FETCH_CLASS_TYPE_PARAM_SHIFT);
-			zend_type type_arg = scope->generic_binding->args[param_idx];
+			type_arg = scope->generic_binding->args[param_idx];
+			}
 			if (ZEND_TYPE_HAS_NAME(type_arg)) {
 				ZVAL_STR_COPY(EX_VAR(opline->result.var), ZEND_TYPE_NAME(type_arg));
 			} else {
@@ -73704,6 +73749,20 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_CCONV ZEND_FETCH_CLASS_NAME_S
 			ZVAL_STR_COPY(EX_VAR(opline->result.var), called_scope->name);
 			break;
 		case ZEND_FETCH_CLASS_TYPE_PARAM: {
+			zend_type type_arg;
+			if (opline->op1.num & ZEND_FETCH_CLASS_TYPE_PARAM_METHOD) {
+				/* Method-space parameter (U::class in function map<U>). */
+				const zend_op_array *fn = &EX(func)->op_array;
+				if (UNEXPECTED(EX(func)->type != ZEND_USER_FUNCTION || !fn->generic_binding)) {
+					SAVE_OPLINE();
+					zend_throw_error(NULL,
+						"Cannot resolve a method type parameter when no generic method binding is in scope");
+					ZVAL_UNDEF(EX_VAR(opline->result.var));
+					HANDLE_EXCEPTION();
+				}
+				type_arg = fn->generic_binding->args[
+					opline->op1.num >> ZEND_FETCH_CLASS_TYPE_PARAM_SHIFT];
+			} else {
 			if (UNEXPECTED(!scope->generic_binding)) {
 				SAVE_OPLINE();
 				zend_throw_error(NULL,
@@ -73713,7 +73772,8 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_CCONV ZEND_FETCH_CLASS_NAME_S
 			}
 			uint32_t param_idx = zend_generics_binding_arg_index(
 				scope, fetch_type >> ZEND_FETCH_CLASS_TYPE_PARAM_SHIFT);
-			zend_type type_arg = scope->generic_binding->args[param_idx];
+			type_arg = scope->generic_binding->args[param_idx];
+			}
 			if (ZEND_TYPE_HAS_NAME(type_arg)) {
 				ZVAL_STR_COPY(EX_VAR(opline->result.var), ZEND_TYPE_NAME(type_arg));
 			} else {
@@ -88732,6 +88792,20 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_CCONV ZEND_FETCH_CLASS_NAME_S
 			ZVAL_STR_COPY(EX_VAR(opline->result.var), called_scope->name);
 			break;
 		case ZEND_FETCH_CLASS_TYPE_PARAM: {
+			zend_type type_arg;
+			if (opline->op1.num & ZEND_FETCH_CLASS_TYPE_PARAM_METHOD) {
+				/* Method-space parameter (U::class in function map<U>). */
+				const zend_op_array *fn = &EX(func)->op_array;
+				if (UNEXPECTED(EX(func)->type != ZEND_USER_FUNCTION || !fn->generic_binding)) {
+					SAVE_OPLINE();
+					zend_throw_error(NULL,
+						"Cannot resolve a method type parameter when no generic method binding is in scope");
+					ZVAL_UNDEF(EX_VAR(opline->result.var));
+					HANDLE_EXCEPTION();
+				}
+				type_arg = fn->generic_binding->args[
+					opline->op1.num >> ZEND_FETCH_CLASS_TYPE_PARAM_SHIFT];
+			} else {
 			if (UNEXPECTED(!scope->generic_binding)) {
 				SAVE_OPLINE();
 				zend_throw_error(NULL,
@@ -88741,7 +88815,8 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_CCONV ZEND_FETCH_CLASS_NAME_S
 			}
 			uint32_t param_idx = zend_generics_binding_arg_index(
 				scope, fetch_type >> ZEND_FETCH_CLASS_TYPE_PARAM_SHIFT);
-			zend_type type_arg = scope->generic_binding->args[param_idx];
+			type_arg = scope->generic_binding->args[param_idx];
+			}
 			if (ZEND_TYPE_HAS_NAME(type_arg)) {
 				ZVAL_STR_COPY(EX_VAR(opline->result.var), ZEND_TYPE_NAME(type_arg));
 			} else {
@@ -97324,6 +97399,20 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_CCONV ZEND_FETCH_CLASS_NAME_S
 			ZVAL_STR_COPY(EX_VAR(opline->result.var), called_scope->name);
 			break;
 		case ZEND_FETCH_CLASS_TYPE_PARAM: {
+			zend_type type_arg;
+			if (opline->op1.num & ZEND_FETCH_CLASS_TYPE_PARAM_METHOD) {
+				/* Method-space parameter (U::class in function map<U>). */
+				const zend_op_array *fn = &EX(func)->op_array;
+				if (UNEXPECTED(EX(func)->type != ZEND_USER_FUNCTION || !fn->generic_binding)) {
+					SAVE_OPLINE();
+					zend_throw_error(NULL,
+						"Cannot resolve a method type parameter when no generic method binding is in scope");
+					ZVAL_UNDEF(EX_VAR(opline->result.var));
+					HANDLE_EXCEPTION();
+				}
+				type_arg = fn->generic_binding->args[
+					opline->op1.num >> ZEND_FETCH_CLASS_TYPE_PARAM_SHIFT];
+			} else {
 			if (UNEXPECTED(!scope->generic_binding)) {
 				SAVE_OPLINE();
 				zend_throw_error(NULL,
@@ -97333,7 +97422,8 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_CCONV ZEND_FETCH_CLASS_NAME_S
 			}
 			uint32_t param_idx = zend_generics_binding_arg_index(
 				scope, fetch_type >> ZEND_FETCH_CLASS_TYPE_PARAM_SHIFT);
-			zend_type type_arg = scope->generic_binding->args[param_idx];
+			type_arg = scope->generic_binding->args[param_idx];
+			}
 			if (ZEND_TYPE_HAS_NAME(type_arg)) {
 				ZVAL_STR_COPY(EX_VAR(opline->result.var), ZEND_TYPE_NAME(type_arg));
 			} else {
