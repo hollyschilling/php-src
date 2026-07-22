@@ -18390,7 +18390,8 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_FUNC_CCONV ZEND_FETCH_CLASS_N
 				ZVAL_UNDEF(EX_VAR(opline->result.var));
 				HANDLE_EXCEPTION();
 			}
-			uint32_t param_idx = fetch_type >> ZEND_FETCH_CLASS_TYPE_PARAM_SHIFT;
+			uint32_t param_idx = zend_generics_binding_arg_index(
+				scope, fetch_type >> ZEND_FETCH_CLASS_TYPE_PARAM_SHIFT);
 			zend_type type_arg = scope->generic_binding->args[param_idx];
 			if (ZEND_TYPE_HAS_NAME(type_arg)) {
 				ZVAL_STR_COPY(EX_VAR(opline->result.var), ZEND_TYPE_NAME(type_arg));
@@ -33051,7 +33052,8 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_FUNC_CCONV ZEND_FETCH_CLASS_N
 				ZVAL_UNDEF(EX_VAR(opline->result.var));
 				HANDLE_EXCEPTION();
 			}
-			uint32_t param_idx = fetch_type >> ZEND_FETCH_CLASS_TYPE_PARAM_SHIFT;
+			uint32_t param_idx = zend_generics_binding_arg_index(
+				scope, fetch_type >> ZEND_FETCH_CLASS_TYPE_PARAM_SHIFT);
 			zend_type type_arg = scope->generic_binding->args[param_idx];
 			if (ZEND_TYPE_HAS_NAME(type_arg)) {
 				ZVAL_STR_COPY(EX_VAR(opline->result.var), ZEND_TYPE_NAME(type_arg));
@@ -41125,7 +41127,8 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_FUNC_CCONV ZEND_FETCH_CLASS_N
 				ZVAL_UNDEF(EX_VAR(opline->result.var));
 				HANDLE_EXCEPTION();
 			}
-			uint32_t param_idx = fetch_type >> ZEND_FETCH_CLASS_TYPE_PARAM_SHIFT;
+			uint32_t param_idx = zend_generics_binding_arg_index(
+				scope, fetch_type >> ZEND_FETCH_CLASS_TYPE_PARAM_SHIFT);
 			zend_type type_arg = scope->generic_binding->args[param_idx];
 			if (ZEND_TYPE_HAS_NAME(type_arg)) {
 				ZVAL_STR_COPY(EX_VAR(opline->result.var), ZEND_TYPE_NAME(type_arg));
@@ -71218,7 +71221,8 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_CCONV ZEND_FETCH_CLASS_NAME_S
 				ZVAL_UNDEF(EX_VAR(opline->result.var));
 				HANDLE_EXCEPTION();
 			}
-			uint32_t param_idx = fetch_type >> ZEND_FETCH_CLASS_TYPE_PARAM_SHIFT;
+			uint32_t param_idx = zend_generics_binding_arg_index(
+				scope, fetch_type >> ZEND_FETCH_CLASS_TYPE_PARAM_SHIFT);
 			zend_type type_arg = scope->generic_binding->args[param_idx];
 			if (ZEND_TYPE_HAS_NAME(type_arg)) {
 				ZVAL_STR_COPY(EX_VAR(opline->result.var), ZEND_TYPE_NAME(type_arg));
@@ -85779,7 +85783,8 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_CCONV ZEND_FETCH_CLASS_NAME_S
 				ZVAL_UNDEF(EX_VAR(opline->result.var));
 				HANDLE_EXCEPTION();
 			}
-			uint32_t param_idx = fetch_type >> ZEND_FETCH_CLASS_TYPE_PARAM_SHIFT;
+			uint32_t param_idx = zend_generics_binding_arg_index(
+				scope, fetch_type >> ZEND_FETCH_CLASS_TYPE_PARAM_SHIFT);
 			zend_type type_arg = scope->generic_binding->args[param_idx];
 			if (ZEND_TYPE_HAS_NAME(type_arg)) {
 				ZVAL_STR_COPY(EX_VAR(opline->result.var), ZEND_TYPE_NAME(type_arg));
@@ -93853,7 +93858,8 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_CCONV ZEND_FETCH_CLASS_NAME_S
 				ZVAL_UNDEF(EX_VAR(opline->result.var));
 				HANDLE_EXCEPTION();
 			}
-			uint32_t param_idx = fetch_type >> ZEND_FETCH_CLASS_TYPE_PARAM_SHIFT;
+			uint32_t param_idx = zend_generics_binding_arg_index(
+				scope, fetch_type >> ZEND_FETCH_CLASS_TYPE_PARAM_SHIFT);
 			zend_type type_arg = scope->generic_binding->args[param_idx];
 			if (ZEND_TYPE_HAS_NAME(type_arg)) {
 				ZVAL_STR_COPY(EX_VAR(opline->result.var), ZEND_TYPE_NAME(type_arg));

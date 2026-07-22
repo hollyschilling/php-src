@@ -33,6 +33,13 @@ ZEND_API void zend_generics_preload_stamp_all(void);
 ZEND_API void zend_generics_substitute_closure_signature(
 		zend_op_array *op_array, const zend_class_entry *scope);
 
+/* Maps a template type-parameter index (as carried by
+ * ZEND_FETCH_CLASS_TYPE_PARAM opcodes) to the argument index in the scope's
+ * binding. Identity without a pack; with one, post-pack params shift by the
+ * instantiation's pack size. `scope_ce` must carry a generic_binding. */
+ZEND_API uint32_t zend_generics_binding_arg_index(
+		const zend_class_entry *scope_ce, uint32_t param_idx);
+
 END_EXTERN_C()
 
 #endif /* ZEND_GENERICS_H */

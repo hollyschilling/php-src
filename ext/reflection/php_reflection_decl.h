@@ -1,12 +1,12 @@
 /* This is a generated file, edit php_reflection.stub.php instead.
- * Stub hash: 673e47b7643bcf6d6b2c10c3a592a3a183e766c7 */
+ * Stub hash: 7b646af2a43983d346c7b9aad81cfa73718f06bb */
 
-#ifndef ZEND_PHP_REFLECTION_DECL_673e47b7643bcf6d6b2c10c3a592a3a183e766c7_H
-#define ZEND_PHP_REFLECTION_DECL_673e47b7643bcf6d6b2c10c3a592a3a183e766c7_H
+#ifndef ZEND_PHP_REFLECTION_DECL_7b646af2a43983d346c7b9aad81cfa73718f06bb_H
+#define ZEND_PHP_REFLECTION_DECL_7b646af2a43983d346c7b9aad81cfa73718f06bb_H
 
 typedef enum zend_enum_PropertyHookType {
 	ZEND_ENUM_PropertyHookType_Get = 1,
 	ZEND_ENUM_PropertyHookType_Set = 2,
 } zend_enum_PropertyHookType;
 
-#endif /* ZEND_PHP_REFLECTION_DECL_673e47b7643bcf6d6b2c10c3a592a3a183e766c7_H */
+#endif /* ZEND_PHP_REFLECTION_DECL_7b646af2a43983d346c7b9aad81cfa73718f06bb_H */
