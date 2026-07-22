@@ -436,10 +436,25 @@ static zend_class_entry *zend_generics_stamp_ce(
 		for (; p != end; p++) {
 			zend_string_addref(p->key);
 			zend_op_array *tpl_fn = Z_PTR(p->val);
-			zend_op_array *new_fn = zend_generics_clone_method(
-				tpl_fn, ce, template_ce, binding, display_name);
-			if (!new_fn) {
-				return NULL;
+			zend_op_array *new_fn;
+			if (UNEXPECTED(tpl_fn->type == ZEND_INTERNAL_FUNCTION)) {
+				/* An internal function inherited into the template (e.g. the
+				 * abstract getIterator prototype from IteratorAggregate, via a
+				 * template interface extending it). No opcodes, no scope
+				 * rebind, no substitution -- duplicate exactly as ordinary
+				 * inheritance does (cf. zend_duplicate_internal_function). */
+				new_fn = zend_arena_alloc(&CG(arena), sizeof(zend_internal_function));
+				memcpy(new_fn, tpl_fn, sizeof(zend_internal_function));
+				new_fn->fn_flags |= ZEND_ACC_ARENA_ALLOCATED;
+				if (EXPECTED(new_fn->function_name)) {
+					zend_string_addref(new_fn->function_name);
+				}
+			} else {
+				new_fn = zend_generics_clone_method(
+					tpl_fn, ce, template_ce, binding, display_name);
+				if (!new_fn) {
+					return NULL;
+				}
 			}
 			Z_PTR(p->val) = new_fn;
 
@@ -457,6 +472,49 @@ static zend_class_entry *zend_generics_stamp_ce(
 			zend_generics_update_inherited_handler(__serialize);
 			zend_generics_update_inherited_handler(__unserialize);
 		}
+	}
+
+	/* Iterator/ArrayAccess dispatch caches: the memcpy shares the template's
+	 * structs, whose zend_function pointers reference the template's methods.
+	 * Internal dispatch (foreach, dim handlers) would then run with the
+	 * template's scope and fail protected/private access against members
+	 * declared on the instantiation. Rebuild them against the clones, keyed on
+	 * which slots the template resolved (cf. the opcache persist fixup). */
+	if (ce->iterator_funcs_ptr) {
+		const zend_class_iterator_funcs *tpl_funcs = ce->iterator_funcs_ptr;
+		zend_class_iterator_funcs *funcs =
+			zend_arena_alloc(&CG(arena), sizeof(zend_class_iterator_funcs));
+		memset(funcs, 0, sizeof(zend_class_iterator_funcs));
+		if (tpl_funcs->zf_new_iterator) {
+			funcs->zf_new_iterator = zend_hash_str_find_ptr(
+				&ce->function_table, "getiterator", sizeof("getiterator") - 1);
+		}
+		if (tpl_funcs->zf_rewind) {
+			funcs->zf_rewind = zend_hash_str_find_ptr(
+				&ce->function_table, "rewind", sizeof("rewind") - 1);
+			funcs->zf_valid = zend_hash_str_find_ptr(
+				&ce->function_table, "valid", sizeof("valid") - 1);
+			funcs->zf_key = zend_hash_find_ptr(
+				&ce->function_table, ZSTR_KNOWN(ZEND_STR_KEY));
+			funcs->zf_current = zend_hash_str_find_ptr(
+				&ce->function_table, "current", sizeof("current") - 1);
+			funcs->zf_next = zend_hash_str_find_ptr(
+				&ce->function_table, "next", sizeof("next") - 1);
+		}
+		ce->iterator_funcs_ptr = funcs;
+	}
+	if (ce->arrayaccess_funcs_ptr) {
+		zend_class_arrayaccess_funcs *funcs =
+			zend_arena_alloc(&CG(arena), sizeof(zend_class_arrayaccess_funcs));
+		funcs->zf_offsetget = zend_hash_str_find_ptr(
+			&ce->function_table, "offsetget", sizeof("offsetget") - 1);
+		funcs->zf_offsetexists = zend_hash_str_find_ptr(
+			&ce->function_table, "offsetexists", sizeof("offsetexists") - 1);
+		funcs->zf_offsetset = zend_hash_str_find_ptr(
+			&ce->function_table, "offsetset", sizeof("offsetset") - 1);
+		funcs->zf_offsetunset = zend_hash_str_find_ptr(
+			&ce->function_table, "offsetunset", sizeof("offsetunset") - 1);
+		ce->arrayaccess_funcs_ptr = funcs;
 	}
 
 	/* static members */
