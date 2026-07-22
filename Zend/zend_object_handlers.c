@@ -26,6 +26,7 @@
 #include "zend_objects_API.h"
 #include "zend_object_handlers.h"
 #include "zend_interfaces.h"
+#include "zend_generics.h"
 #include "zend_exceptions.h"
 #include "zend_closures.h"
 #include "zend_compile.h"
@@ -1987,6 +1988,18 @@ ZEND_API zend_function *zend_std_get_method(zend_object **obj_ptr, zend_string *
 
 	fbc = zend_hash_find_ptr(&zobj->ce->function_table, lc_method_name);
 	if (UNEXPECTED(fbc == NULL)) {
+		if (UNEXPECTED(memchr(ZSTR_VAL(lc_method_name), '<', ZSTR_LEN(lc_method_name)) != NULL)) {
+			/* Generic method call ($seq->map<Price>()): stamp (or fetch the
+			 * cached) method instantiation for these explicit type args.
+			 * Spike: visibility follows the base method's flags; the clone is
+			 * returned directly. */
+			zend_function *inst = zend_generics_get_method_instantiation(
+				zobj->ce, method_name, lc_method_name);
+			if (UNEXPECTED(!key)) {
+				ZSTR_ALLOCA_FREE(lc_method_name, use_heap);
+			}
+			return inst; /* may be NULL with an exception set */
+		}
 		if (UNEXPECTED(!key)) {
 			ZSTR_ALLOCA_FREE(lc_method_name, use_heap);
 		}

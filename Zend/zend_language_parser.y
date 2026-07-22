@@ -1196,10 +1196,10 @@ attributed_class_statement:
 	|	class_const_modifiers T_CONST type_expr class_const_list ';'
 			{ $$ = zend_ast_create(ZEND_AST_CLASS_CONST_GROUP, $4, NULL, $3);
 			  $$->attr = $1; }
-	|	method_modifiers function returns_ref identifier backup_doc_comment '(' parameter_list ')'
+	|	method_modifiers function returns_ref identifier generic_params backup_doc_comment '(' parameter_list ')'
 		return_type backup_fn_flags method_body backup_fn_flags
-			{ $$ = zend_ast_create_decl(ZEND_AST_METHOD, $3 | $1 | $12, $2, $5,
-				  zend_ast_get_str($4), $7, NULL, $11, $9, NULL); CG(extra_fn_flags) = $10; }
+			{ $$ = zend_ast_create_decl_ex(ZEND_AST_METHOD, $3 | $1 | $13, $2, $6,
+				  zend_ast_get_str($4), $8, NULL, $12, $10, NULL, $5); CG(extra_fn_flags) = $11; }
 	|	enum_case { $$ = $1; }
 ;
 
@@ -1783,6 +1783,9 @@ callable_variable:
 			{ $$ = zend_ast_create(ZEND_AST_DIM, $1, $3); }
 	|	array_object_dereferenceable T_OBJECT_OPERATOR property_name argument_list
 			{ $$ = zend_ast_create(ZEND_AST_METHOD_CALL, $1, $3, $4); }
+	|	array_object_dereferenceable T_OBJECT_OPERATOR T_STRING T_GENERIC_OPEN generic_arg_list '>' argument_list
+			{ $$ = zend_ast_create(ZEND_AST_METHOD_CALL, $1,
+				  zend_ast_create(ZEND_AST_GENERIC_TYPE, $3, $5), $7); }
 	|	array_object_dereferenceable T_NULLSAFE_OBJECT_OPERATOR property_name argument_list
 			{ $$ = zend_ast_create(ZEND_AST_NULLSAFE_METHOD_CALL, $1, $3, $4); }
 	|	function_call { $$ = $1; }

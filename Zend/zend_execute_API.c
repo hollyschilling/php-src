@@ -160,6 +160,7 @@ void init_executor(void) /* {{{ */
 	EG(generics_stamping) = NULL;
 	EG(generics_variance_cache) = NULL;
 	EG(generics_type_names) = NULL;
+	EG(generics_method_cache) = NULL;
 
 	EG(ticks_count) = 0;
 
@@ -536,6 +537,11 @@ void shutdown_executor(void) /* {{{ */
 
 		zend_hash_destroy(&EG(included_files));
 		zend_hash_destroy(&EG(autoload_current_classnames));
+		if (EG(generics_method_cache)) {
+			zend_hash_destroy(EG(generics_method_cache));
+			FREE_HASHTABLE(EG(generics_method_cache));
+			EG(generics_method_cache) = NULL;
+		}
 		if (EG(generics_stamping)) {
 			zend_hash_destroy(EG(generics_stamping));
 			FREE_HASHTABLE(EG(generics_stamping));
@@ -1945,8 +1951,9 @@ zend_class_entry *zend_fetch_class_by_name(zend_string *class_name, zend_string 
 {
 	if (UNEXPECTED(ZSTR_LEN(class_name) > 1 && ZSTR_VAL(class_name)[0] == '\0'
 			&& ZSTR_VAL(class_name)[1] == '\x01')) {
-		/* Symbolic generic marker ("\0\x01" SYM): substitute against the
-		 * executing scope's binding, then resolve. */
+		/* Symbolic generic marker ("\0\x01" SYM): a class reference whose
+		 * arguments mention type parameters (method-level or the template's
+		 * own); substitute against the executing bindings, then resolve. */
 		zend_string *resolved = zend_generics_resolve_type_symbol(
 			ZSTR_VAL(class_name) + 2, ZSTR_LEN(class_name) - 2);
 		if (!resolved) {
