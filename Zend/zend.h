@@ -176,10 +176,17 @@ typedef struct _zend_generic_params {
 } zend_generic_params;
 
 /* Binding of a stamped instantiation (ZEND_ACC2_GENERIC_INSTANCE) back to
- * its template: args[i] is the substituted type for template param i. */
+ * its template: args[i] is the substituted type for template param i.
+ * owned_names holds substituted composite type names ("C<Bag>" built from a
+ * template's "C<T>" signature position) whose refs the instance owns; they
+ * are released with the binding (arg_info entries themselves are never
+ * individually destroyed). */
 typedef struct _zend_generic_binding {
 	zend_class_entry *template_ce;
 	uint32_t num_args;
+	uint32_t num_owned_names;
+	uint32_t owned_names_cap;
+	zend_string **owned_names;
 	zend_type args[1];
 } zend_generic_binding;
 

@@ -1,10 +1,11 @@
 --TEST--
-Generics M2: type parameters cannot be used as type arguments yet (concrete-only v0)
+Generics: nested param-dependent type arguments stay rejected (bare-args-only restriction)
 --FILE--
 <?php
 class Vec<T> {}
-class Box<T> {
-    public function f(Vec<T> $x): void {}
+class Box<T> {}
+class C<T> {
+    public function f(Vec<Box<T>> $x): void {}
 }
 ?>
 --EXPECTF--

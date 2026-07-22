@@ -1192,9 +1192,19 @@ zend_class_entry *zend_persist_class_entry(zend_class_entry *orig_ce)
 					binding->args[i].ptr = type_name;
 				}
 			}
+			zend_string **owned = NULL;
+			if (binding->owned_names) {
+				for (uint32_t i = 0; i < binding->num_owned_names; i++) {
+					zend_accel_store_interned_string(binding->owned_names[i]);
+				}
+				owned = zend_shared_memdup(binding->owned_names,
+					sizeof(zend_string *) * binding->num_owned_names);
+			}
 			ce->generic_binding = zend_shared_memdup(binding,
 				sizeof(zend_generic_binding)
 					+ (binding->num_args - 1) * sizeof(zend_type));
+			ce->generic_binding->owned_names = owned;
+			ce->generic_binding->owned_names_cap = ce->generic_binding->num_owned_names;
 		}
 
 		ZEND_ASSERT(ce->backed_enum_table == NULL);
