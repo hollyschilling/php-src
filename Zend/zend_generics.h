@@ -37,6 +37,15 @@ ZEND_API void zend_generics_substitute_closure_signature(
  * ZEND_FETCH_CLASS_TYPE_PARAM opcodes) to the argument index in the scope's
  * binding. Identity without a pack; with one, post-pack params shift by the
  * instantiation's pack size. `scope_ce` must carry a generic_binding. */
+/* Does a composite (mangled) name mention any of gp's parameters as a bare
+ * argument? ("C<T>" yes; "C<Foo>" no; spread prefixes accepted.) */
+ZEND_API bool zend_generics_name_mentions_params(
+		const zend_string *name, const zend_generic_params *gp);
+
+/* Resolve a compiler-emitted symbolic generic class reference against the
+ * executing scope's binding. Owned string, or NULL with an exception. */
+ZEND_API zend_string *zend_generics_resolve_type_symbol(const char *sym, size_t sym_len);
+
 ZEND_API uint32_t zend_generics_binding_arg_index(
 		const zend_class_entry *scope_ce, uint32_t param_idx);
 

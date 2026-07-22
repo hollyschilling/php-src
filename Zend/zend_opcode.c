@@ -458,11 +458,18 @@ ZEND_API void destroy_zend_class(zval *zv)
 				zend_hash_release(ce->backed_enum_table);
 			}
 			if (ce->generic_binding) {
-				/* Struct is arena-allocated; only the arg names are owned. */
+				/* Struct is arena-allocated; the arg names and any owned
+				 * substituted composite type names ("C<Bag>") are refs. */
 				for (uint32_t i = 0; i < ce->generic_binding->num_args; i++) {
 					if (ZEND_TYPE_HAS_NAME(ce->generic_binding->args[i])) {
 						zend_string_release_ex(ZEND_TYPE_NAME(ce->generic_binding->args[i]), 0);
 					}
+				}
+				for (uint32_t i = 0; i < ce->generic_binding->num_owned_names; i++) {
+					zend_string_release_ex(ce->generic_binding->owned_names[i], 0);
+				}
+				if (ce->generic_binding->owned_names) {
+					efree(ce->generic_binding->owned_names);
 				}
 			}
 			break;
