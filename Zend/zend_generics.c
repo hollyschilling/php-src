@@ -23,6 +23,7 @@
 #include "zend_interfaces.h"
 #include "zend_operators.h"
 #include "zend_smart_str.h"
+#include "zend_extension_methods.h"
 #include "zend_exceptions.h"
 
 #ifndef EMPTY_SWITCH_DEFAULT_CASE
@@ -1517,35 +1518,42 @@ ZEND_API zend_function *zend_generics_get_method_instantiation(
 			zend_generics_method_cache_dtor, 0);
 	}
 
-	zend_string *cache_key = zend_strpprintf(0, "%p:%s", (void *) ce, ZSTR_VAL(lc_name));
-	zval *zv = zend_hash_find(EG(generics_method_cache), cache_key);
-	if (zv) {
-		zend_string_release(cache_key);
-		return (zend_function *) Z_PTR_P(zv);
-	}
-
 	/* Args come from the display-cased spelling (the binding's class names
 	 * become display names of stamped instantiations); the base method is
 	 * looked up under the lowercased key. */
 	if (!zend_generics_parse_name(method_name, &base_slice, arg_slices, &num_args)) {
 		zend_throw_error(NULL, "Malformed generic method name \"%s\"", ZSTR_VAL(method_name));
-		zend_string_release(cache_key);
 		return NULL;
 	}
 
 	zend_function *base = zend_hash_str_find_ptr(&ce->function_table,
 		ZSTR_VAL(lc_name), base_slice.len);
 	if (!base) {
+		/* Second source: an extension method active for this receiver type.
+		 * The registry resolves per-calling-file activation itself. */
+		zend_string *lc_base = zend_string_init(ZSTR_VAL(lc_name), base_slice.len, 0);
+		base = zend_extension_methods_get(ce, lc_base);
+		zend_string_release(lc_base);
+	}
+	if (!base) {
 		zend_throw_error(NULL, "Call to undefined method %s::%.*s()",
 			ZSTR_VAL(ce->name), (int) base_slice.len, ZSTR_VAL(method_name));
-		zend_string_release(cache_key);
 		return NULL;
 	}
 	if (base->type != ZEND_USER_FUNCTION || !base->op_array.generic_params) {
 		zend_throw_error(NULL, "Method %s::%.*s() is not generic",
 			ZSTR_VAL(ce->name), (int) base_slice.len, ZSTR_VAL(method_name));
-		zend_string_release(cache_key);
 		return NULL;
+	}
+
+	/* Cache under the RESOLVED base (extension dispatch is activation-
+	 * sensitive per calling file: the same receiver and spelling may bind
+	 * different extension methods from different files). */
+	zend_string *cache_key = zend_strpprintf(0, "%p:%s", (void *) base, ZSTR_VAL(lc_name));
+	zval *zv = zend_hash_find(EG(generics_method_cache), cache_key);
+	if (zv) {
+		zend_string_release(cache_key);
+		return (zend_function *) Z_PTR_P(zv);
 	}
 
 	const zend_generic_params *mgp = base->op_array.generic_params;
