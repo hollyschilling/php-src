@@ -524,6 +524,12 @@ use_declaration:
 			{ $$ = zend_ast_create(ZEND_AST_USE_ELEM, $1, NULL); }
 	|	legacy_namespace_name T_AS T_STRING
 			{ $$ = zend_ast_create(ZEND_AST_USE_ELEM, $1, $3); }
+	|	T_NAME_MODULE
+			{ $1->attr = ZEND_NAME_MODULE;
+			  $$ = zend_ast_create(ZEND_AST_USE_ELEM, $1, NULL); }
+	|	T_NAME_MODULE T_AS T_STRING
+			{ $1->attr = ZEND_NAME_MODULE;
+			  $$ = zend_ast_create(ZEND_AST_USE_ELEM, $1, $3); }
 ;
 
 const_list:
