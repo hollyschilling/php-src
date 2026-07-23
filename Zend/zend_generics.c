@@ -190,6 +190,25 @@ ZEND_API uint32_t zend_generics_binding_arg_index(
 	return start;
 }
 
+/* The header's real, non-arena arg_info. A clone carrying a substituted array
+ * stashes the original one pointer before its arena block; that stash is
+ * itself always the TRUE original (this helper maintains the invariant at
+ * every clone level), so destroy_op_array's single-step restore stays correct
+ * however many times a body has been cloned -- class stamp, then method
+ * stamp, then a closure pass. Stashing an intermediate clone's arena entries
+ * instead would make the final release efree() an arena pointer. */
+static zend_arg_info *zend_generics_base_arg_info(const zend_op_array *fn)
+{
+	if (!(fn->fn_flags2 & ZEND_ACC2_GENERIC_SUBST_ARG_INFO) || !fn->arg_info) {
+		return fn->arg_info;
+	}
+	zend_arg_info *b = fn->arg_info;
+	if (fn->fn_flags & ZEND_ACC_HAS_RETURN_TYPE) {
+		b--;
+	}
+	return ((zend_arg_info **) b)[-1];
+}
+
 /* Local equivalent of zend_inheritance.c's zend_type_copy_ctor (which is
  * static there): arena-duplicate lists; addref name strings only when the
  * copy will be released again (property/constant types are, substituted
@@ -444,7 +463,7 @@ ZEND_API void zend_generics_substitute_closure_signature(
 
 	char *block = zend_arena_alloc(&CG(arena),
 		sizeof(zend_arg_info *) + total * sizeof(zend_arg_info));
-	*(zend_arg_info **) block = op_array->arg_info;
+	*(zend_arg_info **) block = zend_generics_base_arg_info(op_array);
 	zend_arg_info *entries = (zend_arg_info *) (block + sizeof(zend_arg_info *));
 	memcpy(entries, base, total * sizeof(zend_arg_info));
 	for (uint32_t i = 0; i < total; i++) {
@@ -516,7 +535,7 @@ ZEND_API void zend_generics_substitute_closure_method_signature(
 	} else {
 		char *block = zend_arena_alloc(&CG(arena),
 			sizeof(zend_arg_info *) + total * sizeof(zend_arg_info));
-		*(zend_arg_info **) block = op_array->arg_info;
+		*(zend_arg_info **) block = zend_generics_base_arg_info(op_array);
 		entries = (zend_arg_info *) (block + sizeof(zend_arg_info *));
 		memcpy(entries, base, total * sizeof(zend_arg_info));
 		op_array->arg_info = entries + has_ret;
@@ -603,7 +622,7 @@ static zend_op_array *zend_generics_clone_method(
 				sizeof(zend_arg_info *) + total * sizeof(zend_arg_info));
 			/* Stash the shared original so destroy_op_array can restore it
 			 * before the final free (see ZEND_ACC2_GENERIC_SUBST_ARG_INFO). */
-			*(zend_arg_info **) block = tpl_fn->arg_info;
+			*(zend_arg_info **) block = zend_generics_base_arg_info(tpl_fn);
 			zend_arg_info *entries = (zend_arg_info *) (block + sizeof(zend_arg_info *));
 			memcpy(entries, tpl_base, total * sizeof(zend_arg_info));
 			for (uint32_t i = 0; i < total; i++) {
@@ -1670,46 +1689,22 @@ static void zend_generics_method_cache_dtor(zval *zv)
 {
 	zend_function *fn = Z_PTR_P(zv);
 
-	/* Composite substituted signature names ("Sequence<Price>") are owned by
-	 * the clone; bare swaps borrow the binding's names and the rest is the
-	 * base's. Identify ours by pointer against the stashed original entries
-	 * and the binding args, and release before the generic dtor runs. */
-	if (fn->type == ZEND_USER_FUNCTION
-			&& (fn->common.fn_flags2 & ZEND_ACC2_GENERIC_SUBST_ARG_INFO)
-			&& fn->op_array.generic_binding) {
-		const zend_generic_binding *binding = fn->op_array.generic_binding;
-		uint32_t total = fn->op_array.num_args;
-		uint32_t has_ret = (fn->common.fn_flags & ZEND_ACC_HAS_RETURN_TYPE) ? 1 : 0;
-		zend_arg_info *entries = fn->op_array.arg_info - has_ret;
-		total += has_ret;
-		if (fn->common.fn_flags & ZEND_ACC_VARIADIC) {
-			total++;
+	/* Composite substituted signature names ("Sequence<Price>") created by
+	 * THIS method stamp are recorded on its binding, exactly as class
+	 * stamping records its own on the class binding. Bare parameter swaps
+	 * borrow the binding's argument names and take no ref; every other entry
+	 * belongs to the template or to an enclosing class instantiation and must
+	 * not be touched here. */
+	if (fn->type == ZEND_USER_FUNCTION && fn->op_array.generic_binding) {
+		zend_generic_binding *binding = fn->op_array.generic_binding;
+		for (uint32_t i = 0; i < binding->num_owned_names; i++) {
+			zend_string_release(binding->owned_names[i]);
 		}
-		/* The stashed pointer is the base's arg_info (return-entry offset
-		 * applied), mirroring the ZEND_ACC2_GENERIC_SUBST_ARG_INFO layout. */
-		const zend_arg_info *orig =
-			*(zend_arg_info **) ((char *) entries - sizeof(zend_arg_info *));
-		const zend_arg_info *orig_base = orig - has_ret;
-		for (uint32_t i = 0; i < total; i++) {
-			if (!ZEND_TYPE_HAS_NAME(entries[i].type)) {
-				continue;
-			}
-			zend_string *name = ZEND_TYPE_NAME(entries[i].type);
-			if (ZEND_TYPE_HAS_NAME(orig_base[i].type)
-					&& name == ZEND_TYPE_NAME(orig_base[i].type)) {
-				continue; /* base's */
-			}
-			bool borrowed = false;
-			for (uint32_t j = 0; j < binding->num_args; j++) {
-				if (ZEND_TYPE_HAS_NAME(binding->args[j])
-						&& name == ZEND_TYPE_NAME(binding->args[j])) {
-					borrowed = true;
-					break;
-				}
-			}
-			if (!borrowed) {
-				zend_string_release(name);
-			}
+		if (binding->owned_names) {
+			efree(binding->owned_names);
+			binding->owned_names = NULL;
+			binding->num_owned_names = 0;
+			binding->owned_names_cap = 0;
 		}
 	}
 
@@ -1866,7 +1861,9 @@ ZEND_API zend_function *zend_generics_get_method_instantiation(
 			if (uses) {
 				char *block = zend_arena_alloc(&CG(arena),
 					sizeof(zend_arg_info *) + total * sizeof(zend_arg_info));
-				*(zend_arg_info **) block = base->op_array.arg_info;
+				/* base may itself be a class-stamp clone whose arg_info is
+				 * arena-allocated; stash the template's real array. */
+				*(zend_arg_info **) block = zend_generics_base_arg_info(&base->op_array);
 				zend_arg_info *entries = (zend_arg_info *) (block + sizeof(zend_arg_info *));
 				memcpy(entries, tpl_base, total * sizeof(zend_arg_info));
 				for (uint32_t i = 0; i < total; i++) {
@@ -1894,14 +1891,15 @@ ZEND_API zend_function *zend_generics_get_method_instantiation(
 						}
 					} else {
 						/* Composite ("Sequence<U>"): string substitution.
-						 * The clone owns the new name; the cache dtor
-						 * releases it by pointer identity. */
+						 * The instantiation's binding owns the new name. */
 						zend_string *sub = zend_generics_substitute_symbol_str(
 							ZSTR_VAL(tname), ZSTR_LEN(tname), mgp, binding, NULL, NULL);
 						if (!sub) {
 							goto fail;
 						}
 						zend_alloc_ce_cache(sub);
+						/* Owned by this instantiation; released with it. */
+						sub = zend_generics_binding_own_name(binding, sub);
 						type->ptr = sub;
 						type->type_mask = _ZEND_TYPE_NAME_BIT | extra;
 					}
