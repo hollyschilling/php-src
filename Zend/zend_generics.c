@@ -1019,7 +1019,7 @@ ZEND_API void zend_generics_substitute_closure_method_signature(
 			if (!sub) {
 				return;
 			}
-			zend_alloc_ce_cache(sub);
+			sub = zend_generics_request_type_name(sub);
 			sub = zend_generics_binding_own_name(mbind, sub);
 			type->ptr = sub;
 			type->type_mask = _ZEND_TYPE_NAME_BIT | extra;
@@ -3419,9 +3419,8 @@ ZEND_API zend_function *zend_generics_get_method_instantiation(
 		if (scalar_mask) {
 			binding->args[i] = (zend_type) ZEND_TYPE_INIT_MASK(scalar_mask);
 		} else {
-			zend_string *arg_name = zend_new_interned_string(
+			zend_string *arg_name = zend_generics_request_type_name(
 				zend_string_init(arg_slices[i].start, arg_slices[i].len, 0));
-			zend_alloc_ce_cache(arg_name);
 			binding->args[i] = (zend_type) ZEND_TYPE_INIT_CLASS(arg_name, 0, 0);
 		}
 	}
@@ -3531,7 +3530,7 @@ ZEND_API zend_function *zend_generics_get_method_instantiation(
 						if (!sub) {
 							goto fail;
 						}
-						zend_alloc_ce_cache(sub);
+						sub = zend_generics_request_type_name(sub);
 						/* Owned by this instantiation; released with it. */
 						sub = zend_generics_binding_own_name(binding, sub);
 						type->ptr = sub;
