@@ -949,7 +949,8 @@ ZEND_API void zend_generics_preload_stamp_all(void)
 						for (uint32_t i = 0; i < ZEND_PROPERTY_HOOK_COUNT; i++) {
 							if (prop_info->hooks[i]) {
 								zend_generics_collect_op_array(
-									&prop_info->hooks[i]->op_array, &candidates);
+									&prop_info->hooks[i]->op_array, &candidates,
+									scan_ce->generic_params);
 							}
 						}
 					}
