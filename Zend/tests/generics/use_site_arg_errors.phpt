@@ -1,12 +1,11 @@
 --TEST--
-Generics: nested param-dependent type arguments stay rejected (bare-args-only restriction)
+Generics: param-dependent composite members of union lists stay rejected, nested included
 --FILE--
 <?php
-class Vec<T> {}
 class Box<T> {}
 class C<T> {
-    public function f(Vec<Box<T>> $x): void {}
+    public function f(): Box<Box<T>>|Countable { return new Box(); }
 }
 ?>
 --EXPECTF--
-Fatal error: Cannot use type parameter T as a generic type argument (type arguments must be concrete in this version) in %s on line %d
+Fatal error: Parameterized type Box<Box<T>> is not supported inside a composite type (in this version) in %s on line %d
