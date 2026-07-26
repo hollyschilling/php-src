@@ -317,35 +317,44 @@ static bool zend_generics_substitute_single(
 }
 
 /* Does a composite (mangled) name mention any of gp's parameters as a bare
- * argument? Accepts an optional "..." spread prefix per argument. */
+ * argument label at ANY nesting depth ("C<T>", "Pair<Box<T>,int>")? A label
+ * immediately followed by '<' is a base name, never a parameter; a label
+ * containing '\\' is fully qualified, never a parameter. Accepts an optional
+ * "..." spread prefix per argument. */
 ZEND_API bool zend_generics_name_mentions_params(
 		const zend_string *name, const zend_generic_params *gp)
 {
-	const char *lt = memchr(ZSTR_VAL(name), '<', ZSTR_LEN(name));
-	if (!lt) {
+	const char *p = memchr(ZSTR_VAL(name), '<', ZSTR_LEN(name));
+	if (!p) {
 		return false;
 	}
 	const char *end = ZSTR_VAL(name) + ZSTR_LEN(name);
-	const char *p = lt + 1;
+	p++; /* skip the outer base name and its '<' */
 	while (p < end) {
-		const char *comma = memchr(p, ',', end - p);
-		const char *arg_end = comma ? comma : end - 1;
-		const char *a = p;
-		if (arg_end - a > 3 && a[0] == '.' && a[1] == '.' && a[2] == '.') {
-			a += 3;
+		char c = *p;
+		if (c == ',' || c == '<' || c == '>' || c == '.') {
+			p++;
+			continue;
 		}
-		if (!memchr(a, '<', arg_end - a) && !memchr(a, '\\', arg_end - a)) {
+		const char *label = p;
+		bool qualified = false;
+		while (p < end && *p != ',' && *p != '<' && *p != '>') {
+			if (*p == '\\') {
+				qualified = true;
+			}
+			p++;
+		}
+		if (p < end && *p == '<') {
+			continue; /* base name of a nested reference */
+		}
+		if (!qualified) {
 			for (uint32_t i = 0; i < gp->num_params; i++) {
-				if (zend_binary_strcasecmp(a, arg_end - a,
+				if (zend_binary_strcasecmp(label, p - label,
 						ZSTR_VAL(gp->params[i].name), ZSTR_LEN(gp->params[i].name)) == 0) {
 					return true;
 				}
 			}
 		}
-		if (!comma) {
-			break;
-		}
-		p = comma + 1;
 	}
 	return false;
 }
@@ -1165,73 +1174,122 @@ static void zend_generics_append_binding_arg(smart_str *buf, const zend_type arg
 	}
 }
 
-/* Substitute this instantiation's type arguments into a deferred inheritance
- * reference such as "App\Collection<T>" or "App\Merger<...Ts>". Args are
- * bare (params, a spread of the pack, or concrete) by construction, so
- * substitution depth cannot grow; a spread splices in the pack's whole
- * argument slice. Returns an owned, non-interned string. */
-static zend_string *zend_generics_substitute_deferred_ref(
-		zend_string *ref, const zend_class_entry *template_ce,
-		const zend_generic_binding *binding)
+/* Looks up a bare label in one space's parameter list; (uint32_t)-1 on miss. */
+static uint32_t zend_generics_space_param_index(
+		const zend_generic_params *gp, const char *name, size_t name_len)
 {
-	zend_generic_name_slice base_slice;
-	zend_generic_name_slice arg_slices[ZEND_GENERICS_MAX_ARGS];
-	uint32_t num_args;
-	bool ok = zend_generics_parse_name_ex(ref, &base_slice, arg_slices, &num_args,
-		/* allow_spread */ true);
-	ZEND_ASSERT(ok && "deferred refs are compiler-generated");
-	const zend_generic_params *gp = template_ce->generic_params;
+	if (!gp) {
+		return (uint32_t) -1;
+	}
+	for (uint32_t i = 0; i < gp->num_params; i++) {
+		if (zend_binary_strcasecmp(name, name_len,
+				ZSTR_VAL(gp->params[i].name), ZSTR_LEN(gp->params[i].name)) == 0) {
+			return i;
+		}
+	}
+	return (uint32_t) -1;
+}
+
+/* Rewrite a mangled composite name, replacing every parameter label -- at any
+ * nesting depth ("Pair<Box<B>,C>") -- with its bound argument from the first
+ * matching (params, binding) space; everything else is copied verbatim. Base
+ * names (labels followed by '<') and qualified names are never parameters. A
+ * "...Pack" spread splices in the pack's whole argument slice (the compiler
+ * only emits spreads of the declaring template's own pack, at the top level
+ * of deferred inheritance references). Labels matching no space stay as-is:
+ * a class-space pass over a two-level signature leaves method-space
+ * parameters symbolic for the later method-stamp pass, and vice versa.
+ * Returns an owned, non-interned string. */
+static zend_string *zend_generics_rewrite_composite(
+		const char *val, size_t len,
+		const zend_generic_params *gp1, const zend_generic_binding *b1,
+		const zend_generic_params *gp2, const zend_generic_binding *b2)
+{
+	const char *end = val + len;
+	const char *p = memchr(val, '<', len);
+	ZEND_ASSERT(p && "composite names contain '<'");
+	if (!b1) {
+		gp1 = NULL;
+	}
+	if (!b2) {
+		gp2 = NULL;
+	}
 
 	smart_str buf = {0};
-	smart_str_appendl(&buf, base_slice.start, base_slice.len);
-	smart_str_appendc(&buf, '<');
-	for (uint32_t i = 0; i < num_args; i++) {
-		if (i) {
-			smart_str_appendc(&buf, ',');
-		}
-		const zend_generic_name_slice *slice = &arg_slices[i];
+	p++;
+	smart_str_appendl(&buf, val, p - val); /* outer base name + '<' */
 
-		if (slice->len > 3 && slice->start[0] == '.') {
-			/* "...Ts": splice in the pack's argument slice. The compiler only
-			 * emits a spread of the declaring template's own pack. */
-			ZEND_ASSERT(gp->pack_index != (uint32_t) -1
-				&& zend_binary_strcasecmp(slice->start + 3, slice->len - 3,
-					ZSTR_VAL(gp->params[gp->pack_index].name),
-					ZSTR_LEN(gp->params[gp->pack_index].name)) == 0);
-			uint32_t arg_start, arg_count;
-			zend_generics_param_arg_slice(gp, binding->num_args,
-				gp->pack_index, &arg_start, &arg_count);
+	while (p < end) {
+		char c = *p;
+		if (c == ',' || c == '<' || c == '>') {
+			smart_str_appendc(&buf, c);
+			p++;
+			continue;
+		}
+		bool spread = false;
+		if (c == '.') {
+			ZEND_ASSERT(p + 3 < end && p[1] == '.' && p[2] == '.'
+				&& "spreads are compiler-generated");
+			spread = true;
+			p += 3;
+		}
+		const char *label = p;
+		bool qualified = false;
+		while (p < end && *p != ',' && *p != '<' && *p != '>') {
+			if (*p == '\\') {
+				qualified = true;
+			}
+			p++;
+		}
+		if ((p < end && *p == '<') || qualified) {
+			/* Base name of a nested reference, or fully qualified. */
+			ZEND_ASSERT(!spread);
+			smart_str_appendl(&buf, label, p - label);
+			continue;
+		}
+		const zend_generic_params *gp = gp1;
+		const zend_generic_binding *binding = b1;
+		uint32_t idx = zend_generics_space_param_index(gp1, label, p - label);
+		if (idx == (uint32_t) -1) {
+			gp = gp2;
+			binding = b2;
+			idx = zend_generics_space_param_index(gp2, label, p - label);
+		}
+		if (idx == (uint32_t) -1) {
+			ZEND_ASSERT(!spread);
+			smart_str_appendl(&buf, label, p - label);
+			continue;
+		}
+		uint32_t arg_start, arg_count;
+		zend_generics_param_arg_slice(gp, binding->num_args, idx, &arg_start, &arg_count);
+		if (spread) {
+			ZEND_ASSERT(idx == gp->pack_index
+				&& "only the declaring template's own pack can be spread");
 			for (uint32_t j = 0; j < arg_count; j++) {
 				if (j) {
 					smart_str_appendc(&buf, ',');
 				}
 				zend_generics_append_binding_arg(&buf, binding->args[arg_start + j]);
 			}
-			continue;
-		}
-
-		uint32_t param_idx = (uint32_t) -1;
-		if (!memchr(slice->start, '\\', slice->len) && !memchr(slice->start, '<', slice->len)) {
-			for (uint32_t j = 0; j < gp->num_params; j++) {
-				if (zend_binary_strcasecmp(slice->start, slice->len,
-						ZSTR_VAL(gp->params[j].name), ZSTR_LEN(gp->params[j].name)) == 0) {
-					param_idx = j;
-					break;
-				}
-			}
-		}
-		if (param_idx != (uint32_t) -1) {
-			uint32_t arg_start, arg_count;
-			zend_generics_param_arg_slice(gp, binding->num_args,
-				param_idx, &arg_start, &arg_count);
+		} else {
 			ZEND_ASSERT(arg_count == 1 && "bare pack refs are compile-time rejected");
 			zend_generics_append_binding_arg(&buf, binding->args[arg_start]);
-		} else {
-			smart_str_appendl(&buf, slice->start, slice->len);
 		}
 	}
-	smart_str_appendc(&buf, '>');
 	return smart_str_extract(&buf);
+}
+
+/* Substitute this instantiation's type arguments into a deferred inheritance
+ * reference such as "App\Collection<T>" or "App\Merger<...Ts>" (bare args
+ * only there, so substitution depth cannot grow across eager stamp chains),
+ * or into a signature/body composite reference, where parameters may sit at
+ * any nesting depth ("Pair<Box<T>,int>"). Returns an owned string. */
+static zend_string *zend_generics_substitute_deferred_ref(
+		zend_string *ref, const zend_class_entry *template_ce,
+		const zend_generic_binding *binding)
+{
+	return zend_generics_rewrite_composite(ZSTR_VAL(ref), ZSTR_LEN(ref),
+		template_ce->generic_params, binding, NULL, NULL);
 }
 
 static bool zend_generics_ce_implements_ptr(
@@ -1594,32 +1652,9 @@ static zend_string *zend_generics_substitute_symbol_str(
 		return zend_string_init(sym, sym_len, 0);
 	}
 
-	zend_string *tmp = zend_string_init(sym, sym_len, 0);
-	zend_generic_name_slice base_slice;
-	zend_generic_name_slice arg_slices[ZEND_GENERICS_MAX_ARGS];
-	uint32_t num_args;
-	bool ok = zend_generics_parse_name(tmp, &base_slice, arg_slices, &num_args);
-	ZEND_ASSERT(ok && "method symbols are compiler-generated");
-
-	smart_str buf = {0};
-	smart_str_appendl(&buf, base_slice.start, base_slice.len);
-	smart_str_appendc(&buf, '<');
-	for (uint32_t i = 0; i < num_args; i++) {
-		if (i) {
-			smart_str_appendc(&buf, ',');
-		}
-		const zend_generic_name_slice *slice = &arg_slices[i];
-		if (!memchr(slice->start, '<', slice->len)
-				&& (zend_generics_space_lookup(mgp, mbind, slice->start, slice->len, &arg)
-					|| zend_generics_space_lookup(cgp, cbind, slice->start, slice->len, &arg))) {
-			zend_generics_append_binding_arg(&buf, *arg);
-		} else {
-			smart_str_appendl(&buf, slice->start, slice->len);
-		}
-	}
-	smart_str_appendc(&buf, '>');
-	zend_string_release(tmp);
-	return smart_str_extract(&buf);
+	/* Composite ("Sequence<U>", "Pair<Box<U>,C>"): parameters substitute at
+	 * any nesting depth, method space first, class space secondarily. */
+	return zend_generics_rewrite_composite(sym, sym_len, mgp, mbind, cgp, cbind);
 }
 
 ZEND_API zend_string *zend_generics_resolve_type_symbol(const char *sym, size_t sym_len)
@@ -1666,23 +1701,8 @@ static bool zend_generics_method_type_uses_params(
 		}
 		return false;
 	}
-	/* Composite: any bare arg matching a method param. */
-	for (uint32_t i = 0; i < mgp->num_params; i++) {
-		const char *p = lt + 1;
-		const char *end = ZSTR_VAL(name) + ZSTR_LEN(name);
-		size_t plen = ZSTR_LEN(mgp->params[i].name);
-		while (p < end) {
-			const char *comma = memchr(p, ',', end - p);
-			size_t alen = (comma ? comma : end - 1) - p;
-			if (alen == plen && zend_binary_strcasecmp(p, alen,
-					ZSTR_VAL(mgp->params[i].name), plen) == 0) {
-				return true;
-			}
-			if (!comma) break;
-			p = comma + 1;
-		}
-	}
-	return false;
+	/* Composite: any bare arg label matching a method param, at any depth. */
+	return zend_generics_name_mentions_params(name, mgp);
 }
 
 static void zend_generics_method_cache_dtor(zval *zv)
