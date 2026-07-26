@@ -6488,6 +6488,14 @@ static zend_vm_opcode_handler_t zend_jit_trace(zend_jit_trace_rec *trace_buffer,
 								on_this = op_array->opcodes[op_array_ssa->vars[op_array_ssa->ops[opline-op_array->opcodes].op1_use].definition].opcode == ZEND_FETCH_THIS;
 							}
 						}
+						if (!(op1_info & MAY_BE_OBJECT)) {
+							/* Non-object receiver: scalar extension-method
+							 * dispatch stays interpreted (traces used to end
+							 * at the preceding never-cached callee before
+							 * object-target extension methods became
+							 * cacheable; now they can reach this site). */
+							break;
+						}
 						frame_flags = TRACE_FRAME_MASK_NESTED;
 						if (!zend_jit_init_method_call(&ctx, opline,
 								op_array_ssa->cfg.map ? op_array_ssa->cfg.map[opline - op_array->opcodes] : -1,
