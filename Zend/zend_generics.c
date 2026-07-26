@@ -3270,32 +3270,12 @@ static zend_string *zend_generics_substitute_symbol_str(
 		return zend_string_init(sym, sym_len, 0);
 	}
 
-	zend_string *tmp = zend_string_init(sym, sym_len, 0);
-	zend_generic_name_slice base_slice;
-	zend_generic_name_slice arg_slices[ZEND_GENERICS_MAX_ARGS];
-	uint32_t num_args;
-	bool ok = zend_generics_parse_name(tmp, &base_slice, arg_slices, &num_args);
-	ZEND_ASSERT(ok && "method symbols are compiler-generated");
-
-	smart_str buf = {0};
-	smart_str_appendl(&buf, base_slice.start, base_slice.len);
-	smart_str_appendc(&buf, '<');
-	for (uint32_t i = 0; i < num_args; i++) {
-		if (i) {
-			smart_str_appendc(&buf, ',');
-		}
-		const zend_generic_name_slice *slice = &arg_slices[i];
-		if (!memchr(slice->start, '<', slice->len)
-				&& (zend_generics_space_lookup(mgp, mbind, slice->start, slice->len, &arg)
-					|| zend_generics_space_lookup(cgp, cbind, slice->start, slice->len, &arg))) {
-			zend_generics_append_binding_arg(&buf, *arg);
-		} else {
-			smart_str_appendl(&buf, slice->start, slice->len);
-		}
-	}
-	smart_str_appendc(&buf, '>');
-	zend_string_release(tmp);
-	return smart_str_extract(&buf);
+	/* Composite ("Sequence<U>", "Pair<Box<U>,C>"): parameters substitute at
+	 * any nesting depth, method space first, class space secondarily.
+	 * Re-canonicalize: member substitution can violate the sorted-member
+	 * identity or create duplicates ("Vec<null|Foo>" vs "Vec<Foo|null>"). */
+	return zend_generics_canonicalize_name(
+		zend_generics_rewrite_composite(sym, sym_len, mgp, mbind, cgp, cbind));
 }
 
 ZEND_API zend_string *zend_generics_resolve_type_symbol(const char *sym, size_t sym_len)
@@ -3321,15 +3301,6 @@ ZEND_API zend_string *zend_generics_resolve_type_symbol(const char *sym, size_t 
 			"Cannot resolve a symbolic generic type reference when no generic binding is in scope");
 		return NULL;
 	}
-	if (!mbind) {
-		/* Class space only ("new C<T>" in a template body): the deferred-ref
-		 * machinery substitutes at any nesting depth and canonicalizes. */
-		zend_string *tmp = zend_string_init(sym, sym_len, 0);
-		zend_string *sub = zend_generics_substitute_deferred_ref(
-			tmp, cbind->template_ce, cbind);
-		zend_string_release(tmp);
-		return sub;
-	}
 	return zend_generics_substitute_symbol_str(sym, sym_len, mgp, mbind, cgp, cbind);
 }
 
@@ -3351,23 +3322,8 @@ static bool zend_generics_method_type_uses_params(
 		}
 		return false;
 	}
-	/* Composite: any bare arg matching a method param. */
-	for (uint32_t i = 0; i < mgp->num_params; i++) {
-		const char *p = lt + 1;
-		const char *end = ZSTR_VAL(name) + ZSTR_LEN(name);
-		size_t plen = ZSTR_LEN(mgp->params[i].name);
-		while (p < end) {
-			const char *comma = memchr(p, ',', end - p);
-			size_t alen = (comma ? comma : end - 1) - p;
-			if (alen == plen && zend_binary_strcasecmp(p, alen,
-					ZSTR_VAL(mgp->params[i].name), plen) == 0) {
-				return true;
-			}
-			if (!comma) break;
-			p = comma + 1;
-		}
-	}
-	return false;
+	/* Composite: any bare arg label matching a method param, at any depth. */
+	return zend_generics_name_mentions_params(name, mgp);
 }
 
 static void zend_generics_method_cache_dtor(zval *zv)
