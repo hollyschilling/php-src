@@ -242,6 +242,65 @@ static zend_string *zend_generics_substitute_deferred_ref(
 	const zend_generic_binding *binding);
 
 
+/* Canonicalize a runtime-created type-name string (a binding argument or a
+ * substituted composite) into a CE-cache-capable string, consuming the input.
+ *
+ * Since PHP 8.1 the arg/return type checks resolve classes exclusively
+ * through the type-name STRING's CE cache (zend_fetch_ce_from_type); a name
+ * without one pays a full lowercase-and-lookup on every check. Cache slots
+ * can only be hosted by interned strings (the slot id lives in the refcount
+ * field), and zend_alloc_ce_cache refuses permanent SHM strings at runtime
+ * (the slot would die with the request while the string would not). Without
+ * opcache, request interning makes everything work; under opcache no request
+ * interning exists, so stamped signatures' names would stay uncacheable.
+ *
+ * Solution: keep a per-request table of canonical copies flagged
+ * IS_STR_INTERNED by hand -- refcounting no-ops, the slot is safe, and the
+ * string and its slot die together at request shutdown, exactly like
+ * ordinary request-interned names. During preloading names must stay plain
+ * (zend_persist_type allocates permanent slots for everything it persists,
+ * and persistence asserts no runtime-flagged strings). */
+static zend_string *zend_generics_request_type_name(zend_string *name)
+{
+	if (!ZSTR_IS_INTERNED(name)) {
+		name = zend_new_interned_string(name);
+	}
+	if (ZSTR_IS_INTERNED(name)) {
+		if (EXPECTED(ZSTR_HAS_CE_CACHE(name))) {
+			return name;
+		}
+		if (!(GC_FLAGS(name) & IS_STR_PERMANENT)) {
+			/* Genuinely request-interned (no opcache): slots are legal. */
+			zend_alloc_ce_cache(name);
+			return name;
+		}
+		/* Permanent SHM spelling without a slot: fall through to a
+		 * request-lifetime capable copy. */
+	}
+	if (UNEXPECTED(CG(compiler_options) & ZEND_COMPILE_PRELOAD)) {
+		return name;
+	}
+
+	HashTable *tab = EG(generics_type_names);
+	if (!tab) {
+		ALLOC_HASHTABLE(tab);
+		zend_hash_init(tab, 8, NULL, NULL, 0);
+		EG(generics_type_names) = tab;
+	}
+	zend_string *canon = zend_hash_find_ptr(tab, name);
+	if (canon) {
+		zend_string_release(name);
+		return canon;
+	}
+	zend_string *copy = zend_string_init(ZSTR_VAL(name), ZSTR_LEN(name), 0);
+	zend_string_hash_val(copy);
+	GC_ADD_FLAGS(copy, IS_STR_INTERNED);
+	zend_alloc_ce_cache(copy);
+	zend_hash_add_new_ptr(tab, copy, copy);
+	zend_string_release(name);
+	return copy;
+}
+
 /* Register an owned substituted composite name on the binding; released with
  * the instance (zend_opcode.c). The binding is logically mutable here even
  * where the substitution walk is const. */
@@ -283,9 +342,8 @@ static bool zend_generics_substitute_single(
 			 * substitute at the string level. The binding owns the new name
 			 * in the never-destroyed arg_info case; prop/const types release
 			 * theirs through zend_type_release as usual. */
-			zend_string *sub = zend_generics_substitute_deferred_ref(
-				tname, template_ce, binding);
-			zend_alloc_ce_cache(sub);
+			zend_string *sub = zend_generics_request_type_name(
+				zend_generics_substitute_deferred_ref(tname, template_ce, binding));
 			if (!take_refs) {
 				sub = zend_generics_binding_own_name(binding, sub);
 			}
@@ -576,7 +634,7 @@ ZEND_API void zend_generics_substitute_closure_method_signature(
 			if (!sub) {
 				return;
 			}
-			zend_alloc_ce_cache(sub);
+			sub = zend_generics_request_type_name(sub);
 			sub = zend_generics_binding_own_name(mbind, sub);
 			type->ptr = sub;
 			type->type_mask = _ZEND_TYPE_NAME_BIT | extra;
@@ -1491,9 +1549,8 @@ static zend_class_entry *zend_generics_stamp_instantiation_impl(
 		if (scalar_mask) {
 			binding->args[i] = (zend_type) ZEND_TYPE_INIT_MASK(scalar_mask);
 		} else {
-			zend_string *arg_name = zend_new_interned_string(
+			zend_string *arg_name = zend_generics_request_type_name(
 				zend_string_init(arg_slices[i].start, arg_slices[i].len, 0));
-			zend_alloc_ce_cache(arg_name);
 			binding->args[i] = (zend_type) ZEND_TYPE_INIT_CLASS(arg_name, 0, 0);
 		}
 	}
@@ -1805,9 +1862,8 @@ ZEND_API zend_function *zend_generics_get_method_instantiation(
 		if (scalar_mask) {
 			binding->args[i] = (zend_type) ZEND_TYPE_INIT_MASK(scalar_mask);
 		} else {
-			zend_string *arg_name = zend_new_interned_string(
+			zend_string *arg_name = zend_generics_request_type_name(
 				zend_string_init(arg_slices[i].start, arg_slices[i].len, 0));
-			zend_alloc_ce_cache(arg_name);
 			binding->args[i] = (zend_type) ZEND_TYPE_INIT_CLASS(arg_name, 0, 0);
 		}
 	}
@@ -1917,7 +1973,7 @@ ZEND_API zend_function *zend_generics_get_method_instantiation(
 						if (!sub) {
 							goto fail;
 						}
-						zend_alloc_ce_cache(sub);
+						sub = zend_generics_request_type_name(sub);
 						/* Owned by this instantiation; released with it. */
 						sub = zend_generics_binding_own_name(binding, sub);
 						type->ptr = sub;
