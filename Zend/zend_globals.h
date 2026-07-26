@@ -199,6 +199,10 @@ struct _zend_executor_globals {
 	HashTable *zend_constants;	/* constants table */
 	/* lc mangled names currently being stamped (cycle guard); lazily allocated */
 	HashTable *generics_stamping;
+	/* Canonical CE-cache-capable copies of runtime-created type-name strings
+	 * (generic binding arguments, substituted composites), keyed by content;
+	 * lazily allocated, torn down at the tail of shutdown_executor. */
+	HashTable *generics_type_names;
 
 	zval          *vm_stack_top;
 	zval          *vm_stack_end;

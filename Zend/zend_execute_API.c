@@ -157,6 +157,7 @@ void init_executor(void) /* {{{ */
 	zend_hash_init(&EG(included_files), 8, NULL, NULL, 0);
 	zend_hash_init(&EG(autoload_current_classnames), 8, NULL, NULL, 0);
 	EG(generics_stamping) = NULL;
+	EG(generics_type_names) = NULL;
 
 	EG(ticks_count) = 0;
 
@@ -521,6 +522,24 @@ void shutdown_executor(void) /* {{{ */
 		}
 
 		zend_hash_destroy(&EG(callable_convert_cache));
+
+		if (EG(generics_type_names)) {
+			/* Torn down LAST: these strings are flagged IS_STR_INTERNED so
+			 * refcounting no-ops leave their CE-cache slot (hosted in the
+			 * refcount field) intact, which means every holder above released
+			 * them as a no-op and this table owns the only real free. The
+			 * interned-keyed table is static-keys-only, so free each key by
+			 * hand after stripping the flags. */
+			zend_string *tn_key;
+			ZEND_HASH_MAP_FOREACH_STR_KEY(EG(generics_type_names), tn_key) {
+				GC_TYPE_INFO(tn_key) = GC_STRING;
+				GC_SET_REFCOUNT(tn_key, 1);
+				zend_string_release_ex(tn_key, 0);
+			} ZEND_HASH_FOREACH_END();
+			zend_hash_destroy(EG(generics_type_names));
+			FREE_HASHTABLE(EG(generics_type_names));
+			EG(generics_type_names) = NULL;
+		}
 	}
 
 #if ZEND_DEBUG
