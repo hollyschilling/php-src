@@ -1,5 +1,6 @@
 /* Prototype: Swift-style extension methods registry (RFC draft).
  * Registry maps lc(target class name) -> HashTable of lc(method) -> entry.
+ * Lives in EG(extension_method_registry): per request, per thread under ZTS.
  * Named extensions (extension Name on Target) are lexically gated: their
  * methods resolve only from op_arrays whose file imported them via
  * `use extension` (the declaring position imports itself). Import sets are
@@ -14,8 +15,8 @@
 
 BEGIN_EXTERN_C()
 
-void zend_extension_methods_startup(void);
-void zend_extension_methods_shutdown(void);
+/* Frees the per-request registry tables (entries are borrowed pointers). */
+void zend_extension_methods_request_shutdown(void);
 
 /* Called when an `extension ... { ... }` block's synthetic CE is linked.
  * ext_name_lc is NULL for anonymous blocks (globally visible); for named
