@@ -237,6 +237,11 @@ struct _zend_executor_globals {
 	 * per name per request. */
 	HashTable *extension_autoload_attempted;
 
+	/* Extension-method registry: lc target name -> HashTable of lc method
+	 * name -> entry (borrowed fn + gating name). Lazily allocated per
+	 * request; one per thread under ZTS. See zend_extension_methods.c. */
+	HashTable *extension_method_registry;
+
 	zend_long hard_timeout;
 	void *stack_base;
 	void *stack_limit;

@@ -9706,19 +9706,22 @@ static void zend_compile_extension_decl(zend_ast *ast) /* {{{ */
 		zend_string_release(ext_name);
 	}
 
-	/* Keep extension methods out of the polymorphic inline cache for the
-	 * prototype (correctness over speed; the cached path + JIT support is
-	 * future work). Must happen at compile time: under opcache the CE is
-	 * persisted to (protected) shared memory and is immutable at runtime. */
-	zend_function *ext_fn;
-	ZEND_HASH_MAP_FOREACH_PTR(&ext_ce->function_table, ext_fn) {
-		ext_fn->common.fn_flags |= ZEND_ACC_NEVER_CACHE;
-		if (is_scalar_target) {
-			/* Keep these bodies interpreted: generated code must never
-			 * observe the non-object receiver handoff in This. */
+	/* Object-target extension methods ride the ordinary polymorphic inline
+	 * cache: a call site belongs to exactly one file, and registration is
+	 * monotonic with first-wins conflicts within a request, so a resolution
+	 * cached at a site can never go stale. Scalar-target methods stay
+	 * excluded: their dispatch has no class entry to key a cache on, and
+	 * NEVER_CACHE also keeps the tracing JIT from entering bodies that
+	 * must never be compiled (the non-object receiver handoff in This).
+	 * Must happen at compile time: under opcache the CE is persisted to
+	 * (protected) shared memory and is immutable at runtime. */
+	if (is_scalar_target) {
+		zend_function *ext_fn;
+		ZEND_HASH_MAP_FOREACH_PTR(&ext_ce->function_table, ext_fn) {
+			ext_fn->common.fn_flags |= ZEND_ACC_NEVER_CACHE;
 			ext_fn->common.fn_flags2 |= ZEND_ACC2_SCALAR_RECEIVER;
-		}
-	} ZEND_HASH_FOREACH_END();
+		} ZEND_HASH_FOREACH_END();
+	}
 
 	/* Runtime registration once the synthetic CE is declared. */
 	opline = zend_emit_op(NULL, ZEND_BIND_EXTENSION, &class_node, NULL);
