@@ -32,6 +32,8 @@
 
 #define ZEND_GENERICS_MAX_ARGS 64
 
+ZEND_API void (*zend_generics_jit_clone_hook)(zend_op_array *op_array) = NULL;
+
 typedef struct {
 	const char *start;
 	size_t len;
@@ -705,6 +707,9 @@ static zend_op_array *zend_generics_clone_method(
 			new_fn->arg_info = entries + has_ret;
 			new_fn->fn_flags2 |= ZEND_ACC2_GENERIC_SUBST_ARG_INFO;
 		}
+	}
+	if (UNEXPECTED(zend_generics_jit_clone_hook != NULL)) {
+		zend_generics_jit_clone_hook(new_fn);
 	}
 	return new_fn;
 }
@@ -1983,6 +1988,12 @@ ZEND_API zend_function *zend_generics_get_method_instantiation(
 				new_fn->arg_info = entries + has_ret;
 				new_fn->fn_flags2 |= ZEND_ACC2_GENERIC_SUBST_ARG_INFO;
 			}
+		}
+
+		if (UNEXPECTED(zend_generics_jit_clone_hook != NULL)) {
+			/* Method instantiations are shared-opcode clones exactly like
+			 * class-stamp clones: give each its own trace extension. */
+			zend_generics_jit_clone_hook(new_fn);
 		}
 
 		zv = zend_hash_add_new_ptr(EG(generics_method_cache), cache_key, new_fn);

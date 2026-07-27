@@ -477,11 +477,27 @@ typedef struct _zend_oparray_context {
 /* is stored one pointer before the arena block and is    |     |     |     */
 /* restored by destroy_op_array before the final free     |     |     |     */
 #define ZEND_ACC2_GENERIC_SUBST_ARG_INFO (1 << 3)  /*     |  X  |     |     */
+/*                                                        |     |     |     */
+/* Function Flags 2 (fn_flags2) (unused: 1-2 [claimed on  |     |     |     */
+/* other roadmap branches], 6-31)                         |     |     |     */
+/* ============================                           |     |     |     */
+/*                                                        |     |     |     */
+/* Function forbids dynamic calls                         |     |     |     */
+#define ZEND_ACC2_FORBID_DYN_CALLS       (1 << 0)  /*     |  X  |     |     */
 
 /* Generic METHOD prototype ("function map<U>"): set on the declaring
  * op_array only; clones (class stamps, method instantiations) clear it so
  * the shared generic_params are released exactly once.  |     |     |     */
 #define ZEND_ACC2_GENERIC_METHOD_TEMPLATE (1 << 4) /*     |  X  |     |     */
+/*                                                        |     |     |     */
+/* Closure/arrow-fn op_array declared inside a generic    |     |     |     */
+/* template: its per-creation copies carry per-binding    |     |     |     */
+/* substituted signatures, so JIT machine code must not   |     |     |     */
+/* be keyed to the shared persistent definition. Function |     |     |     */
+/* -mode JIT excludes these; the tracing JIT records      |     |     |     */
+/* through them without callee identity (checks run       |     |     |     */
+/* against the executing copy at runtime).                |     |     |     */
+#define ZEND_ACC2_GENERIC_CONTEXT        (1 << 5)  /*     |  X  |     |     */
 
 #define ZEND_ACC_PPP_MASK  (ZEND_ACC_PUBLIC | ZEND_ACC_PROTECTED | ZEND_ACC_PRIVATE)
 #define ZEND_ACC_PPP_SET_MASK  (ZEND_ACC_PUBLIC_SET | ZEND_ACC_PROTECTED_SET | ZEND_ACC_PRIVATE_SET)

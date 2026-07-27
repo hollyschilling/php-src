@@ -9612,6 +9612,17 @@ static zend_op_array *zend_compile_func_decl_ex(
 
 	if (decl->kind == ZEND_AST_CLOSURE || decl->kind == ZEND_AST_ARROW_FUNC) {
 		op_array->fn_flags |= ZEND_ACC_CLOSURE;
+		if ((CG(active_class_entry) && CG(active_class_entry)->generic_params)
+		 || (CG(active_op_array) && CG(active_op_array)->generic_params)
+		 || (CG(active_op_array)
+			&& (CG(active_op_array)->fn_flags2 & ZEND_ACC2_GENERIC_CONTEXT))) {
+			/* Declared inside a generic template or a generic METHOD (or
+			 * nested in such a closure): per-creation copies get per-binding
+			 * substituted signatures (zend_generics closure passes), which
+			 * JIT machine code keyed to the shared definition would bypass.
+			 * See ZEND_ACC2_GENERIC_CONTEXT. */
+			op_array->fn_flags2 |= ZEND_ACC2_GENERIC_CONTEXT;
+		}
 	}
 
 	if (is_hook) {
