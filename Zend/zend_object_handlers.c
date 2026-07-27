@@ -26,6 +26,7 @@
 #include "zend_objects_API.h"
 #include "zend_object_handlers.h"
 #include "zend_extension_methods.h"
+#include "zend_surfaces.h"
 #include "zend_interfaces.h"
 #include "zend_exceptions.h"
 #include "zend_closures.h"
@@ -437,6 +438,26 @@ wrong:
 	}
 
 found:
+	/* Surfaces: reachable only from the declaring hierarchy or a granting
+	 * scope. Denials are not cached (each call site re-checks until its
+	 * first allowed access). */
+	if (UNEXPECTED(property_info->ce->surface_members != NULL)) {
+		const zval *surface_set =
+			zend_surfaces_member_set(property_info->ce, 'p', member);
+		if (surface_set
+		 && !zend_surfaces_property_has_interface_face(ce, member)
+		 && !zend_surfaces_access_allowed(property_info->ce, ce, surface_set)) {
+			if (!silent) {
+				zend_throw_error(NULL,
+					"Cannot access surface property %s::$%s "
+					"(grant it with \"use %s with surface[...]\")",
+					ZSTR_VAL(property_info->ce->name), ZSTR_VAL(member),
+					ZSTR_VAL(ce->name));
+			}
+			return ZEND_WRONG_PROPERTY_OFFSET;
+		}
+	}
+
 	if (UNEXPECTED(flags & ZEND_ACC_STATIC)) {
 		if (!silent) {
 			zend_error(E_NOTICE, "Accessing static property %s::$%s as non static", ZSTR_VAL(ce->name), ZSTR_VAL(member));
@@ -564,6 +585,24 @@ wrong:
 	}
 
 found:
+	/* Surfaces: same predicate as zend_get_property_offset(). */
+	if (UNEXPECTED(property_info->ce->surface_members != NULL)) {
+		const zval *surface_set =
+			zend_surfaces_member_set(property_info->ce, 'p', member);
+		if (surface_set
+		 && !zend_surfaces_property_has_interface_face(ce, member)
+		 && !zend_surfaces_access_allowed(property_info->ce, ce, surface_set)) {
+			if (!silent) {
+				zend_throw_error(NULL,
+					"Cannot access surface property %s::$%s "
+					"(grant it with \"use %s with surface[...]\")",
+					ZSTR_VAL(property_info->ce->name), ZSTR_VAL(member),
+					ZSTR_VAL(ce->name));
+			}
+			return ZEND_WRONG_PROPERTY_INFO;
+		}
+	}
+
 	if (UNEXPECTED(flags & ZEND_ACC_STATIC)) {
 		if (!silent) {
 			zend_error(E_NOTICE, "Accessing static property %s::$%s as non static", ZSTR_VAL(ce->name), ZSTR_VAL(member));
@@ -2076,6 +2115,27 @@ ZEND_API zend_function *zend_std_get_method(zend_object **obj_ptr, zend_string *
 	}
 
 exit:
+	/* Surfaces: a member on a surface is excluded from the default (public)
+	 * view; it is reachable only from the declaring hierarchy or from a
+	 * scope granting one of its surfaces. Existence beats extensions: an
+	 * ungranted surface method errors out here rather than falling through
+	 * to the extension-method registry. */
+	if (fbc && fbc->common.scope
+	 && UNEXPECTED(fbc->common.scope->surface_members != NULL)) {
+		const zval *surface_set =
+			zend_surfaces_member_set(fbc->common.scope, 'm', lc_method_name);
+		if (surface_set
+		 && !zend_surfaces_method_has_interface_face(fbc, zobj->ce, lc_method_name)
+		 && !zend_surfaces_access_allowed(fbc->common.scope, zobj->ce, surface_set)) {
+			zend_throw_error(NULL,
+				"Call to surface method %s::%s() from %s scope "
+				"(grant it with \"use %s with surface[...]\")",
+				ZSTR_VAL(fbc->common.scope->name), ZSTR_VAL(method_name),
+				zend_get_executed_scope() ? "the current" : "global",
+				ZSTR_VAL(zobj->ce->name));
+			fbc = NULL;
+		}
+	}
 	if (fbc && UNEXPECTED(fbc->common.fn_flags & ZEND_ACC_ABSTRACT)) {
 		zend_abstract_method_call(fbc);
 		fbc = NULL;
@@ -2296,6 +2356,23 @@ ZEND_API zend_function *zend_std_get_constructor(zend_object *zobj) /* {{{ */
 			ZEND_ASSERT(!(constructor->common.fn_flags & ZEND_ACC_PUBLIC));
 			if (!zend_check_method_accessible(constructor, scope)) {
 				zend_bad_constructor_call(constructor, scope);
+				zend_object_store_ctor_failed(zobj);
+				constructor = NULL;
+			}
+		} else if (constructor->common.scope
+		 && UNEXPECTED(constructor->common.scope->surface_members != NULL)) {
+			/* Surface-gated construction: `new` requires the scope to hold
+			 * one of the constructor's surfaces. */
+			const zval *surface_set = zend_surfaces_member_set_str(
+				constructor->common.scope, 'm',
+				ZEND_CONSTRUCTOR_FUNC_NAME, sizeof(ZEND_CONSTRUCTOR_FUNC_NAME) - 1);
+			if (surface_set && !zend_surfaces_access_allowed(
+					constructor->common.scope, zobj->ce, surface_set)) {
+				zend_throw_error(NULL,
+					"Call to surface constructor %s::__construct() "
+					"(grant it with \"use %s with surface[...]\")",
+					ZSTR_VAL(constructor->common.scope->name),
+					ZSTR_VAL(zobj->ce->name));
 				zend_object_store_ctor_failed(zobj);
 				constructor = NULL;
 			}
