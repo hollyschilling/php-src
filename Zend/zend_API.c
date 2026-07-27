@@ -1815,6 +1815,14 @@ static zend_always_inline zend_result _object_and_properties_init(zval *arg, zen
 		return FAILURE;
 	}
 
+	if (UNEXPECTED(class_type->ce_flags2 & ZEND_ACC2_GENERIC_TEMPLATE)) {
+		zend_throw_error(NULL, "Cannot instantiate generic class %s without type arguments",
+			ZSTR_VAL(class_type->name));
+		ZVAL_NULL(arg);
+		Z_OBJ_P(arg) = NULL;
+		return FAILURE;
+	}
+
 	if (UNEXPECTED(!(class_type->ce_flags & ZEND_ACC_CONSTANTS_UPDATED))) {
 		if (UNEXPECTED(zend_update_class_constants(class_type) != SUCCESS)) {
 			ZVAL_NULL(arg);

@@ -45,6 +45,7 @@
 #include "zend_attributes.h"
 #include "zend_extension_methods.h"
 #include "zend_surfaces.h"
+#include "zend_generics.h"
 #include "Optimizer/zend_func_info.h"
 
 /* Virtual current working directory support */

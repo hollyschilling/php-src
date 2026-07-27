@@ -18450,7 +18450,7 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_FUNC_CCONV ZEND_FETCH_CLASS_N
 		HANDLE_EXCEPTION();
 	}
 
-	switch (fetch_type) {
+	switch (fetch_type & ZEND_FETCH_CLASS_MASK) {
 		case ZEND_FETCH_CLASS_SELF:
 			ZVAL_STR_COPY(EX_VAR(opline->result.var), scope->name);
 			break;
@@ -18472,6 +18472,24 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_FUNC_CCONV ZEND_FETCH_CLASS_N
 			}
 			ZVAL_STR_COPY(EX_VAR(opline->result.var), called_scope->name);
 			break;
+		case ZEND_FETCH_CLASS_TYPE_PARAM: {
+			if (UNEXPECTED(!scope->generic_binding)) {
+				SAVE_OPLINE();
+				zend_throw_error(NULL,
+					"Cannot resolve a type parameter when no generic binding is in scope");
+				ZVAL_UNDEF(EX_VAR(opline->result.var));
+				HANDLE_EXCEPTION();
+			}
+			uint32_t param_idx = zend_generics_binding_arg_index(
+				scope, fetch_type >> ZEND_FETCH_CLASS_TYPE_PARAM_SHIFT);
+			zend_type type_arg = scope->generic_binding->args[param_idx];
+			if (ZEND_TYPE_HAS_NAME(type_arg)) {
+				ZVAL_STR_COPY(EX_VAR(opline->result.var), ZEND_TYPE_NAME(type_arg));
+			} else {
+				ZVAL_STR(EX_VAR(opline->result.var), zend_type_to_string(type_arg));
+			}
+			break;
+		}
 		default: ZEND_UNREACHABLE();
 	}
 	ZEND_VM_NEXT_OPCODE();
@@ -19884,7 +19902,21 @@ try_instanceof:
 		if (IS_CONST == IS_CONST) {
 			ce = CACHED_PTR(opline->extended_value);
 			if (UNEXPECTED(ce == NULL)) {
-				ce = zend_lookup_class_ex(Z_STR_P(RT_CONSTANT(opline, opline->op2)), Z_STR_P(RT_CONSTANT(opline, opline->op2) + 1), ZEND_FETCH_CLASS_NO_AUTOLOAD);
+				zval *class_const = RT_CONSTANT(opline, opline->op2);
+				if (UNEXPECTED(Z_STRVAL_P(class_const)[0] == '\0' && Z_STRLEN_P(class_const) > 0)) {
+					/* Symbolic generic reference ("Vec<T>" in a template
+					 * body): substitute against the executing binding. The
+					 * cache slot lives in the per-clone run-time cache, so
+					 * caching stays correct across instantiations. */
+					ce = zend_fetch_class_by_name(Z_STR_P(class_const), Z_STR_P(class_const + 1),
+						ZEND_FETCH_CLASS_NO_AUTOLOAD | ZEND_FETCH_CLASS_SILENT);
+					if (UNEXPECTED(EG(exception))) {
+						zval_ptr_dtor_nogc(EX_VAR(opline->op1.var));
+						HANDLE_EXCEPTION();
+					}
+				} else {
+					ce = zend_lookup_class_ex(Z_STR_P(class_const), Z_STR_P(class_const + 1), ZEND_FETCH_CLASS_NO_AUTOLOAD);
+				}
 				if (EXPECTED(ce)) {
 					CACHE_PTR(opline->extended_value, ce);
 				}
@@ -21576,7 +21608,21 @@ try_instanceof:
 		if (IS_VAR == IS_CONST) {
 			ce = CACHED_PTR(opline->extended_value);
 			if (UNEXPECTED(ce == NULL)) {
-				ce = zend_lookup_class_ex(Z_STR_P(RT_CONSTANT(opline, opline->op2)), Z_STR_P(RT_CONSTANT(opline, opline->op2) + 1), ZEND_FETCH_CLASS_NO_AUTOLOAD);
+				zval *class_const = RT_CONSTANT(opline, opline->op2);
+				if (UNEXPECTED(Z_STRVAL_P(class_const)[0] == '\0' && Z_STRLEN_P(class_const) > 0)) {
+					/* Symbolic generic reference ("Vec<T>" in a template
+					 * body): substitute against the executing binding. The
+					 * cache slot lives in the per-clone run-time cache, so
+					 * caching stays correct across instantiations. */
+					ce = zend_fetch_class_by_name(Z_STR_P(class_const), Z_STR_P(class_const + 1),
+						ZEND_FETCH_CLASS_NO_AUTOLOAD | ZEND_FETCH_CLASS_SILENT);
+					if (UNEXPECTED(EG(exception))) {
+						zval_ptr_dtor_nogc(EX_VAR(opline->op1.var));
+						HANDLE_EXCEPTION();
+					}
+				} else {
+					ce = zend_lookup_class_ex(Z_STR_P(class_const), Z_STR_P(class_const + 1), ZEND_FETCH_CLASS_NO_AUTOLOAD);
+				}
 				if (EXPECTED(ce)) {
 					CACHE_PTR(opline->extended_value, ce);
 				}
@@ -22103,7 +22149,21 @@ try_instanceof:
 		if (IS_UNUSED == IS_CONST) {
 			ce = CACHED_PTR(opline->extended_value);
 			if (UNEXPECTED(ce == NULL)) {
-				ce = zend_lookup_class_ex(Z_STR_P(RT_CONSTANT(opline, opline->op2)), Z_STR_P(RT_CONSTANT(opline, opline->op2) + 1), ZEND_FETCH_CLASS_NO_AUTOLOAD);
+				zval *class_const = RT_CONSTANT(opline, opline->op2);
+				if (UNEXPECTED(Z_STRVAL_P(class_const)[0] == '\0' && Z_STRLEN_P(class_const) > 0)) {
+					/* Symbolic generic reference ("Vec<T>" in a template
+					 * body): substitute against the executing binding. The
+					 * cache slot lives in the per-clone run-time cache, so
+					 * caching stays correct across instantiations. */
+					ce = zend_fetch_class_by_name(Z_STR_P(class_const), Z_STR_P(class_const + 1),
+						ZEND_FETCH_CLASS_NO_AUTOLOAD | ZEND_FETCH_CLASS_SILENT);
+					if (UNEXPECTED(EG(exception))) {
+						zval_ptr_dtor_nogc(EX_VAR(opline->op1.var));
+						HANDLE_EXCEPTION();
+					}
+				} else {
+					ce = zend_lookup_class_ex(Z_STR_P(class_const), Z_STR_P(class_const + 1), ZEND_FETCH_CLASS_NO_AUTOLOAD);
+				}
 				if (EXPECTED(ce)) {
 					CACHE_PTR(opline->extended_value, ce);
 				}
@@ -33257,7 +33317,7 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_FUNC_CCONV ZEND_FETCH_CLASS_N
 		HANDLE_EXCEPTION();
 	}
 
-	switch (fetch_type) {
+	switch (fetch_type & ZEND_FETCH_CLASS_MASK) {
 		case ZEND_FETCH_CLASS_SELF:
 			ZVAL_STR_COPY(EX_VAR(opline->result.var), scope->name);
 			break;
@@ -33279,6 +33339,24 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_FUNC_CCONV ZEND_FETCH_CLASS_N
 			}
 			ZVAL_STR_COPY(EX_VAR(opline->result.var), called_scope->name);
 			break;
+		case ZEND_FETCH_CLASS_TYPE_PARAM: {
+			if (UNEXPECTED(!scope->generic_binding)) {
+				SAVE_OPLINE();
+				zend_throw_error(NULL,
+					"Cannot resolve a type parameter when no generic binding is in scope");
+				ZVAL_UNDEF(EX_VAR(opline->result.var));
+				HANDLE_EXCEPTION();
+			}
+			uint32_t param_idx = zend_generics_binding_arg_index(
+				scope, fetch_type >> ZEND_FETCH_CLASS_TYPE_PARAM_SHIFT);
+			zend_type type_arg = scope->generic_binding->args[param_idx];
+			if (ZEND_TYPE_HAS_NAME(type_arg)) {
+				ZVAL_STR_COPY(EX_VAR(opline->result.var), ZEND_TYPE_NAME(type_arg));
+			} else {
+				ZVAL_STR(EX_VAR(opline->result.var), zend_type_to_string(type_arg));
+			}
+			break;
+		}
 		default: ZEND_UNREACHABLE();
 	}
 	ZEND_VM_NEXT_OPCODE();
@@ -41446,7 +41524,7 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_FUNC_CCONV ZEND_FETCH_CLASS_N
 		HANDLE_EXCEPTION();
 	}
 
-	switch (fetch_type) {
+	switch (fetch_type & ZEND_FETCH_CLASS_MASK) {
 		case ZEND_FETCH_CLASS_SELF:
 			ZVAL_STR_COPY(EX_VAR(opline->result.var), scope->name);
 			break;
@@ -41468,6 +41546,24 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_FUNC_CCONV ZEND_FETCH_CLASS_N
 			}
 			ZVAL_STR_COPY(EX_VAR(opline->result.var), called_scope->name);
 			break;
+		case ZEND_FETCH_CLASS_TYPE_PARAM: {
+			if (UNEXPECTED(!scope->generic_binding)) {
+				SAVE_OPLINE();
+				zend_throw_error(NULL,
+					"Cannot resolve a type parameter when no generic binding is in scope");
+				ZVAL_UNDEF(EX_VAR(opline->result.var));
+				HANDLE_EXCEPTION();
+			}
+			uint32_t param_idx = zend_generics_binding_arg_index(
+				scope, fetch_type >> ZEND_FETCH_CLASS_TYPE_PARAM_SHIFT);
+			zend_type type_arg = scope->generic_binding->args[param_idx];
+			if (ZEND_TYPE_HAS_NAME(type_arg)) {
+				ZVAL_STR_COPY(EX_VAR(opline->result.var), ZEND_TYPE_NAME(type_arg));
+			} else {
+				ZVAL_STR(EX_VAR(opline->result.var), zend_type_to_string(type_arg));
+			}
+			break;
+		}
 		default: ZEND_UNREACHABLE();
 	}
 	ZEND_VM_NEXT_OPCODE();
@@ -45156,7 +45252,22 @@ try_instanceof:
 		if (IS_CONST == IS_CONST) {
 			ce = CACHED_PTR(opline->extended_value);
 			if (UNEXPECTED(ce == NULL)) {
-				ce = zend_lookup_class_ex(Z_STR_P(RT_CONSTANT(opline, opline->op2)), Z_STR_P(RT_CONSTANT(opline, opline->op2) + 1), ZEND_FETCH_CLASS_NO_AUTOLOAD);
+				zval *class_const = RT_CONSTANT(opline, opline->op2);
+				if (UNEXPECTED(Z_STRVAL_P(class_const)[0] == '\0' && Z_STRLEN_P(class_const) > 0)) {
+					/* Symbolic generic reference ("Vec<T>" in a template
+					 * body): substitute against the executing binding. The
+					 * cache slot lives in the per-clone run-time cache, so
+					 * caching stays correct across instantiations. */
+					ce = zend_fetch_class_by_name(Z_STR_P(class_const), Z_STR_P(class_const + 1),
+						ZEND_FETCH_CLASS_NO_AUTOLOAD | ZEND_FETCH_CLASS_SILENT);
+					if (UNEXPECTED(EG(exception))) {
+
+
+						HANDLE_EXCEPTION();
+					}
+				} else {
+					ce = zend_lookup_class_ex(Z_STR_P(class_const), Z_STR_P(class_const + 1), ZEND_FETCH_CLASS_NO_AUTOLOAD);
+				}
 				if (EXPECTED(ce)) {
 					CACHE_PTR(opline->extended_value, ce);
 				}
@@ -49023,7 +49134,22 @@ try_instanceof:
 		if (IS_VAR == IS_CONST) {
 			ce = CACHED_PTR(opline->extended_value);
 			if (UNEXPECTED(ce == NULL)) {
-				ce = zend_lookup_class_ex(Z_STR_P(RT_CONSTANT(opline, opline->op2)), Z_STR_P(RT_CONSTANT(opline, opline->op2) + 1), ZEND_FETCH_CLASS_NO_AUTOLOAD);
+				zval *class_const = RT_CONSTANT(opline, opline->op2);
+				if (UNEXPECTED(Z_STRVAL_P(class_const)[0] == '\0' && Z_STRLEN_P(class_const) > 0)) {
+					/* Symbolic generic reference ("Vec<T>" in a template
+					 * body): substitute against the executing binding. The
+					 * cache slot lives in the per-clone run-time cache, so
+					 * caching stays correct across instantiations. */
+					ce = zend_fetch_class_by_name(Z_STR_P(class_const), Z_STR_P(class_const + 1),
+						ZEND_FETCH_CLASS_NO_AUTOLOAD | ZEND_FETCH_CLASS_SILENT);
+					if (UNEXPECTED(EG(exception))) {
+
+
+						HANDLE_EXCEPTION();
+					}
+				} else {
+					ce = zend_lookup_class_ex(Z_STR_P(class_const), Z_STR_P(class_const + 1), ZEND_FETCH_CLASS_NO_AUTOLOAD);
+				}
 				if (EXPECTED(ce)) {
 					CACHE_PTR(opline->extended_value, ce);
 				}
@@ -50403,7 +50529,22 @@ try_instanceof:
 		if (IS_UNUSED == IS_CONST) {
 			ce = CACHED_PTR(opline->extended_value);
 			if (UNEXPECTED(ce == NULL)) {
-				ce = zend_lookup_class_ex(Z_STR_P(RT_CONSTANT(opline, opline->op2)), Z_STR_P(RT_CONSTANT(opline, opline->op2) + 1), ZEND_FETCH_CLASS_NO_AUTOLOAD);
+				zval *class_const = RT_CONSTANT(opline, opline->op2);
+				if (UNEXPECTED(Z_STRVAL_P(class_const)[0] == '\0' && Z_STRLEN_P(class_const) > 0)) {
+					/* Symbolic generic reference ("Vec<T>" in a template
+					 * body): substitute against the executing binding. The
+					 * cache slot lives in the per-clone run-time cache, so
+					 * caching stays correct across instantiations. */
+					ce = zend_fetch_class_by_name(Z_STR_P(class_const), Z_STR_P(class_const + 1),
+						ZEND_FETCH_CLASS_NO_AUTOLOAD | ZEND_FETCH_CLASS_SILENT);
+					if (UNEXPECTED(EG(exception))) {
+
+
+						HANDLE_EXCEPTION();
+					}
+				} else {
+					ce = zend_lookup_class_ex(Z_STR_P(class_const), Z_STR_P(class_const + 1), ZEND_FETCH_CLASS_NO_AUTOLOAD);
+				}
 				if (EXPECTED(ce)) {
 					CACHE_PTR(opline->extended_value, ce);
 				}
@@ -71753,7 +71894,7 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_CCONV ZEND_FETCH_CLASS_NAME_S
 		HANDLE_EXCEPTION();
 	}
 
-	switch (fetch_type) {
+	switch (fetch_type & ZEND_FETCH_CLASS_MASK) {
 		case ZEND_FETCH_CLASS_SELF:
 			ZVAL_STR_COPY(EX_VAR(opline->result.var), scope->name);
 			break;
@@ -71775,6 +71916,24 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_CCONV ZEND_FETCH_CLASS_NAME_S
 			}
 			ZVAL_STR_COPY(EX_VAR(opline->result.var), called_scope->name);
 			break;
+		case ZEND_FETCH_CLASS_TYPE_PARAM: {
+			if (UNEXPECTED(!scope->generic_binding)) {
+				SAVE_OPLINE();
+				zend_throw_error(NULL,
+					"Cannot resolve a type parameter when no generic binding is in scope");
+				ZVAL_UNDEF(EX_VAR(opline->result.var));
+				HANDLE_EXCEPTION();
+			}
+			uint32_t param_idx = zend_generics_binding_arg_index(
+				scope, fetch_type >> ZEND_FETCH_CLASS_TYPE_PARAM_SHIFT);
+			zend_type type_arg = scope->generic_binding->args[param_idx];
+			if (ZEND_TYPE_HAS_NAME(type_arg)) {
+				ZVAL_STR_COPY(EX_VAR(opline->result.var), ZEND_TYPE_NAME(type_arg));
+			} else {
+				ZVAL_STR(EX_VAR(opline->result.var), zend_type_to_string(type_arg));
+			}
+			break;
+		}
 		default: ZEND_UNREACHABLE();
 	}
 	ZEND_VM_NEXT_OPCODE();
@@ -73187,7 +73346,21 @@ try_instanceof:
 		if (IS_CONST == IS_CONST) {
 			ce = CACHED_PTR(opline->extended_value);
 			if (UNEXPECTED(ce == NULL)) {
-				ce = zend_lookup_class_ex(Z_STR_P(RT_CONSTANT(opline, opline->op2)), Z_STR_P(RT_CONSTANT(opline, opline->op2) + 1), ZEND_FETCH_CLASS_NO_AUTOLOAD);
+				zval *class_const = RT_CONSTANT(opline, opline->op2);
+				if (UNEXPECTED(Z_STRVAL_P(class_const)[0] == '\0' && Z_STRLEN_P(class_const) > 0)) {
+					/* Symbolic generic reference ("Vec<T>" in a template
+					 * body): substitute against the executing binding. The
+					 * cache slot lives in the per-clone run-time cache, so
+					 * caching stays correct across instantiations. */
+					ce = zend_fetch_class_by_name(Z_STR_P(class_const), Z_STR_P(class_const + 1),
+						ZEND_FETCH_CLASS_NO_AUTOLOAD | ZEND_FETCH_CLASS_SILENT);
+					if (UNEXPECTED(EG(exception))) {
+						zval_ptr_dtor_nogc(EX_VAR(opline->op1.var));
+						HANDLE_EXCEPTION();
+					}
+				} else {
+					ce = zend_lookup_class_ex(Z_STR_P(class_const), Z_STR_P(class_const + 1), ZEND_FETCH_CLASS_NO_AUTOLOAD);
+				}
 				if (EXPECTED(ce)) {
 					CACHE_PTR(opline->extended_value, ce);
 				}
@@ -74879,7 +75052,21 @@ try_instanceof:
 		if (IS_VAR == IS_CONST) {
 			ce = CACHED_PTR(opline->extended_value);
 			if (UNEXPECTED(ce == NULL)) {
-				ce = zend_lookup_class_ex(Z_STR_P(RT_CONSTANT(opline, opline->op2)), Z_STR_P(RT_CONSTANT(opline, opline->op2) + 1), ZEND_FETCH_CLASS_NO_AUTOLOAD);
+				zval *class_const = RT_CONSTANT(opline, opline->op2);
+				if (UNEXPECTED(Z_STRVAL_P(class_const)[0] == '\0' && Z_STRLEN_P(class_const) > 0)) {
+					/* Symbolic generic reference ("Vec<T>" in a template
+					 * body): substitute against the executing binding. The
+					 * cache slot lives in the per-clone run-time cache, so
+					 * caching stays correct across instantiations. */
+					ce = zend_fetch_class_by_name(Z_STR_P(class_const), Z_STR_P(class_const + 1),
+						ZEND_FETCH_CLASS_NO_AUTOLOAD | ZEND_FETCH_CLASS_SILENT);
+					if (UNEXPECTED(EG(exception))) {
+						zval_ptr_dtor_nogc(EX_VAR(opline->op1.var));
+						HANDLE_EXCEPTION();
+					}
+				} else {
+					ce = zend_lookup_class_ex(Z_STR_P(class_const), Z_STR_P(class_const + 1), ZEND_FETCH_CLASS_NO_AUTOLOAD);
+				}
 				if (EXPECTED(ce)) {
 					CACHE_PTR(opline->extended_value, ce);
 				}
@@ -75306,7 +75493,21 @@ try_instanceof:
 		if (IS_UNUSED == IS_CONST) {
 			ce = CACHED_PTR(opline->extended_value);
 			if (UNEXPECTED(ce == NULL)) {
-				ce = zend_lookup_class_ex(Z_STR_P(RT_CONSTANT(opline, opline->op2)), Z_STR_P(RT_CONSTANT(opline, opline->op2) + 1), ZEND_FETCH_CLASS_NO_AUTOLOAD);
+				zval *class_const = RT_CONSTANT(opline, opline->op2);
+				if (UNEXPECTED(Z_STRVAL_P(class_const)[0] == '\0' && Z_STRLEN_P(class_const) > 0)) {
+					/* Symbolic generic reference ("Vec<T>" in a template
+					 * body): substitute against the executing binding. The
+					 * cache slot lives in the per-clone run-time cache, so
+					 * caching stays correct across instantiations. */
+					ce = zend_fetch_class_by_name(Z_STR_P(class_const), Z_STR_P(class_const + 1),
+						ZEND_FETCH_CLASS_NO_AUTOLOAD | ZEND_FETCH_CLASS_SILENT);
+					if (UNEXPECTED(EG(exception))) {
+						zval_ptr_dtor_nogc(EX_VAR(opline->op1.var));
+						HANDLE_EXCEPTION();
+					}
+				} else {
+					ce = zend_lookup_class_ex(Z_STR_P(class_const), Z_STR_P(class_const + 1), ZEND_FETCH_CLASS_NO_AUTOLOAD);
+				}
 				if (EXPECTED(ce)) {
 					CACHE_PTR(opline->extended_value, ce);
 				}
@@ -86460,7 +86661,7 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_CCONV ZEND_FETCH_CLASS_NAME_S
 		HANDLE_EXCEPTION();
 	}
 
-	switch (fetch_type) {
+	switch (fetch_type & ZEND_FETCH_CLASS_MASK) {
 		case ZEND_FETCH_CLASS_SELF:
 			ZVAL_STR_COPY(EX_VAR(opline->result.var), scope->name);
 			break;
@@ -86482,6 +86683,24 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_CCONV ZEND_FETCH_CLASS_NAME_S
 			}
 			ZVAL_STR_COPY(EX_VAR(opline->result.var), called_scope->name);
 			break;
+		case ZEND_FETCH_CLASS_TYPE_PARAM: {
+			if (UNEXPECTED(!scope->generic_binding)) {
+				SAVE_OPLINE();
+				zend_throw_error(NULL,
+					"Cannot resolve a type parameter when no generic binding is in scope");
+				ZVAL_UNDEF(EX_VAR(opline->result.var));
+				HANDLE_EXCEPTION();
+			}
+			uint32_t param_idx = zend_generics_binding_arg_index(
+				scope, fetch_type >> ZEND_FETCH_CLASS_TYPE_PARAM_SHIFT);
+			zend_type type_arg = scope->generic_binding->args[param_idx];
+			if (ZEND_TYPE_HAS_NAME(type_arg)) {
+				ZVAL_STR_COPY(EX_VAR(opline->result.var), ZEND_TYPE_NAME(type_arg));
+			} else {
+				ZVAL_STR(EX_VAR(opline->result.var), zend_type_to_string(type_arg));
+			}
+			break;
+		}
 		default: ZEND_UNREACHABLE();
 	}
 	ZEND_VM_NEXT_OPCODE();
@@ -94649,7 +94868,7 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_CCONV ZEND_FETCH_CLASS_NAME_S
 		HANDLE_EXCEPTION();
 	}
 
-	switch (fetch_type) {
+	switch (fetch_type & ZEND_FETCH_CLASS_MASK) {
 		case ZEND_FETCH_CLASS_SELF:
 			ZVAL_STR_COPY(EX_VAR(opline->result.var), scope->name);
 			break;
@@ -94671,6 +94890,24 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_CCONV ZEND_FETCH_CLASS_NAME_S
 			}
 			ZVAL_STR_COPY(EX_VAR(opline->result.var), called_scope->name);
 			break;
+		case ZEND_FETCH_CLASS_TYPE_PARAM: {
+			if (UNEXPECTED(!scope->generic_binding)) {
+				SAVE_OPLINE();
+				zend_throw_error(NULL,
+					"Cannot resolve a type parameter when no generic binding is in scope");
+				ZVAL_UNDEF(EX_VAR(opline->result.var));
+				HANDLE_EXCEPTION();
+			}
+			uint32_t param_idx = zend_generics_binding_arg_index(
+				scope, fetch_type >> ZEND_FETCH_CLASS_TYPE_PARAM_SHIFT);
+			zend_type type_arg = scope->generic_binding->args[param_idx];
+			if (ZEND_TYPE_HAS_NAME(type_arg)) {
+				ZVAL_STR_COPY(EX_VAR(opline->result.var), ZEND_TYPE_NAME(type_arg));
+			} else {
+				ZVAL_STR(EX_VAR(opline->result.var), zend_type_to_string(type_arg));
+			}
+			break;
+		}
 		default: ZEND_UNREACHABLE();
 	}
 	ZEND_VM_NEXT_OPCODE();
@@ -98359,7 +98596,22 @@ try_instanceof:
 		if (IS_CONST == IS_CONST) {
 			ce = CACHED_PTR(opline->extended_value);
 			if (UNEXPECTED(ce == NULL)) {
-				ce = zend_lookup_class_ex(Z_STR_P(RT_CONSTANT(opline, opline->op2)), Z_STR_P(RT_CONSTANT(opline, opline->op2) + 1), ZEND_FETCH_CLASS_NO_AUTOLOAD);
+				zval *class_const = RT_CONSTANT(opline, opline->op2);
+				if (UNEXPECTED(Z_STRVAL_P(class_const)[0] == '\0' && Z_STRLEN_P(class_const) > 0)) {
+					/* Symbolic generic reference ("Vec<T>" in a template
+					 * body): substitute against the executing binding. The
+					 * cache slot lives in the per-clone run-time cache, so
+					 * caching stays correct across instantiations. */
+					ce = zend_fetch_class_by_name(Z_STR_P(class_const), Z_STR_P(class_const + 1),
+						ZEND_FETCH_CLASS_NO_AUTOLOAD | ZEND_FETCH_CLASS_SILENT);
+					if (UNEXPECTED(EG(exception))) {
+
+
+						HANDLE_EXCEPTION();
+					}
+				} else {
+					ce = zend_lookup_class_ex(Z_STR_P(class_const), Z_STR_P(class_const + 1), ZEND_FETCH_CLASS_NO_AUTOLOAD);
+				}
 				if (EXPECTED(ce)) {
 					CACHE_PTR(opline->extended_value, ce);
 				}
@@ -102226,7 +102478,22 @@ try_instanceof:
 		if (IS_VAR == IS_CONST) {
 			ce = CACHED_PTR(opline->extended_value);
 			if (UNEXPECTED(ce == NULL)) {
-				ce = zend_lookup_class_ex(Z_STR_P(RT_CONSTANT(opline, opline->op2)), Z_STR_P(RT_CONSTANT(opline, opline->op2) + 1), ZEND_FETCH_CLASS_NO_AUTOLOAD);
+				zval *class_const = RT_CONSTANT(opline, opline->op2);
+				if (UNEXPECTED(Z_STRVAL_P(class_const)[0] == '\0' && Z_STRLEN_P(class_const) > 0)) {
+					/* Symbolic generic reference ("Vec<T>" in a template
+					 * body): substitute against the executing binding. The
+					 * cache slot lives in the per-clone run-time cache, so
+					 * caching stays correct across instantiations. */
+					ce = zend_fetch_class_by_name(Z_STR_P(class_const), Z_STR_P(class_const + 1),
+						ZEND_FETCH_CLASS_NO_AUTOLOAD | ZEND_FETCH_CLASS_SILENT);
+					if (UNEXPECTED(EG(exception))) {
+
+
+						HANDLE_EXCEPTION();
+					}
+				} else {
+					ce = zend_lookup_class_ex(Z_STR_P(class_const), Z_STR_P(class_const + 1), ZEND_FETCH_CLASS_NO_AUTOLOAD);
+				}
 				if (EXPECTED(ce)) {
 					CACHE_PTR(opline->extended_value, ce);
 				}
@@ -103504,7 +103771,22 @@ try_instanceof:
 		if (IS_UNUSED == IS_CONST) {
 			ce = CACHED_PTR(opline->extended_value);
 			if (UNEXPECTED(ce == NULL)) {
-				ce = zend_lookup_class_ex(Z_STR_P(RT_CONSTANT(opline, opline->op2)), Z_STR_P(RT_CONSTANT(opline, opline->op2) + 1), ZEND_FETCH_CLASS_NO_AUTOLOAD);
+				zval *class_const = RT_CONSTANT(opline, opline->op2);
+				if (UNEXPECTED(Z_STRVAL_P(class_const)[0] == '\0' && Z_STRLEN_P(class_const) > 0)) {
+					/* Symbolic generic reference ("Vec<T>" in a template
+					 * body): substitute against the executing binding. The
+					 * cache slot lives in the per-clone run-time cache, so
+					 * caching stays correct across instantiations. */
+					ce = zend_fetch_class_by_name(Z_STR_P(class_const), Z_STR_P(class_const + 1),
+						ZEND_FETCH_CLASS_NO_AUTOLOAD | ZEND_FETCH_CLASS_SILENT);
+					if (UNEXPECTED(EG(exception))) {
+
+
+						HANDLE_EXCEPTION();
+					}
+				} else {
+					ce = zend_lookup_class_ex(Z_STR_P(class_const), Z_STR_P(class_const + 1), ZEND_FETCH_CLASS_NO_AUTOLOAD);
+				}
 				if (EXPECTED(ce)) {
 					CACHE_PTR(opline->extended_value, ce);
 				}

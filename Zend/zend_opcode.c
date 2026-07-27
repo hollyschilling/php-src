@@ -390,6 +390,22 @@ ZEND_API void destroy_zend_class(zval *zv)
 				if (ce->num_traits > 0) {
 					_destroy_zend_class_traits_info(ce);
 				}
+
+				if (ce->generic_params) {
+					/* Release is a no-op for the (usual) interned case. */
+					for (uint32_t i = 0; i < ce->generic_params->num_params; i++) {
+						zend_string_release_ex(ce->generic_params->params[i].name, 0);
+						if (ce->generic_params->params[i].bound_name) {
+							zend_string_release_ex(ce->generic_params->params[i].bound_name, 0);
+						}
+					}
+					for (uint32_t i = 0; i < ce->generic_params->num_deferred_interfaces; i++) {
+						zend_string_release_ex(ce->generic_params->deferred_interfaces[i], 0);
+					}
+					if (ce->generic_params->deferred_parent) {
+						zend_string_release_ex(ce->generic_params->deferred_parent, 0);
+					}
+				}
 			}
 
 			if (ce->default_properties_table) {
@@ -455,6 +471,21 @@ ZEND_API void destroy_zend_class(zval *zv)
 			}
 			if (ce->backed_enum_table) {
 				zend_hash_release(ce->backed_enum_table);
+			}
+			if (ce->generic_binding) {
+				/* Struct is arena-allocated; the arg names and any owned
+				 * substituted composite type names ("C<Bag>") are refs. */
+				for (uint32_t i = 0; i < ce->generic_binding->num_args; i++) {
+					if (ZEND_TYPE_HAS_NAME(ce->generic_binding->args[i])) {
+						zend_string_release_ex(ZEND_TYPE_NAME(ce->generic_binding->args[i]), 0);
+					}
+				}
+				for (uint32_t i = 0; i < ce->generic_binding->num_owned_names; i++) {
+					zend_string_release_ex(ce->generic_binding->owned_names[i], 0);
+				}
+				if (ce->generic_binding->owned_names) {
+					efree(ce->generic_binding->owned_names);
+				}
 			}
 			break;
 		case ZEND_INTERNAL_CLASS:
@@ -590,6 +621,19 @@ ZEND_API void destroy_op_array(zend_op_array *op_array)
 
 	if (!op_array->refcount || --(*op_array->refcount) > 0) {
 		return;
+	}
+
+	if (UNEXPECTED(op_array->fn_flags2 & ZEND_ACC2_GENERIC_SUBST_ARG_INFO)) {
+		/* This header carries an arena-allocated, type-substituted arg_info
+		 * (generic instantiation clone). Its entries own nothing the arena and
+		 * interned strings don't reclaim. Restore the shared original stored
+		 * one pointer before the arena block, so the final release below frees
+		 * the template's real array. */
+		zend_arg_info *base = op_array->arg_info;
+		if (op_array->fn_flags & ZEND_ACC_HAS_RETURN_TYPE) {
+			base--;
+		}
+		op_array->arg_info = ((zend_arg_info **) base)[-1];
 	}
 
 	efree_size(op_array->refcount, sizeof(*(op_array->refcount)));
