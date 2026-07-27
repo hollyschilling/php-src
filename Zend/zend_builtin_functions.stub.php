@@ -81,6 +81,8 @@ function get_class_methods(object|string $object_or_class): array {}
 /** @param object|string $object_or_class */
 function method_exists($object_or_class, string $method): bool {}
 
+function module_loader_register(callable $callback): void {}
+
 /**
  * @param object|string $object_or_class
  * @frameless-function {"arity": 2}

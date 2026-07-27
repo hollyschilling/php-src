@@ -164,6 +164,9 @@ void init_executor(void) /* {{{ */
 	ZVAL_UNDEF(&EG(user_error_handler));
 	ZVAL_UNDEF(&EG(user_exception_handler));
 
+	EG(lang_modules) = NULL;
+	ZVAL_UNDEF(&EG(lang_module_loader));
+
 	EG(current_execute_data) = NULL;
 
 	zend_stack_init(&EG(user_error_handlers_error_reporting), sizeof(int));
@@ -416,6 +419,11 @@ ZEND_API void zend_shutdown_executor_values(bool fast_shutdown)
 			ZVAL_UNDEF(&EG(user_exception_handler));
 		}
 
+		if (Z_TYPE(EG(lang_module_loader)) != IS_UNDEF) {
+			zval_ptr_dtor(&EG(lang_module_loader));
+			ZVAL_UNDEF(&EG(lang_module_loader));
+		}
+
 		zend_stack_clean(&EG(user_error_handlers_error_reporting), NULL, 1);
 		zend_stack_clean(&EG(user_error_handlers), (void (*)(void *))ZVAL_PTR_DTOR, 1);
 		zend_stack_clean(&EG(user_exception_handlers), (void (*)(void *))ZVAL_PTR_DTOR, 1);
@@ -457,6 +465,7 @@ void shutdown_executor(void) /* {{{ */
 	zend_weakrefs_shutdown();
 	zend_max_execution_timer_shutdown();
 	zend_fiber_shutdown();
+	zend_lang_modules_shutdown();
 
 	zend_try {
 		zend_llist_apply(&zend_extensions, (llist_apply_func_t) zend_extension_deactivator);
@@ -1843,12 +1852,117 @@ zend_class_entry *zend_fetch_class_with_scope(
 	return ce;
 }
 
+static void zend_lang_module_dtor(zval *zv)
+{
+	zend_lang_module *m = Z_PTR_P(zv);
+	zend_string_release_ex(m->fqmn, 0);
+	if (m->exports && !(GC_FLAGS(m->exports) & IS_ARRAY_IMMUTABLE)) {
+		zend_array_release(m->exports);
+	}
+	efree(m);
+}
+
+ZEND_API zend_result zend_lang_module_register(zend_string *fqmn, zend_array *exports)
+{
+	zend_lang_module *m;
+
+	if (!EG(lang_modules)) {
+		ALLOC_HASHTABLE(EG(lang_modules));
+		zend_hash_init(EG(lang_modules), 8, NULL, zend_lang_module_dtor, 0);
+	} else if (zend_hash_exists(EG(lang_modules), fqmn)) {
+		zend_throw_error(NULL, "Module %s is already defined", ZSTR_VAL(fqmn));
+		return FAILURE;
+	}
+
+	m = emalloc(sizeof(zend_lang_module));
+	m->fqmn = zend_string_copy(fqmn);
+	m->exports = exports;
+	if (exports && !(GC_FLAGS(exports) & IS_ARRAY_IMMUTABLE)) {
+		GC_ADDREF(exports);
+	}
+	zend_hash_add_new_ptr(EG(lang_modules), m->fqmn, m);
+	return SUCCESS;
+}
+
+ZEND_API zend_lang_module *zend_lang_module_get(zend_string *fqmn)
+{
+	if (!EG(lang_modules)) {
+		return NULL;
+	}
+	return zend_hash_find_ptr(EG(lang_modules), fqmn);
+}
+
+void zend_lang_modules_shutdown(void)
+{
+	if (EG(lang_modules)) {
+		zend_hash_destroy(EG(lang_modules));
+		FREE_HASHTABLE(EG(lang_modules));
+		EG(lang_modules) = NULL;
+	}
+	zval_ptr_dtor(&EG(lang_module_loader));
+	ZVAL_UNDEF(&EG(lang_module_loader));
+}
+
+/* Resolve a module-import provenance literal: "\0" FQMN "\0" FQCN.
+ * The reference came through an export map at compile time, so it passes the
+ * acquisition gate; we still verify the class is a member of the exporting
+ * module (exports must be members). */
+static zend_never_inline zend_class_entry *zend_fetch_class_via_module(const zend_string *marked, uint32_t fetch_type)
+{
+	const char *fqmn = ZSTR_VAL(marked) + 1;
+	const char *sep = memchr(fqmn, '\0', ZSTR_LEN(marked) - 1);
+	ZEND_ASSERT(sep != NULL);
+	size_t fqmn_len = sep - fqmn;
+	const char *fqcn = sep + 1;
+	size_t fqcn_len = ZSTR_VAL(marked) + ZSTR_LEN(marked) - fqcn;
+
+	zend_string *plain = zend_string_init(fqcn, fqcn_len, 0);
+	zend_class_entry *ce = zend_lookup_class_ex(plain, NULL, fetch_type);
+	if (!ce) {
+		report_class_fetch_error(plain, fetch_type);
+		zend_string_release(plain);
+		return NULL;
+	}
+	if (!ce->module_name
+	 || ZSTR_LEN(ce->module_name) != fqmn_len
+	 || memcmp(ZSTR_VAL(ce->module_name), fqmn, fqmn_len) != 0) {
+		zend_throw_error(NULL, "Class %s is exported by module %.*s but is not a member of it",
+			ZSTR_VAL(plain), (int) fqmn_len, fqmn);
+		zend_string_release(plain);
+		return NULL;
+	}
+	zend_string_release(plain);
+	return ce;
+}
+
 zend_class_entry *zend_fetch_class_by_name(zend_string *class_name, zend_string *key, uint32_t fetch_type) /* {{{ */
 {
+	if (UNEXPECTED(ZSTR_LEN(class_name) > 0 && ZSTR_VAL(class_name)[0] == '\0')) {
+		return zend_fetch_class_via_module(class_name, fetch_type);
+	}
+
 	zend_class_entry *ce = zend_lookup_class_ex(class_name, key, fetch_type);
 	if (!ce) {
 		report_class_fetch_error(class_name, fetch_type);
 		return NULL;
+	}
+
+	/* Acquisition gate: a bare syntactic reference to a module member is only
+	 * valid from inside the same module. Observation sites (instanceof, catch)
+	 * resolve silently or without autoload and are exempt. */
+	if (UNEXPECTED(ce->module_name != NULL)
+	 && (fetch_type & ZEND_FETCH_CLASS_EXCEPTION)
+	 && !(fetch_type & (ZEND_FETCH_CLASS_SILENT|ZEND_FETCH_CLASS_NO_AUTOLOAD|ZEND_FETCH_CLASS_NO_MODULE_GATE))) {
+		const zend_execute_data *ex = EG(current_execute_data);
+		const zend_function *func = ex ? ex->func : NULL;
+		if (!func || !ZEND_USER_CODE(func->common.type)
+		 || !func->op_array.module_name
+		 || !zend_string_equals(func->op_array.module_name, ce->module_name)) {
+			zend_throw_error(NULL,
+				"Cannot access class %s of module %s from outside the module; import the module with 'use module'",
+				ZSTR_VAL(ce->name), ZSTR_VAL(ce->module_name));
+			return NULL;
+		}
 	}
 	return ce;
 }

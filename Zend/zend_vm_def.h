@@ -6424,9 +6424,9 @@ ZEND_VM_COLD_CONST_HANDLER(110, ZEND_CLONE, CONST|TMP|UNUSED|THIS|CV, ANY)
 		HANDLE_EXCEPTION();
 	}
 
-	if (clone && !(clone->common.fn_flags & ZEND_ACC_PUBLIC)) {
+	if (clone && (!(clone->common.fn_flags & ZEND_ACC_PUBLIC)
+			|| (clone->common.fn_flags & ZEND_ACC_MODULE_INTERNAL))) {
 		scope = EX(func)->op_array.scope;
-		ZEND_ASSERT(!(clone->common.fn_flags & ZEND_ACC_PUBLIC));
 		if (!zend_check_method_accessible(clone, scope)) {
 			zend_bad_method_call(clone, clone->common.function_name, scope);
 			FREE_OP1();
@@ -8695,6 +8695,19 @@ ZEND_VM_HANDLER(143, ZEND_DECLARE_CONST, CONST, CONST)
 
 	FREE_OP1();
 	FREE_OP2();
+	ZEND_VM_NEXT_OPCODE_CHECK_EXCEPTION();
+}
+
+ZEND_VM_HANDLER(214, ZEND_REGISTER_MODULE, CONST, CONST)
+{
+	USE_OPLINE
+
+	SAVE_OPLINE();
+	if (zend_lang_module_register(
+			Z_STR_P(RT_CONSTANT(opline, opline->op1)),
+			Z_ARR_P(RT_CONSTANT(opline, opline->op2))) == FAILURE) {
+		HANDLE_EXCEPTION();
+	}
 	ZEND_VM_NEXT_OPCODE_CHECK_EXCEPTION();
 }
 
