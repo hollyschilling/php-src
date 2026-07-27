@@ -3414,9 +3414,16 @@ static void zend_jit_trace_cleanup_stack(zend_jit_ctx *jit, zend_jit_trace_stack
 	}
 }
 
-static void zend_jit_trace_setup_ret_counter(const zend_op *opline, size_t offset)
+static void zend_jit_trace_setup_ret_counter(const zend_op *opline, size_t offset, const zend_jit_op_array_trace_extension *jit_extension)
 {
 	zend_op *next_opline = (zend_op*)(opline + 1);
+
+	if (UNEXPECTED(jit_extension->generic_trace)) {
+		/* Return-trace roots would patch compiled code into the SHARED
+		 * next_opline handler; generic families rely on loop/enter roots
+		 * dispatched per clone instead. */
+		return;
+	}
 
 	if (JIT_G(hot_return) && !ZEND_OP_TRACE_INFO(next_opline, offset)->trace_flags) {
 		ZEND_ASSERT(zend_jit_ret_trace_counter_handler != NULL);
@@ -7347,7 +7354,7 @@ done:
 					opline = p->opline;
 				} else if (p->op == ZEND_JIT_TRACE_ENTER) {
 					if (p->op_array == rec_op_array) {
-						zend_jit_trace_setup_ret_counter(opline, jit_extension->offset);
+						zend_jit_trace_setup_ret_counter(opline, jit_extension->offset, jit_extension);
 					}
 					op_array = p->op_array;
 					jit_extension =
@@ -7368,7 +7375,7 @@ done:
 			  || opline->opcode == ZEND_YIELD
 			  || opline->opcode == ZEND_YIELD_FROM
 			  || opline->opcode == ZEND_INCLUDE_OR_EVAL)) {
-				zend_jit_trace_setup_ret_counter(opline, jit_extension->offset);
+				zend_jit_trace_setup_ret_counter(opline, jit_extension->offset, jit_extension);
 			}
 			if (JIT_G(current_frame)
 			 && JIT_G(current_frame)->prev) {
@@ -7378,7 +7385,7 @@ done:
 						op_array = &frame->func->op_array;
 						jit_extension =
 							(zend_jit_op_array_trace_extension*)ZEND_FUNC_INFO(op_array);
-						zend_jit_trace_setup_ret_counter(frame->call_opline, jit_extension->offset);
+						zend_jit_trace_setup_ret_counter(frame->call_opline, jit_extension->offset, jit_extension);
 					}
 					frame = frame->prev;
 				} while (frame);
@@ -7499,7 +7506,7 @@ jit_failure:
 	return handler;
 }
 
-static zend_jit_trace_stop zend_jit_compile_root_trace(zend_jit_trace_rec *trace_buffer, const zend_op *opline, size_t offset)
+static zend_jit_trace_stop zend_jit_compile_root_trace(zend_jit_trace_rec *trace_buffer, const zend_op *opline, size_t offset, zend_jit_op_array_trace_extension *jit_extension)
 {
 	zend_jit_trace_stop ret;
 	zend_vm_opcode_handler_t handler;
@@ -7609,7 +7616,18 @@ static zend_jit_trace_stop zend_jit_compile_root_trace(zend_jit_trace_rec *trace
 				t->exit_counters = ZEND_JIT_EXIT_COUNTERS;
 				ZEND_JIT_EXIT_COUNTERS += t->exit_count;
 
-				((zend_op*)opline)->handler = handler;
+				if (UNEXPECTED(jit_extension->generic_trace)) {
+					/* Opcodes (and so opline handlers) are shared between
+					 * every clone of a generic template: compiled entries go
+					 * into THIS clone's code slot; the generic dispatch
+					 * handler (still installed) routes each clone to its
+					 * own compilation. */
+					const zend_op_array *ext_op_array = jit_extension->op_array;
+					ZEND_JIT_TRACE_CODE_SLOTS(jit_extension, ext_op_array->last)
+						[opline - ext_op_array->opcodes] = (const void*)handler;
+				} else {
+					((zend_op*)opline)->handler = handler;
+				}
 
 				ZEND_JIT_TRACE_NUM++;
 				ZEND_OP_TRACE_INFO(opline, offset)->trace_flags |= ZEND_JIT_TRACE_JITED;
@@ -7741,7 +7759,7 @@ static void zend_jit_stop_counter_handlers(void)
 	zend_shared_alloc_unlock();
 }
 
-static void zend_jit_blacklist_root_trace(const zend_op *opline, size_t offset)
+static void zend_jit_blacklist_root_trace(const zend_op *opline, size_t offset, zend_jit_op_array_trace_extension *jit_extension)
 {
 	zend_shared_alloc_lock();
 
@@ -7749,8 +7767,13 @@ static void zend_jit_blacklist_root_trace(const zend_op *opline, size_t offset)
 		SHM_UNPROTECT();
 		zend_jit_unprotect();
 
-		((zend_op*)opline)->handler =
-			ZEND_OP_TRACE_INFO(opline, offset)->orig_handler;
+		if (!(jit_extension->generic_trace)) {
+			((zend_op*)opline)->handler =
+				ZEND_OP_TRACE_INFO(opline, offset)->orig_handler;
+		}
+		/* Generic families keep the dispatch handler installed (the opline
+		 * is shared with sibling clones); the per-clone BLACKLISTED flag
+		 * makes the dispatcher fall through to the original handler. */
 
 		ZEND_OP_TRACE_INFO(opline, offset)->trace_flags |= ZEND_JIT_TRACE_BLACKLISTED;
 
@@ -8241,7 +8264,7 @@ repeat:
 					zend_jit_trace_stop_description[stop]);
 			}
 		}
-		stop = zend_jit_compile_root_trace(trace_buffer, orig_opline, offset);
+		stop = zend_jit_compile_root_trace(trace_buffer, orig_opline, offset, jit_extension);
 		if (EXPECTED(ZEND_JIT_TRACE_STOP_DONE(stop))) {
 			if (JIT_G(debug) & ZEND_JIT_DEBUG_TRACE_COMPILED) {
 				fprintf(stderr, "---- TRACE %d %s\n",
@@ -8264,7 +8287,7 @@ abort:
 				fprintf(stderr, "---- TRACE %d blacklisted\n",
 					trace_num);
 			}
-			zend_jit_blacklist_root_trace(orig_opline, offset);
+			zend_jit_blacklist_root_trace(orig_opline, offset, jit_extension);
 		}
 		if (ZEND_JIT_TRACE_STOP_REPEAT(stop)) {
 			execute_data = EG(current_execute_data);
@@ -8638,7 +8661,7 @@ int ZEND_FASTCALL zend_jit_trace_hot_side(zend_execute_data *execute_data, uint3
 				(zend_jit_op_array_trace_extension*)ZEND_FUNC_INFO(op_array);
 			const zend_op *opline = trace_buffer[1].opline;
 
-			stop = zend_jit_compile_root_trace(trace_buffer, opline, jit_extension->offset);
+			stop = zend_jit_compile_root_trace(trace_buffer, opline, jit_extension->offset, jit_extension);
 		}
 		if (EXPECTED(ZEND_JIT_TRACE_STOP_DONE(stop))) {
 			if (JIT_G(debug) & ZEND_JIT_DEBUG_TRACE_COMPILED) {
@@ -8948,20 +8971,45 @@ static int zend_jit_restart_hot_trace_counters(zend_op_array *op_array)
 	return SUCCESS;
 }
 
+/* Templates and their stamped clones share one opcode array; opline handlers
+ * are therefore shared too, and compiled machine code must never be installed
+ * into them. Such op_arrays get an extension with per-clone code slots and
+ * are entered through the generic dispatch handlers. */
+static zend_always_inline bool zend_jit_op_array_is_generic_family(const zend_op_array *op_array)
+{
+	return op_array->scope
+		&& (op_array->scope->ce_flags2
+			& (ZEND_ACC2_GENERIC_TEMPLATE|ZEND_ACC2_GENERIC_INSTANCE));
+}
+
 static int zend_jit_setup_hot_trace_counters(zend_op_array *op_array)
 {
 	zend_op *opline;
 	zend_jit_op_array_trace_extension *jit_extension;
 	uint32_t i;
+	bool generic_family = zend_jit_op_array_is_generic_family(op_array);
+	size_t size;
 
 	ZEND_ASSERT(sizeof(zend_op_trace_info) == sizeof(zend_op));
 
-	jit_extension = (zend_jit_op_array_trace_extension*)zend_shared_alloc(sizeof(zend_jit_op_array_trace_extension) + (op_array->last - 1) * sizeof(zend_op_trace_info));
+	size = sizeof(zend_jit_op_array_trace_extension)
+		+ (op_array->last - 1) * sizeof(zend_op_trace_info);
+	if (generic_family) {
+		size += op_array->last * sizeof(void*);
+	}
+	jit_extension = (zend_jit_op_array_trace_extension*)zend_shared_alloc(size);
 	if (!jit_extension) {
 		return FAILURE;
 	}
 	memset(&jit_extension->func_info, 0, sizeof(zend_func_info));
 	jit_extension->func_info.flags = ZEND_FUNC_JIT_ON_HOT_TRACE;
+	if (generic_family) {
+		jit_extension->func_info.flags |= ZEND_FUNC_GENERIC_TRACE;
+		jit_extension->generic_trace = true;
+		memset(ZEND_JIT_TRACE_CODE_SLOTS(jit_extension, op_array->last), 0,
+			op_array->last * sizeof(void*));
+	}
+	jit_extension->generic_trace = generic_family;
 	jit_extension->op_array = op_array;
 	jit_extension->offset = (char*)jit_extension->trace_info - (char*)op_array->opcodes;
 	for (i = 0; i < op_array->last; i++) {
@@ -8988,7 +9036,9 @@ static int zend_jit_setup_hot_trace_counters(zend_op_array *op_array)
 					/* loop header */
 					opline = op_array->opcodes + cfg.blocks[i].start;
 					if (!(ZEND_OP_TRACE_INFO(opline, jit_extension->offset)->trace_flags & ZEND_JIT_TRACE_UNSUPPORTED)) {
-						opline->handler = zend_jit_loop_trace_counter_handler;
+						opline->handler = generic_family
+							? zend_jit_generic_loop_trace_dispatch_handler
+							: zend_jit_loop_trace_counter_handler;
 						if (!ZEND_OP_TRACE_INFO(opline, jit_extension->offset)->counter) {
 							ZEND_OP_TRACE_INFO(opline, jit_extension->offset)->counter =
 								&zend_jit_hot_counters[ZEND_JIT_COUNTER_NUM];
@@ -9013,7 +9063,9 @@ static int zend_jit_setup_hot_trace_counters(zend_op_array *op_array)
 
 		if (!ZEND_OP_TRACE_INFO(opline, jit_extension->offset)->trace_flags) {
 			/* function entry */
-			opline->handler = zend_jit_func_trace_counter_handler;
+			opline->handler = generic_family
+				? zend_jit_generic_func_trace_dispatch_handler
+				: zend_jit_func_trace_counter_handler;
 			ZEND_OP_TRACE_INFO(opline, jit_extension->offset)->counter =
 				&zend_jit_hot_counters[ZEND_JIT_COUNTER_NUM];
 			ZEND_JIT_COUNTER_NUM = (ZEND_JIT_COUNTER_NUM + 1) % ZEND_HOT_COUNTERS_COUNT;
@@ -9025,6 +9077,55 @@ static int zend_jit_setup_hot_trace_counters(zend_op_array *op_array)
 	zend_shared_alloc_register_xlat_entry(op_array->opcodes, jit_extension);
 
 	return SUCCESS;
+}
+
+/* zend_generics_jit_clone_hook target: attach a per-clone trace extension to
+ * a freshly stamped method clone (which inherited the template's through the
+ * header memcpy). The clone gets its own JITED/BLACKLISTED flags; heat counter POINTERS stay shared
+ * (pooled heat across clones is acceptable), its own type source (func_info),
+ * its own JITED/BLACKLISTED flags and its own compiled-code slots. Runtime
+ * stamps allocate from the compiler arena (freed wholesale with the clone at
+ * request end); preload-time stamps allocate from SHM like the template. */
+static void zend_jit_trace_clone_extension(zend_op_array *op_array)
+{
+	zend_jit_op_array_trace_extension *tpl_ext =
+		(zend_jit_op_array_trace_extension*)ZEND_FUNC_INFO(op_array);
+	zend_jit_op_array_trace_extension *ext;
+	size_t size;
+
+	if (!tpl_ext
+	 || !(tpl_ext->func_info.flags & ZEND_FUNC_JIT_ON_HOT_TRACE)
+	 || !(tpl_ext->func_info.flags & ZEND_FUNC_GENERIC_TRACE)) {
+		return;
+	}
+
+	size = sizeof(zend_jit_op_array_trace_extension)
+		+ (op_array->last - 1) * sizeof(zend_op_trace_info)
+		+ op_array->last * sizeof(void*);
+	if (CG(compiler_options) & ZEND_COMPILE_PRELOAD) {
+		ext = (zend_jit_op_array_trace_extension*)zend_shared_alloc(size);
+		if (!ext) {
+			return; /* keep the template's: correct flags, shared types */
+		}
+	} else {
+		ext = (zend_jit_op_array_trace_extension*)zend_arena_alloc(&CG(arena), size);
+	}
+	memcpy(ext, tpl_ext,
+		sizeof(zend_jit_op_array_trace_extension)
+			+ (op_array->last - 1) * sizeof(zend_op_trace_info));
+	memset(ZEND_JIT_TRACE_CODE_SLOTS(ext, op_array->last), 0,
+		op_array->last * sizeof(void*));
+	ext->op_array = op_array;
+	ext->offset = (char*)ext->trace_info - (char*)op_array->opcodes;
+	/* Clear inherited compile results; heat counters stay shared. */
+	{
+		uint32_t i;
+		for (i = 0; i < op_array->last; i++) {
+			ext->trace_info[i].trace_flags &=
+				~(ZEND_JIT_TRACE_JITED|ZEND_JIT_TRACE_BLACKLISTED);
+		}
+	}
+	ZEND_SET_FUNC_INFO(op_array, (void*)ext);
 }
 
 static void zend_jit_trace_init_caches(void)
