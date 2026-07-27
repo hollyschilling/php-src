@@ -3318,6 +3318,22 @@ int zend_jit_op_array(zend_op_array *op_array, zend_script *script)
 		return SUCCESS;
 	}
 
+	if (UNEXPECTED((op_array->generic_params != NULL)
+		|| (op_array->scope
+			&& (op_array->scope->ce_flags2
+				& (ZEND_ACC2_GENERIC_TEMPLATE|ZEND_ACC2_GENERIC_INSTANCE))))
+	 && JIT_G(trigger) != ZEND_JIT_ON_HOT_TRACE) {
+		/* Function-mode JIT compiles ONE machine body from ONE signature and
+		 * installs it into the opcodes SHARED by every stamped instantiation
+		 * clone -- class-level clones and generic-METHOD clones alike --
+		 * bypassing the clones' substituted arg_info (a check compiled
+		 * from the template rejects everything: "must be of type T"). Keep
+		 * these bodies interpreted; hot-trace mode compiles per trace with
+		 * runtime function guards and remains enabled. */
+		ZEND_SET_FUNC_INFO(op_array, NULL);
+		return SUCCESS;
+	}
+
 	if (JIT_G(trigger) == ZEND_JIT_ON_FIRST_EXEC) {
 		zend_jit_op_array_extension *jit_extension;
 		zend_op *opline = op_array->opcodes;
@@ -3430,6 +3446,18 @@ int zend_jit_script(zend_script *script)
 			}
 		}
 	} else if (JIT_G(trigger) == ZEND_JIT_ON_SCRIPT_LOAD) {
+		for (i = 0; i < call_graph.op_arrays_count; i++) {
+			const zend_op_array *op_array = call_graph.op_arrays[i];
+			if ((op_array->generic_params != NULL)
+			 || (op_array->scope
+				&& (op_array->scope->ce_flags2
+					& (ZEND_ACC2_GENERIC_TEMPLATE|ZEND_ACC2_GENERIC_INSTANCE)))) {
+				/* Same exclusion as zend_jit_op_array: one machine body from
+				 * the template's signature would serve every clone through
+				 * the shared opcodes, bypassing substituted arg_info. */
+				ZEND_SET_FUNC_INFO((zend_op_array *) op_array, NULL);
+			}
+		}
 		for (i = 0; i < call_graph.op_arrays_count; i++) {
 			info = ZEND_FUNC_INFO(call_graph.op_arrays[i]);
 			if (info) {
