@@ -393,6 +393,12 @@ static void zend_reset_import_tables(void) /* {{{ */
 		FC(module_imports) = NULL;
 	}
 
+	if (FC(module_gated_imports)) {
+		zend_hash_destroy(FC(module_gated_imports));
+		efree(FC(module_gated_imports));
+		FC(module_gated_imports) = NULL;
+	}
+
 	zend_hash_clean(&FC(seen_symbols));
 }
 /* }}} */
@@ -416,6 +422,7 @@ void zend_file_context_begin(zend_file_context *prev_context) /* {{{ */
 	FC(extension_imports) = NULL;
 	FC(surface_grants) = NULL;
 	FC(module_imports) = NULL;
+	FC(module_gated_imports) = NULL;
 	FC(current_namespace) = NULL;
 	FC(module_name) = NULL;
 	FC(in_namespace) = 0;
@@ -1342,6 +1349,26 @@ static zend_string *zend_mark_module_provenance(const zend_lang_module *m, zend_
 	return marked;
 }
 
+/* If `ast` is a bare local name bound by `use Prefix:>Member as Alias;`, return
+ * the exporting module so an acquisition site can re-attach provenance; NULL for
+ * every other name. Only an exact single-label alias qualifies — `Alias\Sub` is
+ * an ordinary namespaced reference, not the aliased member. */
+static zend_lang_module *zend_gated_import_module(zend_ast *ast)
+{
+	if (ast->kind != ZEND_AST_ZVAL
+	 || ast->attr == ZEND_NAME_MODULE
+	 || ast->attr == ZEND_NAME_FQ
+	 || ast->attr == ZEND_NAME_RELATIVE
+	 || !FC(module_gated_imports)) {
+		return NULL;
+	}
+	zend_string *name = zend_ast_get_str(ast);
+	if (memchr(ZSTR_VAL(name), '\\', ZSTR_LEN(name)) != NULL) {
+		return NULL;
+	}
+	return zend_hash_find_ptr_lc(FC(module_gated_imports), name);
+}
+
 static zend_string *zend_resolve_class_name(zend_string *name, uint32_t type) /* {{{ */
 {
 	const char *compound;
@@ -1982,7 +2009,14 @@ static zend_string *zend_resolve_const_class_name_reference(zend_ast *ast, const
 		zend_string *fqcn = zend_resolve_module_qualified_name(class_name, &m);
 		return zend_mark_module_provenance(m, fqcn);
 	}
-	return zend_resolve_class_name(class_name, ast->attr);
+	/* A bare local alias of a module member (`use Prefix:>Member as X;`) is an
+	 * acquisition here too, so it carries the same provenance. */
+	zend_lang_module *gm = zend_gated_import_module(ast);
+	zend_string *fqcn = zend_resolve_class_name(class_name, ast->attr);
+	if (UNEXPECTED(gm != NULL)) {
+		fqcn = zend_mark_module_provenance(gm, fqcn);
+	}
+	return fqcn;
 }
 
 static void zend_ensure_valid_class_fetch_type(uint32_t fetch_type) /* {{{ */
@@ -3290,6 +3324,7 @@ static void zend_compile_class_ref(znode *result, zend_ast *name_ast, uint32_t f
 
 	fetch_type = zend_get_class_fetch_type(zend_ast_get_str(name_ast));
 	if (ZEND_FETCH_CLASS_DEFAULT == fetch_type) {
+		zend_lang_module *gm;
 		result->op_type = IS_CONST;
 		if (UNEXPECTED(name_ast->attr == ZEND_NAME_MODULE)) {
 			zend_lang_module *m;
@@ -3299,6 +3334,16 @@ static void zend_compile_class_ref(znode *result, zend_ast *name_ast, uint32_t f
 			 * provenance marker. */
 			if (!(fetch_flags & (ZEND_FETCH_CLASS_NO_AUTOLOAD|ZEND_FETCH_CLASS_SILENT))) {
 				fqcn = zend_mark_module_provenance(m, fqcn);
+			}
+			ZVAL_STR(&result->u.constant, fqcn);
+		} else if (UNEXPECTED((gm = zend_gated_import_module(name_ast)) != NULL)) {
+			/* Bare local alias of a module member (`use Prefix:>Member as X;`):
+			 * mark provenance at acquisition sites so the runtime gate accepts
+			 * it, exactly as an explicit `Prefix:>Member` here would. Observation
+			 * sites (instanceof) pass SILENT/NO_AUTOLOAD and keep the plain FQCN. */
+			zend_string *fqcn = zend_resolve_class_name_ast(name_ast);
+			if (!(fetch_flags & (ZEND_FETCH_CLASS_NO_AUTOLOAD|ZEND_FETCH_CLASS_SILENT))) {
+				fqcn = zend_mark_module_provenance(gm, fqcn);
 			}
 			ZVAL_STR(&result->u.constant, fqcn);
 		} else {
@@ -11506,6 +11551,71 @@ static void zend_compile_use(zend_ast *ast) /* {{{ */
 		zend_ast *new_name_ast = use_ast->child[1];
 		zend_string *old_name = zend_ast_get_str(old_name_ast);
 		zend_string *new_name, *lookup_name;
+
+		/* `use Prefix:>Member [as Alias];` — bind an exported module member to a
+		 * bare local alias. Resolves through the file's `use module` table (which
+		 * must therefore already be imported, in source order) to the member's
+		 * plain canonical FQCN; the alias then behaves exactly as a `Prefix:>Member`
+		 * reference would at each site. */
+		if (old_name_ast->attr == ZEND_NAME_MODULE) {
+			if (type != ZEND_SYMBOL_CLASS) {
+				zend_error_noreturn(E_COMPILE_ERROR,
+					"A module-qualified name may only be imported as a class, not a %s",
+					type == ZEND_SYMBOL_FUNCTION ? "function" : "constant");
+			}
+
+			zend_lang_module *m;
+			zend_string *fqcn = zend_resolve_module_qualified_name(old_name, &m);
+			zend_string *alias;
+			if (new_name_ast) {
+				alias = zend_string_copy(zend_ast_get_str(new_name_ast));
+			} else {
+				/* Default alias is the member segment after ":>". */
+				const char *sep = zend_memnstr(ZSTR_VAL(old_name), ":>", 2,
+					ZSTR_VAL(old_name) + ZSTR_LEN(old_name));
+				ZEND_ASSERT(sep != NULL);
+				const char *member = sep + 2;
+				alias = zend_string_init(member,
+					ZSTR_VAL(old_name) + ZSTR_LEN(old_name) - member, 0);
+			}
+
+			if (zend_is_reserved_class_name(alias)) {
+				zend_error_noreturn(E_COMPILE_ERROR, "Cannot use %s as %s because '%s' "
+					"is a special class name", ZSTR_VAL(old_name), ZSTR_VAL(alias), ZSTR_VAL(alias));
+			}
+
+			lookup_name = zend_string_tolower(alias);
+
+			if (current_ns) {
+				zend_string *ns_name = zend_string_alloc(ZSTR_LEN(current_ns) + 1 + ZSTR_LEN(lookup_name), 0);
+				zend_str_tolower_copy(ZSTR_VAL(ns_name), ZSTR_VAL(current_ns), ZSTR_LEN(current_ns));
+				ZSTR_VAL(ns_name)[ZSTR_LEN(current_ns)] = '\\';
+				memcpy(ZSTR_VAL(ns_name) + ZSTR_LEN(current_ns) + 1, ZSTR_VAL(lookup_name), ZSTR_LEN(lookup_name) + 1);
+				if (zend_have_seen_symbol(ns_name, type)) {
+					zend_check_already_in_use(type, old_name, alias, ns_name);
+				}
+				zend_string_efree(ns_name);
+			} else if (zend_have_seen_symbol(lookup_name, type)) {
+				zend_check_already_in_use(type, old_name, alias, lookup_name);
+			}
+
+			zend_string *stored = zend_new_interned_string(zend_string_copy(fqcn));
+			if (!zend_hash_add_ptr(current_import, lookup_name, stored)) {
+				zend_error_noreturn(E_COMPILE_ERROR, "Cannot use %s as %s because the name "
+					"is already in use", ZSTR_VAL(old_name), ZSTR_VAL(alias));
+			}
+
+			if (!FC(module_gated_imports)) {
+				FC(module_gated_imports) = emalloc(sizeof(HashTable));
+				zend_hash_init(FC(module_gated_imports), 8, NULL, NULL, 0);
+			}
+			zend_hash_update_ptr(FC(module_gated_imports), lookup_name, m);
+
+			zend_string_release_ex(lookup_name, 0);
+			zend_string_release_ex(alias, 0);
+			zend_string_release_ex(fqcn, 0);
+			continue;
+		}
 
 		if (new_name_ast) {
 			new_name = zend_string_copy(zend_ast_get_str(new_name_ast));
