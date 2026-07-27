@@ -182,6 +182,27 @@ static int zend_file_cache_flock(int fd, int type)
 	} \
 } while (0)
 
+/* `use extension` import sets: packed tables of string zvals, shared
+ * between the op_arrays of one file (content serialized once). */
+#define SERIALIZE_EXTENSION_IMPORTS(imports) do { \
+	if ((imports) && !IS_SERIALIZED(imports)) { \
+		HashTable *ht; \
+		SERIALIZE_PTR(imports); \
+		ht = (imports); \
+		UNSERIALIZE_PTR(ht); \
+		zend_file_cache_serialize_hash(ht, script, info, buf, zend_file_cache_serialize_zval); \
+	} \
+} while (0)
+
+#define UNSERIALIZE_EXTENSION_IMPORTS(imports) do { \
+	if ((imports) && !IS_UNSERIALIZED(imports)) { \
+		HashTable *ht; \
+		UNSERIALIZE_PTR(imports); \
+		ht = (imports); \
+		zend_file_cache_unserialize_hash(ht, script, buf, zend_file_cache_unserialize_zval, ZVAL_PTR_DTOR); \
+	} \
+} while (0)
+
 #define HOOKED_ITERATOR_PLACEHOLDER ((void*)1)
 
 static const uint32_t uninitialized_bucket[-HT_MIN_MASK] =
@@ -518,6 +539,7 @@ static void zend_file_cache_serialize_op_array(zend_op_array            *op_arra
 			SERIALIZE_PTR(op_array->scope);
 			SERIALIZE_STR(op_array->doc_comment);
 			SERIALIZE_ATTRIBUTES(op_array->attributes);
+			SERIALIZE_EXTENSION_IMPORTS(op_array->extension_imports);
 			SERIALIZE_PTR(op_array->try_catch_array);
 			SERIALIZE_PTR(op_array->prototype);
 			SERIALIZE_PTR(op_array->prop_info);
@@ -697,6 +719,7 @@ static void zend_file_cache_serialize_op_array(zend_op_array            *op_arra
 		SERIALIZE_PTR(op_array->scope);
 		SERIALIZE_STR(op_array->doc_comment);
 		SERIALIZE_ATTRIBUTES(op_array->attributes);
+		SERIALIZE_EXTENSION_IMPORTS(op_array->extension_imports);
 		SERIALIZE_PTR(op_array->try_catch_array);
 		SERIALIZE_PTR(op_array->prototype);
 		SERIALIZE_PTR(op_array->prop_info);
@@ -1450,6 +1473,7 @@ static void zend_file_cache_unserialize_op_array(zend_op_array           *op_arr
 		UNSERIALIZE_PTR(op_array->scope);
 		UNSERIALIZE_STR(op_array->doc_comment);
 		UNSERIALIZE_ATTRIBUTES(op_array->attributes);
+		UNSERIALIZE_EXTENSION_IMPORTS(op_array->extension_imports);
 		UNSERIALIZE_PTR(op_array->try_catch_array);
 		UNSERIALIZE_PTR(op_array->prototype);
 		UNSERIALIZE_PTR(op_array->prop_info);
@@ -1593,6 +1617,7 @@ static void zend_file_cache_unserialize_op_array(zend_op_array           *op_arr
 		UNSERIALIZE_PTR(op_array->live_range);
 		UNSERIALIZE_STR(op_array->doc_comment);
 		UNSERIALIZE_ATTRIBUTES(op_array->attributes);
+		UNSERIALIZE_EXTENSION_IMPORTS(op_array->extension_imports);
 		UNSERIALIZE_PTR(op_array->try_catch_array);
 		UNSERIALIZE_PTR(op_array->prototype);
 		UNSERIALIZE_PTR(op_array->prop_info);

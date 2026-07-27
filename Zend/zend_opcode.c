@@ -65,6 +65,7 @@ void init_op_array(zend_op_array *op_array, zend_function_type type, int initial
 	op_array->filename = zend_string_copy(zend_get_compiled_filename());
 	op_array->doc_comment = NULL;
 	op_array->attributes = NULL;
+	op_array->extension_imports = NULL;
 
 	op_array->arg_info = NULL;
 	op_array->num_args = 0;
@@ -620,6 +621,9 @@ ZEND_API void destroy_op_array(zend_op_array *op_array)
 	}
 	if (op_array->attributes) {
 		zend_hash_release(op_array->attributes);
+	}
+	if (op_array->extension_imports) {
+		zend_hash_release(op_array->extension_imports);
 	}
 	if (op_array->live_range) {
 		efree(op_array->live_range);

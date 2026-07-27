@@ -118,6 +118,9 @@ struct _zend_compiler_globals {
 
 	bool skip_shebang;
 	bool increment_lineno;
+	/* Receiver variable name while compiling an `extension ... { }` block
+	 * body; NULL outside. $this and static:: are banned while set. */
+	zend_string *extension_receiver;
 
 	bool variable_width_locale;   /* UTF-8, Shift-JIS, Big5, ISO 2022, EUC, etc */
 	bool ascii_compatible_locale; /* locale uses ASCII characters as singletons */
@@ -227,6 +230,17 @@ struct _zend_executor_globals {
 	zend_atomic_bool timed_out;
 
 	HashTable autoload_current_classnames;
+
+	/* Lazily allocated; lc extension names already handed to the class
+	 * autoloader this request. Imported-but-unloadable extensions are not an
+	 * error, so this negative cache is what bounds autoload attempts to one
+	 * per name per request. */
+	HashTable *extension_autoload_attempted;
+
+	/* Extension-method registry: lc target name -> HashTable of lc method
+	 * name -> entry (borrowed fn + gating name). Lazily allocated per
+	 * request; one per thread under ZTS. See zend_extension_methods.c. */
+	HashTable *extension_method_registry;
 
 	zend_long hard_timeout;
 	void *stack_base;

@@ -623,6 +623,12 @@ static zend_op_array *zend_compile(zend_function_type type)
 		zend_emit_final_return(type == ZEND_USER_FUNCTION);
 		op_array->line_start = 1;
 		op_array->line_end = last_lineno;
+		/* Top-level code is one op_array: it gets the file's final
+		 * `use extension` import set. */
+		if (CG(file_context).extension_imports) {
+			op_array->extension_imports = CG(file_context).extension_imports;
+			GC_ADDREF(op_array->extension_imports);
+		}
 		pass_two(op_array);
 		zend_oparray_context_end(&original_oparray_context);
 		zend_file_context_end(&original_file_context);
@@ -1563,9 +1569,18 @@ OPTIONAL_WHITESPACE_OR_COMMENTS ({WHITESPACE}|{MULTI_LINE_COMMENT}|{SINGLE_LINE_
 }
 
 /*
- * The enum keyword must be followed by whitespace and another identifier.
- * This avoids the BC break of using enum in classes, namespaces, functions and constants.
+ * The enum and extension keywords must be followed by whitespace and another identifier.
+ * This avoids the BC break of using them in classes, namespaces, functions and constants.
  */
+<ST_IN_SCRIPTING>"extension"{WHITESPACE_OR_COMMENTS}("extends"|"implements") {
+	yyless(9);
+	RETURN_TOKEN_WITH_STR(T_STRING, 0);
+}
+<ST_IN_SCRIPTING>"extension"{WHITESPACE_OR_COMMENTS}("\\"|[a-zA-Z_\x80-\xff]) {
+	yyless(9);
+	RETURN_TOKEN_WITH_IDENT(T_EXTENSION);
+}
+
 <ST_IN_SCRIPTING>"enum"{WHITESPACE_OR_COMMENTS}("extends"|"implements") {
 	yyless(4);
 	RETURN_TOKEN_WITH_STR(T_STRING, 0);

@@ -166,6 +166,7 @@ static YYSIZE_T zend_yytnamerr(char*, const char*);
 %token <ident> T_CLASS         "'class'"
 %token <ident> T_TRAIT         "'trait'"
 %token <ident> T_INTERFACE     "'interface'"
+%token <ident> T_EXTENSION     "'extension'"
 %token <ident> T_ENUM          "'enum'"
 %token <ident> T_EXTENDS       "'extends'"
 %token <ident> T_IMPLEMENTS    "'implements'"
@@ -284,13 +285,14 @@ static YYSIZE_T zend_yytnamerr(char*, const char*);
 %type <ast> attribute_decl attribute attributes attribute_group namespace_declaration_name
 %type <ast> match match_arm_list non_empty_match_arm_list match_arm match_arm_cond_list
 %type <ast> enum_declaration_statement enum_backing_type enum_case enum_case_expr
+%type <ast> extension_declaration_statement extension_target
 %type <ast> function_name non_empty_member_modifiers
 %type <ast> property_hook property_hook_list optional_property_hook_list hooked_property property_hook_body
 %type <ast> optional_parameter_list clone_argument_list non_empty_clone_argument_list
 
 %type <num> returns_ref function fn is_reference is_variadic property_modifiers property_hook_modifiers
 %type <num> method_modifiers class_const_modifiers member_modifier optional_cpp_modifiers
-%type <num> class_modifiers class_modifier anonymous_class_modifiers anonymous_class_modifiers_optional use_type backup_fn_flags
+%type <num> class_modifiers class_modifier anonymous_class_modifiers anonymous_class_modifiers_optional use_type backup_fn_flags extension_keyword
 
 %type <ptr> backup_lex_pos
 %type <str> backup_doc_comment
@@ -310,7 +312,7 @@ reserved_non_modifiers:
 	| T_THROW | T_USE | T_INSTEADOF | T_GLOBAL | T_VAR | T_UNSET | T_ISSET | T_EMPTY | T_CONTINUE | T_GOTO
 	| T_FUNCTION | T_CONST | T_RETURN | T_PRINT | T_YIELD | T_LIST | T_SWITCH | T_ENDSWITCH | T_CASE | T_DEFAULT | T_BREAK
 	| T_ARRAY | T_CALLABLE | T_EXTENDS | T_IMPLEMENTS | T_NAMESPACE | T_TRAIT | T_INTERFACE | T_CLASS
-	| T_CLASS_C | T_TRAIT_C | T_FUNC_C | T_METHOD_C | T_LINE | T_FILE | T_DIR | T_NS_C | T_FN | T_MATCH | T_ENUM
+	| T_CLASS_C | T_TRAIT_C | T_FUNC_C | T_METHOD_C | T_LINE | T_FILE | T_DIR | T_NS_C | T_FN | T_MATCH | T_ENUM | T_EXTENSION
 	| T_PROPERTY_C
 ;
 
@@ -392,6 +394,7 @@ attributed_statement:
 	|	trait_declaration_statement			{ $$ = $1; }
 	|	interface_declaration_statement		{ $$ = $1; }
 	|	enum_declaration_statement			{ $$ = $1; }
+	|	extension_declaration_statement		{ $$ = $1; }
 ;
 
 attributed_top_statement:
@@ -420,6 +423,7 @@ top_statement:
 	|	T_USE use_type group_use_declaration ';'	{ $$ = $3; $$->attr = $2; }
 	|	T_USE use_declarations ';'					{ $$ = $2; $$->attr = ZEND_SYMBOL_CLASS; }
 	|	T_USE use_type use_declarations ';'			{ $$ = $3; $$->attr = $2; }
+	|	T_USE T_EXTENSION use_declarations ';'		{ $$ = $3; $$->attr = ZEND_SYMBOL_EXTENSION; }
 ;
 
 use_type:
@@ -649,6 +653,37 @@ enum_declaration_statement:
 		T_ENUM { $<num>$ = CG(zend_lineno); }
 		T_STRING enum_backing_type implements_list backup_doc_comment '{' class_statement_list '}'
 			{ $$ = zend_ast_create_decl(ZEND_AST_CLASS, ZEND_ACC_ENUM|ZEND_ACC_FINAL, $<num>2, $6, zend_ast_get_str($3), NULL, $5, $8, NULL, $4); }
+;
+
+extension_target:
+		class_name { $$ = $1; }
+	|	T_ARRAY {
+			$$ = zend_ast_create_zval_from_str(zend_string_init("array", sizeof("array") - 1, 0));
+			$$->attr = ZEND_NAME_NOT_FQ; }
+;
+
+extension_keyword:
+		T_EXTENSION { $$ = CG(zend_lineno); }
+;
+
+extension_declaration_statement:
+		extension_keyword extension_target T_VARIABLE backup_doc_comment '{' class_statement_list '}'
+			{ $$ = zend_ast_create(ZEND_AST_EXTENSION_DECL, $2, $3,
+			       zend_ast_create_decl(ZEND_AST_CLASS, ZEND_ACC_ANON_CLASS|ZEND_ACC_FINAL, $1, $4,
+			           NULL, NULL, NULL, $6, NULL, NULL)); }
+	|	extension_keyword T_STRING T_STRING extension_target T_VARIABLE backup_doc_comment '{' class_statement_list '}'
+			{ if (!zend_string_equals_literal_ci(zend_ast_get_str($3), "on")) {
+			      zend_throw_exception_ex(zend_ce_compile_error, 0,
+			          "Unexpected identifier \"%s\", expected \"on\" in extension declaration",
+			          ZSTR_VAL(zend_ast_get_str($3)));
+			      YYERROR;
+			  }
+			  /* The "on" contextual word is consumed here; its node is never
+			   * attached to the tree, so release its string now. */
+			  zend_string_release(zend_ast_get_str($3));
+			  $$ = zend_ast_create(ZEND_AST_EXTENSION_DECL, $4, $5,
+			       zend_ast_create_decl(ZEND_AST_CLASS, ZEND_ACC_ANON_CLASS|ZEND_ACC_FINAL, $1, $6,
+			           zend_ast_get_str($2), NULL, NULL, $8, NULL, NULL)); }
 ;
 
 enum_backing_type:

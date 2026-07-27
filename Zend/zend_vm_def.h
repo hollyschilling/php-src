@@ -3002,7 +3002,7 @@ ZEND_VM_HOT_HELPER(zend_leave_helper, ANY, ANY)
 		call_info = EX_CALL_INFO();
 #endif
 		if (UNEXPECTED(call_info & ZEND_CALL_RELEASE_THIS)) {
-			OBJ_RELEASE(Z_OBJ(execute_data->This));
+			zend_vm_release_call_frame_this(execute_data);
 		} else if (UNEXPECTED(call_info & ZEND_CALL_CLOSURE)) {
 			OBJ_RELEASE(ZEND_CLOSURE_OBJECT(EX(func)));
 		}
@@ -3036,7 +3036,7 @@ ZEND_VM_HOT_HELPER(zend_leave_helper, ANY, ANY)
 		zend_vm_stack_free_extra_args_ex(call_info, execute_data);
 
 		if (UNEXPECTED(call_info & ZEND_CALL_RELEASE_THIS)) {
-			OBJ_RELEASE(Z_OBJ(execute_data->This));
+			zend_vm_release_call_frame_this(execute_data);
 		} else if (UNEXPECTED(call_info & ZEND_CALL_CLOSURE)) {
 			OBJ_RELEASE(ZEND_CLOSURE_OBJECT(EX(func)));
 		}
@@ -3605,6 +3605,80 @@ ZEND_VM_C_LABEL(try_class_name):
 	ZEND_VM_NEXT_OPCODE_CHECK_EXCEPTION();
 }
 
+ZEND_VM_HANDLER(212, ZEND_BIND_EXTENSION, VAR, CONST)
+{
+	USE_OPLINE
+	zend_class_entry *ce;
+	zend_string *ext_name_lc = NULL;
+
+	SAVE_OPLINE();
+	ce = Z_CE_P(EX_VAR(opline->op1.var));
+	/* extended_value flags the named form (`extension Name on Target`); the
+	 * lc extension name is then the literal following the target name. */
+	if (opline->extended_value) {
+		zval *existing;
+
+		ext_name_lc = Z_STR_P(RT_CONSTANT(opline, opline->op2) + 1);
+		/* A named extension is a class-table symbol under its own name: this
+		 * is what makes it visible to class_exists() and — decisively — to
+		 * the class autoloader (an imported-but-unloaded extension is
+		 * resolved through zend_lookup_class_ex at first use). Extension
+		 * names therefore share the class namespace, and collide like
+		 * classes do. */
+		existing = zend_hash_find(EG(class_table), ext_name_lc);
+		if (existing) {
+			if (UNEXPECTED(Z_CE_P(existing) != ce)) {
+				zend_error_noreturn(E_COMPILE_ERROR,
+					"Cannot declare extension %s, because the name is already in use",
+					ZSTR_VAL(ce->name));
+			}
+			/* Same CE re-bound (declaring file included again): the registry
+			 * registration below is idempotent (first-wins per method). */
+		} else {
+			zval zv;
+			/* Alias-typed entry: the anonymous-key entry made by
+			 * DECLARE_ANON_CLASS owns the CE's lifetime; destroy_zend_class
+			 * skips IS_ALIAS_PTR buckets, so no refcount juggling is needed
+			 * for mutable and immutable (opcache SHM) CEs alike. */
+			ZVAL_ALIAS_PTR(&zv, ce);
+			zend_hash_add_new(EG(class_table), ext_name_lc, &zv);
+		}
+	}
+	zend_extension_methods_register(Z_STR_P(RT_CONSTANT(opline, opline->op2)), ce, ext_name_lc);
+	ZEND_VM_NEXT_OPCODE_CHECK_EXCEPTION();
+}
+
+ZEND_VM_HANDLER(213, ZEND_RECV_RECEIVER, ANY, ANY)
+{
+	USE_OPLINE
+	zval *cv = EX_VAR(opline->result.var);
+
+	/* Bind the extension method's receiver into its declared variable.
+	 * The receiver arrives through the frame's This slot via the normal
+	 * method calling convention. */
+	if (EXPECTED(Z_TYPE(EX(This)) == IS_OBJECT)) {
+		ZVAL_OBJ_COPY(cv, Z_OBJ(EX(This)));
+		ZEND_VM_NEXT_OPCODE();
+	}
+	if (Z_TYPE(EX(This)) >= IS_FALSE && Z_TYPE(EX(This)) <= IS_ARRAY) {
+		/* Scalar receiver: transfer ownership out of the This slot into the
+		 * CV, then neutralize the slot (value nulled, RELEASE_THIS cleared)
+		 * so the rest of the call sees an ordinary scoped frame. */
+		uint32_t this_call_info = Z_TYPE_INFO(EX(This)) & ~0xffffu;
+
+		ZVAL_COPY_VALUE(cv, &EX(This));
+		Z_TYPE_INFO_P(cv) = Z_TYPE_INFO(EX(This)) & 0xffffu;
+		Z_PTR(EX(This)) = NULL;
+		Z_TYPE_INFO(EX(This)) = (this_call_info & ~ZEND_CALL_RELEASE_THIS) | IS_UNDEF;
+		ZEND_VM_NEXT_OPCODE();
+	}
+	SAVE_OPLINE();
+	zend_throw_error(NULL, "No receiver is bound to extension method %s()",
+		ZSTR_VAL(EX(func)->common.function_name));
+	ZVAL_UNDEF(cv);
+	HANDLE_EXCEPTION();
+}
+
 ZEND_VM_HOT_OBJ_HANDLER(112, ZEND_INIT_METHOD_CALL, CONST|TMP|UNUSED|THIS|CV, CONST|TMP|CV, NUM|CACHE_SLOT)
 {
 	USE_OPLINE
@@ -3680,6 +3754,44 @@ ZEND_VM_HOT_OBJ_HANDLER(112, ZEND_INIT_METHOD_CALL, CONST|TMP|UNUSED|THIS|CV, CO
 				}
 				if (OP2_TYPE == IS_CONST) {
 					function_name = GET_OP2_ZVAL_PTR_UNDEF(BP_VAR_R);
+				}
+				/* Scalar extension methods: fallback on what is otherwise an
+				 * unconditional error path. The receiver rides in the frame's
+				 * This slot (call-info bits preserved) only until the body's
+				 * ZEND_RECV_RECEIVER moves it into the declared variable. */
+				if (Z_TYPE_P(object) >= IS_FALSE && Z_TYPE_P(object) <= IS_ARRAY) {
+					zend_function *scalar_fbc = zend_extension_methods_get_scalar(object,
+						Z_STR_P(function_name),
+						(OP2_TYPE == IS_CONST) ? Z_STR_P(RT_CONSTANT(opline, opline->op2) + 1) : NULL);
+					if (UNEXPECTED(scalar_fbc != NULL)) {
+						uint32_t this_call_info;
+
+						if (EXPECTED(scalar_fbc->type == ZEND_USER_FUNCTION)
+						 && UNEXPECTED(!RUN_TIME_CACHE(&scalar_fbc->op_array))) {
+							init_func_run_time_cache(&scalar_fbc->op_array);
+						}
+						call = zend_vm_stack_push_call_frame(
+							ZEND_CALL_NESTED_FUNCTION | ZEND_CALL_HAS_THIS | ZEND_CALL_RELEASE_THIS,
+							scalar_fbc, opline->extended_value, scalar_fbc->common.scope);
+						this_call_info = Z_TYPE_INFO(call->This) & ~0xffffu;
+						ZVAL_COPY(&call->This, object);
+						Z_TYPE_INFO(call->This) = (Z_TYPE_INFO(call->This) & 0xffffu) | this_call_info;
+						call->prev_execute_data = EX(call);
+						EX(call) = call;
+						if (OP2_TYPE != IS_CONST) {
+							FREE_OP2();
+						}
+						FREE_OP1();
+						ZEND_VM_NEXT_OPCODE();
+					}
+					/* The scalar lookup may have run the class autoloader for
+					 * imported-but-unloaded extensions; if the autoloader
+					 * threw, propagate instead of raising on top of it. */
+					if (UNEXPECTED(EG(exception))) {
+						FREE_OP2();
+						FREE_OP1();
+						HANDLE_EXCEPTION();
+					}
 				}
 				zend_invalid_method_call(object, function_name);
 				FREE_OP2();
@@ -4455,7 +4567,7 @@ ZEND_VM_C_LABEL(fcall_end):
 	}
 
 	if (UNEXPECTED(ZEND_CALL_INFO(call) & ZEND_CALL_RELEASE_THIS)) {
-		OBJ_RELEASE(Z_OBJ(call->This));
+		zend_vm_release_call_frame_this(call);
 	}
 
 	zend_vm_stack_free_call_frame(call);
@@ -9681,6 +9793,9 @@ ZEND_VM_HANDLER(192, ZEND_GET_CALLED_CLASS, UNUSED, UNUSED)
 
 	if (Z_TYPE(EX(This)) == IS_OBJECT) {
 		ZVAL_STR_COPY(EX_VAR(opline->result.var), Z_OBJCE(EX(This))->name);
+	} else if (UNEXPECTED(Z_CE(EX(This)) == NULL) && EX(func)->common.scope) {
+		/* Neutralized scalar-extension frame: report the declaring scope. */
+		ZVAL_STR_COPY(EX_VAR(opline->result.var), EX(func)->common.scope->name);
 	} else if (Z_CE(EX(This))) {
 		ZVAL_STR_COPY(EX_VAR(opline->result.var), Z_CE(EX(This))->name);
 	} else {
@@ -9810,6 +9925,20 @@ ZEND_VM_HANDLER(202, ZEND_CALLABLE_CONVERT, UNUSED, UNUSED, NUM|CACHE_SLOT)
 	USE_OPLINE
 	zend_execute_data *call = EX(call);
 
+	if (UNEXPECTED(Z_TYPE(call->This) >= IS_FALSE && Z_TYPE(call->This) <= IS_ARRAY)) {
+		/* Closures cannot yet carry a by-value scalar receiver. */
+		SAVE_OPLINE();
+		zend_throw_error(NULL,
+			"Cannot create a first-class callable from a scalar extension method");
+		if (ZEND_CALL_INFO(call) & ZEND_CALL_RELEASE_THIS) {
+			zend_vm_release_call_frame_this(call);
+		}
+		EX(call) = call->prev_execute_data;
+		zend_vm_stack_free_call_frame(call);
+		ZVAL_UNDEF(EX_VAR(opline->result.var));
+		HANDLE_EXCEPTION();
+	}
+
 	if (opline->extended_value != (uint32_t)-1) {
 		zend_object *closure = CACHED_PTR(opline->extended_value);
 		if (closure) {
@@ -9833,7 +9962,7 @@ ZEND_VM_HANDLER(202, ZEND_CALLABLE_CONVERT, UNUSED, UNUSED, NUM|CACHE_SLOT)
 	}
 
 	if (ZEND_CALL_INFO(call) & ZEND_CALL_RELEASE_THIS) {
-		OBJ_RELEASE(Z_OBJ(call->This));
+		zend_vm_release_call_frame_this(call);
 	}
 
 	EX(call) = call->prev_execute_data;
