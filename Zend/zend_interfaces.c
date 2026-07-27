@@ -222,7 +222,16 @@ static zend_object_iterator *zend_user_it_get_iterator(zend_class_entry *ce, zva
 
 	zend_iterator_init((zend_object_iterator*)iterator);
 
-	ZVAL_OBJ_COPY(&iterator->it.data, Z_OBJ_P(object));
+	if (UNEXPECTED(Z_OBJCE_P(object)->ce_flags2 & ZEND_ACC2_VALUE_CLASS)) {
+		/* The loop iterates its own copy of the value: clone into
+		 * exclusively-held iterator state, so mutating next()/rewind()
+		 * write in place there (the exclusivity gate sees refcount 1) and
+		 * iteration never consumes the caller's iterator -- deterministic,
+		 * whether or not the value was shared. */
+		ZVAL_OBJ(&iterator->it.data, Z_OBJ_P(object)->handlers->clone_obj(Z_OBJ_P(object)));
+	} else {
+		ZVAL_OBJ_COPY(&iterator->it.data, Z_OBJ_P(object));
+	}
 	iterator->it.funcs = &zend_interface_iterator_funcs_iterator;
 	iterator->ce = Z_OBJCE_P(object);
 	ZVAL_UNDEF(&iterator->value);
@@ -656,6 +665,23 @@ ZEND_API void zend_register_interfaces(void)
 
 	zend_ce_iterator = register_class_Iterator(zend_ce_traversable);
 	zend_ce_iterator->interface_gets_implemented = zend_implement_iterator;
+
+	{
+		/* Iterator's advancing members are mutating requirements: permission
+		 * a struct implementation uses (foreach then advances its own copy
+		 * of the value) and every class implementation ignores -- class
+		 * methods are uncolored and satisfy colored requirements, so no
+		 * existing implementation changes. Set here rather than in the stub:
+		 * the marker is engine syntax the stub tooling need not parse. */
+		zend_function *fn = zend_hash_str_find_ptr(
+			&zend_ce_iterator->function_table, "next", sizeof("next")-1);
+		ZEND_ASSERT(fn != NULL);
+		fn->common.fn_flags2 |= ZEND_ACC2_MUTATING;
+		fn = zend_hash_str_find_ptr(
+			&zend_ce_iterator->function_table, "rewind", sizeof("rewind")-1);
+		ZEND_ASSERT(fn != NULL);
+		fn->common.fn_flags2 |= ZEND_ACC2_MUTATING;
+	}
 
 	zend_ce_serializable = register_class_Serializable();
 	zend_ce_serializable->interface_gets_implemented = zend_implement_serializable;
