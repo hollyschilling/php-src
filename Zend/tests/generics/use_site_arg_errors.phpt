@@ -1,11 +1,14 @@
 --TEST--
-Generics: param-dependent composite members of union lists stay rejected, nested included
+Generic methods: call-site type arguments must be concrete (params rejected even nested)
 --FILE--
 <?php
 class Box<T> {}
+class Seq<T> { public function map<U>(): void {} }
 class C<T> {
-    public function f(): Box<Box<T>>|Countable { return new Box(); }
+    public function go(Seq<T> $s): void {
+        $s->map<Box<T>>();
+    }
 }
 ?>
 --EXPECTF--
-Fatal error: Parameterized type Box<Box<T>> is not supported inside a composite type (in this version) in %s on line %d
+Fatal error: Cannot use type parameter T as a generic type argument (type arguments must be concrete in this version) in %s on line %d

@@ -207,6 +207,9 @@ struct _zend_executor_globals {
 	HashTable *zend_constants;	/* constants table */
 	/* lc mangled names currently being stamped (cycle guard); lazily allocated */
 	HashTable *generics_stamping;
+	/* Per-request generic METHOD instantiations, keyed "<ce ptr>:<lc mangled
+	 * method name>"; values are stamped zend_function clones (spike). */
+	HashTable *generics_method_cache;
 	/* Canonical CE-cache-capable copies of runtime-created type-name strings
 	 * (generic binding arguments, substituted composites), keyed by content;
 	 * lazily allocated, torn down at the tail of shutdown_executor. */

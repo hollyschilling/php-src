@@ -133,13 +133,17 @@ typedef struct _zend_file_context {
 	HashTable seen_symbols;
 } zend_file_context;
 
-/* A registered module definition: its FQMN and export surface. */
+/* A registered module definition: its FQMN, class export surface, and the
+ * named extensions it exports (activated in importers by `use module`). */
 typedef struct _zend_lang_module {
 	zend_string *fqmn;
-	zend_array  *exports; /* export alias -> canonical FQCN (string zvals) */
+	zend_array  *exports;    /* export alias -> canonical FQCN (string zvals) */
+	zend_array  *extensions; /* packed list of exported named-extension FQNs
+	                          * (original-case string zvals); injected into an
+	                          * importer's extension import set by `use module` */
 } zend_lang_module;
 
-ZEND_API zend_result zend_lang_module_register(zend_string *fqmn, zend_array *exports);
+ZEND_API zend_result zend_lang_module_register(zend_string *fqmn, zend_array *payload);
 ZEND_API zend_lang_module *zend_lang_module_get(zend_string *fqmn);
 void zend_lang_modules_shutdown(void);
 
@@ -474,6 +478,11 @@ typedef struct _zend_oparray_context {
 /* call sites need no separate ce_flags2 test.              |     |     |   */
 #define ZEND_ACC2_MUTATING               (1 << 2)  /*     |  X  |     |     */
 
+/* Generic METHOD prototype ("function map<U>"): set on the declaring
+ * op_array only; clones (class stamps, method instantiations) clear it so
+ * the shared generic_params are released exactly once.  |     |     |     */
+#define ZEND_ACC2_GENERIC_METHOD_TEMPLATE (1 << 4) /*     |  X  |     |     */
+
 /* Closure/arrow-fn op_array declared inside a generic    |     |     |     */
 /* template: its per-creation copies carry per-binding    |     |     |     */
 /* substituted signatures, so JIT machine code must not   |     |     |     */
@@ -657,6 +666,14 @@ struct _zend_op_array {
 	 * set; long closures and named functions see only the file-level set.
 	 * NULL if none. */
 	HashTable *surface_grants;
+
+	/* Generic METHOD support (spike; runtime-only, cleared at opcache
+	 * persist). generic_params: the declared method-level type parameters
+	 * on a template method ("function map<U>(...)"); generic_binding: the
+	 * bound method-level type arguments on a stamped instantiation clone.
+	 * (Forward-declared: the structs live in zend.h.) */
+	struct _zend_generic_params *generic_params;
+	struct _zend_generic_binding *generic_binding;
 
 	void *reserved[ZEND_MAX_RESERVED_RESOURCES];
 };
@@ -1148,6 +1165,10 @@ ZEND_API zend_string *zend_type_to_string(zend_type type);
 #define ZEND_FETCH_CLASS_ALLOW_NEARLY_LINKED 0x0800
 /* Skip the module acquisition gate (dynamic paths, inheritance does its own). */
 #define ZEND_FETCH_CLASS_NO_MODULE_GATE 0x1000
+/* ZEND_FETCH_CLASS_TYPE_PARAM index addresses the executing FUNCTION's
+ * method-level type parameters (function map<U>) instead of the scope
+ * class's. */
+#define ZEND_FETCH_CLASS_TYPE_PARAM_METHOD 0x2000
 
 /* These should not clash with ZEND_ACC_PPP_MASK and ZEND_ACC_PPP_SET_MASK */
 #define ZEND_PARAM_REF      (1<<3)

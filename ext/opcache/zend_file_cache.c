@@ -528,6 +528,7 @@ static void zend_file_cache_serialize_op_array(zend_op_array            *op_arra
 	if (op_array->scope) {
 		if (UNEXPECTED(zend_shared_alloc_get_xlat_entry(op_array->opcodes))) {
 			op_array->refcount = (uint32_t*)(intptr_t)-1;
+			SERIALIZE_PTR(op_array->generic_params);
 			SERIALIZE_PTR(op_array->static_variables);
 			SERIALIZE_PTR(op_array->literals);
 			SERIALIZE_PTR(op_array->opcodes);
@@ -718,6 +719,20 @@ static void zend_file_cache_serialize_op_array(zend_op_array            *op_arra
 		SERIALIZE_STR(op_array->function_name);
 		SERIALIZE_STR(op_array->filename);
 		SERIALIZE_STR(op_array->module_name);
+		if (op_array->generic_params) {
+			zend_generic_params *generic_params;
+
+			SERIALIZE_PTR(op_array->generic_params);
+			generic_params = op_array->generic_params;
+			UNSERIALIZE_PTR(generic_params);
+
+			for (uint32_t i = 0; i < generic_params->num_params; i++) {
+				SERIALIZE_STR(generic_params->params[i].name);
+				if (generic_params->params[i].bound_name) {
+					SERIALIZE_STR(generic_params->params[i].bound_name);
+				}
+			}
+		}
 		SERIALIZE_PTR(op_array->live_range);
 		SERIALIZE_PTR(op_array->scope);
 		SERIALIZE_STR(op_array->doc_comment);
@@ -1498,6 +1513,7 @@ static void zend_file_cache_unserialize_op_array(zend_op_array           *op_arr
 
 	if (op_array->refcount) {
 		op_array->refcount = NULL;
+		UNSERIALIZE_PTR(op_array->generic_params);
 		UNSERIALIZE_PTR(op_array->static_variables);
 		UNSERIALIZE_PTR(op_array->literals);
 		UNSERIALIZE_PTR(op_array->opcodes);
@@ -1653,6 +1669,15 @@ static void zend_file_cache_unserialize_op_array(zend_op_array           *op_arr
 		UNSERIALIZE_STR(op_array->function_name);
 		UNSERIALIZE_STR(op_array->filename);
 		UNSERIALIZE_STR(op_array->module_name);
+		if (op_array->generic_params) {
+			UNSERIALIZE_PTR(op_array->generic_params);
+			for (uint32_t i = 0; i < op_array->generic_params->num_params; i++) {
+				UNSERIALIZE_STR(op_array->generic_params->params[i].name);
+				if (op_array->generic_params->params[i].bound_name) {
+					UNSERIALIZE_STR(op_array->generic_params->params[i].bound_name);
+				}
+			}
+		}
 		UNSERIALIZE_PTR(op_array->live_range);
 		UNSERIALIZE_STR(op_array->doc_comment);
 		UNSERIALIZE_ATTRIBUTES(op_array->attributes);
