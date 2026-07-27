@@ -8133,8 +8133,15 @@ static zend_type zend_compile_single_typename(zend_ast *ast)
 					&& !(CG(active_class_entry)->ce_flags & ZEND_ACC_ANON_CLASS);
 
 				if (fetch_type == ZEND_FETCH_CLASS_SELF) {
-					/* Scope might be unknown for unbound closures and traits */
-					if (substitute_self_parent) {
+					/* Scope might be unknown for unbound closures and traits.
+					 * In a generic TEMPLATE, "self" denotes the current
+					 * INSTANTIATION, not the template: baking the template's
+					 * name would make every clone's check reject its own
+					 * instances (instantiations are not instanceof the raw
+					 * template). Keep it symbolic, resolved against the
+					 * executing scope per clone -- the trait mechanism. */
+					if (substitute_self_parent
+					 && !CG(active_class_entry)->generic_params) {
 						class_name = CG(active_class_entry)->name;
 						ZEND_ASSERT(class_name && "must know class name when resolving self type at compile time");
 					}
@@ -13223,7 +13230,15 @@ static void zend_compile_class_name(znode *result, const zend_ast *ast) /* {{{ *
 		return;
 	}
 
-	if (zend_try_compile_const_expr_resolve_class_name(&result->u.constant, class_ast)) {
+	if (!(class_ast->kind == ZEND_AST_ZVAL
+			&& zend_get_class_fetch_type_ast((zend_ast *) class_ast) == ZEND_FETCH_CLASS_SELF
+			&& CG(active_class_entry)
+			&& CG(active_class_entry)->generic_params)
+	 && zend_try_compile_const_expr_resolve_class_name(&result->u.constant, class_ast)) {
+		/* self::class in a generic template stays a runtime fetch: it names
+		 * the current INSTANTIATION ("Vec<int>"), which only the executing
+		 * scope knows. (Genuine constant-expression contexts still fold to
+		 * the template name -- a constant has to be a constant.) */
 		result->op_type = IS_CONST;
 		return;
 	}
