@@ -634,6 +634,11 @@ const T_SR = UNKNOWN;
 const T_GENERIC_OPEN = UNKNOWN;
 /**
  * @var int
+ * @cvalue T_TURBOFISH
+ */
+const T_TURBOFISH = UNKNOWN;
+/**
+ * @var int
  * @cvalue T_INC
  */
 const T_INC = UNKNOWN;

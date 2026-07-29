@@ -45,7 +45,12 @@ static YYSIZE_T zend_yytnamerr(char*, const char*);
 %define api.pure full
 %define api.value.type {zend_parser_stack_elem}
 %define parse.error verbose
-%expect 0
+/* The single expected shift/reduce conflict is the deliberate commitment of
+ * a plain '<' after 'new NAME' / 'instanceof NAME' to a generic
+ * type-argument list (shift) over completing the class reference and
+ * reading '<' as a comparison (reduce). Shifting is the intended
+ * resolution; see class_name_reference. */
+%expect 1
 
 %destructor { zend_ast_destroy($$); } <ast>
 %destructor { if ($$) zend_string_release_ex($$, 0); } <str>
@@ -215,6 +220,7 @@ static YYSIZE_T zend_yytnamerr(char*, const char*);
 %token T_SL "'<<'"
 %token T_SR "'>>'"
 %token T_GENERIC_OPEN "generic '<'"
+%token T_TURBOFISH "'::<'"
 %token T_INC "'++'"
 %token T_DEC "'--'"
 %token T_INT_CAST    "'(int)'"
@@ -291,6 +297,7 @@ static YYSIZE_T zend_yytnamerr(char*, const char*);
 %type <ast> inline_function union_type_element union_type intersection_type
 %type <ast> generic_params generic_param_list generic_param
 %type <ast> generic_type_args generic_arg_list generic_arg
+%type <ast> generic_arg_list_closed generic_arg_list_fused generic_arg_fused_tail
 %type <ast> attributed_statement attributed_top_statement attributed_class_statement attributed_parameter
 %type <ast> attribute_decl attribute attributes attribute_group namespace_declaration_name
 %type <ast> match match_arm_list non_empty_match_arm_list match_arm match_arm_cond_list
@@ -729,7 +736,32 @@ generic_open:
 ;
 
 generic_type_args:
-		generic_open generic_arg_list '>'	{ $$ = $2; }
+		generic_open generic_arg_list_closed	{ $$ = $2; }
+;
+
+/* An argument list together with its closing '>'. Adjacent closes of nested
+ * lists reach us as one T_SR ('>>') token; rather than splitting it in the
+ * lexer with fragile depth state, the fused alternatives below consume T_SR
+ * as two closes at the only place it can occur: after the final argument,
+ * when that argument is itself a nested instantiation. The fused forms
+ * compose, so '>>>' (T_SR '>') and deeper nestings fall out recursively. */
+generic_arg_list_closed:
+		generic_arg_list '>'		{ $$ = $1; }
+	|	generic_arg_list_fused		{ $$ = $1; }
+;
+
+generic_arg_list_fused:
+		generic_arg_fused_tail
+			{ $$ = zend_ast_create_list(1, ZEND_AST_GENERIC_ARG_LIST, $1); }
+	|	generic_arg_list ',' generic_arg_fused_tail
+			{ $$ = zend_ast_list_add($1, $3); }
+;
+
+/* Final argument whose own close and the enclosing list's close were lexed
+ * as one T_SR: consuming it closes both levels. */
+generic_arg_fused_tail:
+		name generic_open generic_arg_list T_SR
+			{ $$ = zend_ast_create(ZEND_AST_GENERIC_TYPE, $1, $3); }
 ;
 
 generic_arg_list:
@@ -897,7 +929,7 @@ implements_list:
  * T_GENERIC_OPEN (e.g. pack spreads, or a following "implements"). */
 inheritance_class_name:
 		class_name					{ $$ = $1; }
-	|	name '<' generic_arg_list '>'
+	|	name '<' generic_arg_list_closed
 			{ $$ = zend_ast_create(ZEND_AST_GENERIC_TYPE, $1, $3); }
 ;
 
@@ -1286,9 +1318,11 @@ surface_modifier:
 		T_SURFACE '[' surface_name_list ']' { $$ = $3; }
 ;
 
+/* Trait-use sites live in class bodies where no expression reading exists,
+ * so like inheritance headers they accept a plain '<' for generic args. */
 class_name_list:
-		class_name { $$ = zend_ast_create_list(1, ZEND_AST_NAME_LIST, $1); }
-	|	class_name_list ',' class_name { $$ = zend_ast_list_add($1, $3); }
+		inheritance_class_name { $$ = zend_ast_create_list(1, ZEND_AST_NAME_LIST, $1); }
+	|	class_name_list ',' inheritance_class_name { $$ = zend_ast_list_add($1, $3); }
 ;
 
 trait_adaptations:
@@ -1786,12 +1820,21 @@ class_name:
 			{ zval zv; ZVAL_INTERNED_STR(&zv, ZSTR_KNOWN(ZEND_STR_STATIC));
 			  $$ = zend_ast_create_zval_ex(&zv, ZEND_NAME_NOT_FQ); }
 	|	name { $$ = $1; }
-	|	name T_GENERIC_OPEN generic_arg_list '>'
+	|	name T_GENERIC_OPEN generic_arg_list_closed
+			{ $$ = zend_ast_create(ZEND_AST_GENERIC_TYPE, $1, $3); }
+	|	name T_TURBOFISH generic_arg_list_closed
 			{ $$ = zend_ast_create(ZEND_AST_GENERIC_TYPE, $1, $3); }
 ;
 
+/* After 'new' and 'instanceof' a plain '<' following a class name is
+ * COMMITTED to opening a type-argument list, independent of the lexer's
+ * bounded lookahead: the shift wins over reducing the bare name. The
+ * sacrificed reading -- comparing a fresh instance or an instanceof result
+ * against a bare constant, '(new Foo) < CONST' -- becomes a parse error. */
 class_name_reference:
 		class_name		{ $$ = $1; }
+	|	name '<' generic_arg_list_closed
+			{ $$ = zend_ast_create(ZEND_AST_GENERIC_TYPE, $1, $3); }
 	|	new_variable	{ $$ = $1; }
 	|	'(' expr ')'	{ $$ = $2; }
 ;

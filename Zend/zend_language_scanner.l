@@ -194,7 +194,6 @@ void startup_scanner(void)
 	zend_stack_init(&SCNG(nest_location_stack), sizeof(zend_nest_location));
 	zend_ptr_stack_init(&SCNG(heredoc_label_stack));
 	SCNG(heredoc_scan_ahead) = 0;
-	SCNG(generic_depth) = 0;
 }
 
 static void heredoc_label_dtor(zend_heredoc_label *heredoc_label) {
@@ -204,18 +203,31 @@ static void heredoc_label_dtor(zend_heredoc_label *heredoc_label) {
 #define ZEND_GENERIC_SCAN_MAX 1024
 
 /* Bounded lookahead deciding whether a lone '<' opens a generic type-argument
- * list. `cursor` points just past the '<'. The region must have the exact
- * shape of a static type-argument list -- optionally \-qualified type names,
- * commas, whitespace and balanced nested <...> -- closed by the matching '>'
- * whose follow character can plausibly continue a generic type reference.
- * Variables, literals and operators reject immediately, so comparisons are
- * left untouched; the token shapes this claims (A<B>$x, A<B,C>(...), ...)
- * are chained-comparison parse errors in current PHP. */
+ * list in expression position. `cursor` points just past the '<'.
+ *
+ * Declaration headers and type positions accept a plain '<' at the grammar
+ * level, and 'new'/'instanceof' commit it outright, so this heuristic only
+ * matters where a comparison reading also exists. Its contract is
+ * soundness-first: it claims T_GENERIC_OPEN only for token shapes that are
+ * parse errors in generics-free PHP, so no valid program changes meaning.
+ *
+ * The region must have the exact shape of a static type-argument list --
+ * optionally \-qualified type names, commas, whitespace and balanced nested
+ * <...> -- closed by the matching '>', and then:
+ *   - followed by '::': safe even with commas, since a '>' directly
+ *     followed by '::' cannot continue any expression ('Foo<K, V>::make()');
+ *   - followed by '(' with NO top-level comma: without the claim the text
+ *     is a chained-comparison parse error because comparison operators are
+ *     non-associative ('$o->m<T>($x)'). With a top-level comma the
+ *     unclaimed reading can be a valid argument list ('f(A<B, C>(5))'), so
+ *     we decline; the explicit '::<' form covers that spelling.
+ * Everything else declines to a plain '<'. */
 static bool zend_scan_is_generic_open(const unsigned char *cursor, const unsigned char *limit)
 {
 	const unsigned char *end = cursor + ZEND_GENERIC_SCAN_MAX < limit
 		? cursor + ZEND_GENERIC_SCAN_MAX : limit;
 	uint32_t depth = 1;
+	bool top_level_comma = false;
 	enum { EXPECT_ELEM, IN_NAME, AFTER_ELEM } state = EXPECT_ELEM;
 
 	while (cursor < end && depth > 0) {
@@ -243,6 +255,9 @@ static bool zend_scan_is_generic_open(const unsigned char *cursor, const unsigne
 			if (state == EXPECT_ELEM) {
 				return false;
 			}
+			if (depth == 1) {
+				top_level_comma = true;
+			}
 			state = EXPECT_ELEM;
 		} else if (c == '<') {
 			if (state == EXPECT_ELEM) {
@@ -264,22 +279,17 @@ static bool zend_scan_is_generic_open(const unsigned char *cursor, const unsigne
 		return false;
 	}
 
-	/* Follow check: the closed list must be followed by a character that can
-	 * continue a generic type reference (call parens, ::, a variable, a
-	 * return-type body, list glue or a union/intersection separator). */
+	/* Follow check: see the contract above. */
 	while (cursor < limit && (*cursor == ' ' || *cursor == '\t' || *cursor == '\r' || *cursor == '\n')) {
 		cursor++;
 	}
 	if (cursor >= limit) {
 		return false;
 	}
-	switch (*cursor) {
-		case '(': case '$': case ':': case '{': case '>':
-		case ',': case ')': case ';': case '=': case '|': case '&':
-			return true;
-		default:
-			return false;
+	if (*cursor == ':') {
+		return cursor + 1 < limit && cursor[1] == ':';
 	}
+	return *cursor == '(' && !top_level_comma;
 }
 
 void shutdown_scanner(void)
@@ -309,9 +319,6 @@ ZEND_API void zend_save_lexical_state(zend_lex_state *lex_state)
 
 	lex_state->nest_location_stack = SCNG(nest_location_stack);
 	zend_stack_init(&SCNG(nest_location_stack), sizeof(zend_nest_location));
-
-	lex_state->generic_depth = SCNG(generic_depth);
-	SCNG(generic_depth) = 0;
 
 	lex_state->heredoc_label_stack = SCNG(heredoc_label_stack);
 	zend_ptr_stack_init(&SCNG(heredoc_label_stack));
@@ -351,8 +358,6 @@ ZEND_API void zend_restore_lexical_state(zend_lex_state *lex_state)
 
 	zend_stack_destroy(&SCNG(nest_location_stack));
 	SCNG(nest_location_stack) = lex_state->nest_location_stack;
-
-	SCNG(generic_depth) = lex_state->generic_depth;
 
 	zend_ptr_stack_clean(&SCNG(heredoc_label_stack), (void (*)(void *)) &heredoc_label_dtor, 1);
 	zend_ptr_stack_destroy(&SCNG(heredoc_label_stack));
@@ -2111,28 +2116,22 @@ OPTIONAL_WHITESPACE_OR_COMMENTS ({WHITESPACE}|{MULTI_LINE_COMMENT}|{SINGLE_LINE_
 }
 
 <ST_IN_SCRIPTING>">>" {
-	if (SCNG(generic_depth) > 0) {
-		/* '>>' closes two nested generic argument lists; split it. */
-		yyless(1);
-		SCNG(generic_depth)--;
-		RETURN_TOKEN('>');
-	}
+	/* A '>>' that closes two nested generic argument lists is consumed as
+	 * T_SR by the parser's fused-close productions; no lexer state needed. */
 	RETURN_TOKEN(T_SR);
+}
+
+<ST_IN_SCRIPTING>"::<" {
+	/* Turbofish: the explicit generic-argument form. '<' cannot follow '::'
+	 * anywhere in generics-free PHP, so this token is unconditionally safe. */
+	RETURN_TOKEN(T_TURBOFISH);
 }
 
 <ST_IN_SCRIPTING>"<" {
 	if (zend_scan_is_generic_open((const unsigned char *) YYCURSOR, (const unsigned char *) YYLIMIT)) {
-		SCNG(generic_depth)++;
 		RETURN_TOKEN(T_GENERIC_OPEN);
 	}
 	RETURN_TOKEN('<');
-}
-
-<ST_IN_SCRIPTING>">" {
-	if (SCNG(generic_depth) > 0) {
-		SCNG(generic_depth)--;
-	}
-	RETURN_TOKEN('>');
 }
 
 <ST_IN_SCRIPTING>"&"{OPTIONAL_WHITESPACE_OR_COMMENTS}("$"|"...") {
