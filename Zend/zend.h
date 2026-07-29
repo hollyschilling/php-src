@@ -150,7 +150,9 @@ C23_ENUM(zend_class_type, uint8_t) {
 
 /* Type parameters of a generic class template (ZEND_ACC2_GENERIC_TEMPLATE).
  * Names are interned; bound_name is the resolved FQ class/interface name or
- * NULL, with bound_kind a ZEND_GENERIC_BOUND_* constant giving the declared
+ * NULL, with bound_kind a ZEND_GENERIC_BOUND_* constant recording that a
+ * ':' bound was declared (the relation is inferred from the resolved bound;
+ * there is no declared
  * relation (implements vs extends), validated at stamp time. */
 typedef struct _zend_generic_param {
 	zend_string *name;

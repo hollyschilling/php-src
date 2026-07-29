@@ -9,7 +9,7 @@ class Plain {}
 interface Extra {}
 class ME implements Marked, Extra {}
 
-class Keep<T implements Marked> { public function __construct() {} }
+class Keep<T: Marked> { public function __construct() {} }
 
 // union argument: every member satisfies the bound
 var_dump((new Keep<M1|M2>())::class);

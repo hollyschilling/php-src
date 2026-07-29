@@ -8,7 +8,7 @@ opcache.enable_cli=1
 opcache.protect_memory=1
 --FILE--
 <?php
-class Vec<T implements Countable> {
+class Vec<T: Countable> {
     private array $items = [];
     public function push(T $item): void { $this->items[] = $item; }
     public function pop(): ?T { return array_pop($this->items); }
@@ -25,7 +25,7 @@ interface Collection<T> { public function add(T $item): void; }
 class BagCol implements Collection<Bag> {
     public function add(Bag $item): void {}
 }
-class Registry<T extends Exception> {
+class Registry<T: Exception> {
     public function make(string $m): T { return new T($m); }
     public function name(): string { return T::class; }
 }
