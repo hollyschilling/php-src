@@ -7889,12 +7889,13 @@ static zend_string *zend_generic_dnf_member_name(zend_ast *ast, bool in_intersec
 	if (ast->kind == ZEND_AST_GENERIC_TYPE) {
 		smart_str tmp = {0};
 		zend_append_generic_type_ref(&tmp, ast, /* allow_params */ false,
-			/* allow_nested_params */ false, /* allow_spread */ false, NULL);
+			/* allow_nested_params */ false, /* allow_spread */ false, NULL, NULL);
 		return smart_str_extract(&tmp);
 	}
 	zend_string *name = zend_ast_get_str(ast);
 	if (ast->attr == ZEND_NAME_NOT_FQ) {
-		if (zend_is_active_template_param(name)) {
+		if (zend_is_active_template_param(name)
+				|| zend_active_method_type_param(name)) {
 			zend_error_noreturn(E_COMPILE_ERROR,
 				"Type parameter %s cannot be a member of a composite type "
 				"argument (composite arguments must be concrete in this version)",
