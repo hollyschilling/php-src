@@ -2,7 +2,7 @@
 Generics M3: new T(), T::class, instanceof T, T::CONST and T::method() resolve via the scope binding
 --FILE--
 <?php
-class Registry<T extends Exception> {
+class Registry<T: Exception> {
     public function make(string $msg): T { return new T($msg); }
     public function name(): string { return T::class; }
     public function check(object $o): bool { return $o instanceof T; }

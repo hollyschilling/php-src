@@ -6,7 +6,7 @@ class Vec<T> {
     public function push(T $v): void {}
 }
 class MyVec<T> extends Vec<T> {}
-class Pair<...Tp implements Countable, R> {}
+class Pair<...Tp: Countable, R> {}
 
 // variadic flag per parameter
 $r = new ReflectionClass('Pair');
@@ -30,22 +30,18 @@ var_dump($pi->getGenericTypeArguments());
 --EXPECT--
 array(2) {
   [0]=>
-  array(4) {
+  array(3) {
     ["name"]=>
     string(2) "Tp"
-    ["boundKind"]=>
-    string(10) "implements"
     ["bound"]=>
     string(9) "Countable"
     ["variadic"]=>
     bool(true)
   }
   [1]=>
-  array(4) {
+  array(3) {
     ["name"]=>
     string(1) "R"
-    ["boundKind"]=>
-    NULL
     ["bound"]=>
     NULL
     ["variadic"]=>

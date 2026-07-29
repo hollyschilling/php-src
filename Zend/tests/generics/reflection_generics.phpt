@@ -3,7 +3,7 @@ Generics: ReflectionClass introspection of templates, instantiations and binding
 --FILE--
 <?php
 interface Collection<T> { public function add(T $item): void; }
-class Vec<T implements Countable> implements Collection<T> {
+class Vec<T: Countable> implements Collection<T> {
     public function add(T $item): void {}
 }
 class Bag implements Countable { public function count(): int { return 1; } }
@@ -42,11 +42,9 @@ bool(false)
 bool(false)
 array(1) {
   [0]=>
-  array(4) {
+  array(3) {
     ["name"]=>
     string(1) "T"
-    ["boundKind"]=>
-    string(10) "implements"
     ["bound"]=>
     string(9) "Countable"
     ["variadic"]=>

@@ -10123,9 +10123,23 @@ static void zend_compile_generic_params(zend_class_entry *ce, const zend_ast *pa
 		generic_params->params[i].name = zend_new_interned_string(zend_string_copy(param_name));
 		generic_params->params[i].bound_kind = param_ast->attr & ZEND_GENERIC_BOUND_MASK;
 		if (bound_ast) {
-			zend_string *bound_name = zend_resolve_const_class_name_reference(bound_ast,
-				param_ast->attr == ZEND_GENERIC_BOUND_EXTENDS
-					? "a generic bound class name" : "a generic bound interface name");
+			/* 'T: <type>' -- the bound is canonicalized with the same
+			 * machinery as type arguments (FQ names, canonical scalars,
+			 * sorted deduped composites), stored as its canonical string. */
+			zend_string *bound_name;
+			if (bound_ast->kind == ZEND_AST_TYPE_UNION
+					|| bound_ast->kind == ZEND_AST_TYPE_INTERSECTION) {
+				smart_str buf = {0};
+				zend_append_generic_dnf_arg(&buf, bound_ast);
+				bound_name = smart_str_extract(&buf);
+			} else {
+				bound_name = zend_generic_dnf_member_name(bound_ast,
+					/* in_intersection */ false);
+				if (zend_string_equals_literal_ci(bound_name, "null")) {
+					zend_error_noreturn(E_COMPILE_ERROR,
+						"Type null cannot be used as a generic bound on its own");
+				}
+			}
 			generic_params->params[i].bound_name = zend_new_interned_string(bound_name);
 		} else {
 			generic_params->params[i].bound_name = NULL;

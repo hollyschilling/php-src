@@ -1090,8 +1090,7 @@ ZEND_API zend_string *zend_type_to_string(zend_type type);
 
 /* Bound kind on a ZEND_AST_GENERIC_PARAM node (attr) and zend_generic_param */
 #define ZEND_GENERIC_BOUND_NONE       0
-#define ZEND_GENERIC_BOUND_IMPLEMENTS 1
-#define ZEND_GENERIC_BOUND_EXTENDS    2
+#define ZEND_GENERIC_BOUND_TYPE       1
 #define ZEND_GENERIC_BOUND_MASK       0x3
 /* The parameter is a pack ("<...Ts>"); AST attr only, stored as
  * zend_generic_params.pack_index. */

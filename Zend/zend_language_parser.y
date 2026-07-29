@@ -291,6 +291,7 @@ static YYSIZE_T zend_yytnamerr(char*, const char*);
 %type <ast> generic_params generic_param_list generic_param
 %type <ast> generic_type_args generic_arg_list generic_arg
 %type <ast> generic_arg_list_closed generic_arg_list_fused generic_arg_fused_tail
+%type <ast> generic_bound generic_param_fused
 %type <ast> generic_arg_member generic_arg_union generic_arg_union_element
 %type <ast> generic_arg_intersection generic_arg_fused_inst
 %type <ast> attributed_statement attributed_top_statement attributed_class_statement attributed_parameter
@@ -625,6 +626,10 @@ class_declaration_statement:
 generic_params:
 		%empty							{ $$ = NULL; }
 	|	generic_open generic_param_list '>'		{ $$ = $2; }
+	|	generic_open generic_param_fused
+			{ $$ = zend_ast_create_list(1, ZEND_AST_GENERIC_PARAM_LIST, $2); }
+	|	generic_open generic_param_list ',' generic_param_fused
+			{ $$ = zend_ast_list_add($2, $4); }
 ;
 
 generic_open:
@@ -728,20 +733,40 @@ generic_param_list:
 			{ $$ = zend_ast_list_add($1, $3); }
 ;
 
+/* A bound is written 'T: <type>' where the type may be a class/interface
+ * name (possibly an instantiation), a scalar, 'array', or a composite (DNF)
+ * over those members -- the same grammar as type arguments. The relation is
+ * inferred from what the bound resolves to; there is no declared
+ * implements/extends distinction. */
 generic_param:
 		T_STRING						{ $$ = zend_ast_create(ZEND_AST_GENERIC_PARAM, $1, NULL); }
-	|	T_STRING T_IMPLEMENTS name
-			{ $$ = zend_ast_create_ex(ZEND_AST_GENERIC_PARAM, ZEND_GENERIC_BOUND_IMPLEMENTS, $1, $3); }
-	|	T_STRING T_EXTENDS name
-			{ $$ = zend_ast_create_ex(ZEND_AST_GENERIC_PARAM, ZEND_GENERIC_BOUND_EXTENDS, $1, $3); }
+	|	T_STRING ':' generic_bound
+			{ $$ = zend_ast_create_ex(ZEND_AST_GENERIC_PARAM, ZEND_GENERIC_BOUND_TYPE, $1, $3); }
 	|	T_ELLIPSIS T_STRING
 			{ $$ = zend_ast_create_ex(ZEND_AST_GENERIC_PARAM, ZEND_GENERIC_PARAM_PACK, $2, NULL); }
-	|	T_ELLIPSIS T_STRING T_IMPLEMENTS name
+	|	T_ELLIPSIS T_STRING ':' generic_bound
 			{ $$ = zend_ast_create_ex(ZEND_AST_GENERIC_PARAM,
-				  ZEND_GENERIC_BOUND_IMPLEMENTS | ZEND_GENERIC_PARAM_PACK, $2, $4); }
-	|	T_ELLIPSIS T_STRING T_EXTENDS name
+				  ZEND_GENERIC_BOUND_TYPE | ZEND_GENERIC_PARAM_PACK, $2, $4); }
+;
+
+generic_bound:
+		generic_arg_member					{ $$ = $1; }
+	|	generic_arg_union					{ $$ = $1; }
+	|	generic_arg_intersection			{ $$ = $1; }
+	|	'?' generic_arg_member
+			{ $$ = zend_ast_create_list(2, ZEND_AST_TYPE_UNION, $2,
+				  zend_ast_create_ex(ZEND_AST_TYPE, IS_NULL)); }
+;
+
+/* Final parameter whose bound ends in a nested instantiation whose close
+ * fused with the parameter list's own close ('<K: Box<int>>' lexes the
+ * trailing '>>' as T_SR). */
+generic_param_fused:
+		T_STRING ':' generic_arg_fused_tail
+			{ $$ = zend_ast_create_ex(ZEND_AST_GENERIC_PARAM, ZEND_GENERIC_BOUND_TYPE, $1, $3); }
+	|	T_ELLIPSIS T_STRING ':' generic_arg_fused_tail
 			{ $$ = zend_ast_create_ex(ZEND_AST_GENERIC_PARAM,
-				  ZEND_GENERIC_BOUND_EXTENDS | ZEND_GENERIC_PARAM_PACK, $2, $4); }
+				  ZEND_GENERIC_BOUND_TYPE | ZEND_GENERIC_PARAM_PACK, $2, $4); }
 ;
 
 class_modifiers:

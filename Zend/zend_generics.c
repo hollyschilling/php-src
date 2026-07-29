@@ -897,49 +897,228 @@ static void zend_generics_rebuild_dispatch_ptrs(
 	}
 }
 
-/* Does a composite argument satisfy a class/interface bound?
- * Union: every member must satisfy; intersection: one member suffices;
- * any builtin member (scalar, array, null) fails. Returns 1 (yes), 0 (no),
- * -1 (lookup error thrown). */
-static int zend_generics_arg_satisfies_bound(
-		const zend_type arg, zend_class_entry *bound_ce, uint32_t lookup_flags,
+static bool zend_generics_build_composite_arg(
+		const zend_generic_name_slice *slice, zend_type *out);
+
+/* ---- Bound satisfaction (the 'T: <type>' form) -------------------------
+ * A bound is stored as its canonical type string ("Countable",
+ * "int|string", "A|(B&C)", "array"). An argument satisfies a bound when
+ * every value the argument admits is admitted by the bound: union arguments
+ * need every member to satisfy, intersection arguments satisfy through any
+ * of their parts, builtin members satisfy only builtin bound members. */
+
+/* Is concrete class `ce` a subtype of one bound member (a class/interface
+ * name, or an intersection list requiring all parts)? 1/0; -1 with an
+ * exception on lookup failure. */
+static int zend_generics_class_satisfies_bound_member(
+		zend_class_entry *ce, const zend_type bm, uint32_t lookup_flags,
 		const zend_string *display_name, const zend_generic_param *param)
 {
-	if (ZEND_TYPE_HAS_LIST(arg)) {
-		bool is_inter = ZEND_TYPE_IS_INTERSECTION(arg);
-		if (ZEND_TYPE_PURE_MASK(arg) != 0 && !is_inter) {
-			return 0;
-		}
-		int any = 0;
-		const zend_type *list_type;
-		ZEND_TYPE_LIST_FOREACH(ZEND_TYPE_LIST(arg), list_type) {
-			int r = zend_generics_arg_satisfies_bound(*list_type, bound_ce,
-				lookup_flags, display_name, param);
-			if (r < 0) {
+	if (ZEND_TYPE_HAS_LIST(bm)) {
+		const zend_type *pt;
+		ZEND_TYPE_LIST_FOREACH(ZEND_TYPE_LIST(bm), pt) {
+			zend_class_entry *pce = zend_lookup_class_ex(ZEND_TYPE_NAME(*pt), NULL, lookup_flags);
+			if (!pce) {
+				if (!EG(exception)) {
+					zend_throw_error(NULL,
+						"Cannot stamp %s: bound class %s of type parameter %s was not found",
+						ZSTR_VAL(display_name), ZSTR_VAL(ZEND_TYPE_NAME(*pt)),
+						ZSTR_VAL(param->name));
+				}
 				return -1;
 			}
-			if (is_inter) {
-				any |= r;
-			} else if (r != 1) {
+			if (!instanceof_function(ce, pce)) {
 				return 0;
 			}
 		} ZEND_TYPE_LIST_FOREACH_END();
-		return is_inter ? any : 1;
+		return 1;
 	}
-	if (ZEND_TYPE_PURE_MASK(arg) != 0 || !ZEND_TYPE_HAS_NAME(arg)) {
-		return 0;
-	}
-	zend_class_entry *ce = zend_lookup_class_ex(ZEND_TYPE_NAME(arg), NULL, lookup_flags);
-	if (!ce) {
+	zend_class_entry *bce = zend_lookup_class_ex(ZEND_TYPE_NAME(bm), NULL, lookup_flags);
+	if (!bce) {
 		if (!EG(exception)) {
 			zend_throw_error(NULL,
-				"Cannot stamp %s: class %s for type parameter %s was not found",
-				ZSTR_VAL(display_name), ZSTR_VAL(ZEND_TYPE_NAME(arg)),
+				"Cannot stamp %s: bound class %s of type parameter %s was not found",
+				ZSTR_VAL(display_name), ZSTR_VAL(ZEND_TYPE_NAME(bm)),
 				ZSTR_VAL(param->name));
 		}
 		return -1;
 	}
-	return instanceof_function(ce, bound_ce) ? 1 : 0;
+	return instanceof_function(ce, bce) ? 1 : 0;
+}
+
+/* Collect the bound's class-shaped members (names and intersection lists)
+ * into `members`; builtin members live in the bound's pure mask. */
+static uint32_t zend_generics_bound_class_members(
+		const zend_type bound, const zend_type **members, uint32_t cap)
+{
+	if (ZEND_TYPE_HAS_LIST(bound) && !ZEND_TYPE_IS_INTERSECTION(bound)) {
+		uint32_t n = 0;
+		const zend_type *el;
+		ZEND_TYPE_LIST_FOREACH(ZEND_TYPE_LIST(bound), el) {
+			ZEND_ASSERT(n < cap);
+			members[n++] = el;
+		} ZEND_TYPE_LIST_FOREACH_END();
+		return n;
+	}
+	if (ZEND_TYPE_HAS_NAME(bound)
+			|| (ZEND_TYPE_HAS_LIST(bound) && ZEND_TYPE_IS_INTERSECTION(bound))) {
+		/* borrow the caller's storage for the single member */
+		return (uint32_t) -1; /* sentinel: the bound itself is the one member */
+	}
+	return 0;
+}
+
+/* One class-shaped argument atom (a class name, or an intersection list)
+ * against the whole bound. */
+static int zend_generics_atom_satisfies_bound(
+		const zend_type atom, const zend_type bound, uint32_t lookup_flags,
+		const zend_string *display_name, const zend_generic_param *param)
+{
+	const zend_type *members[ZEND_GENERICS_MAX_ARGS];
+	uint32_t num_members = zend_generics_bound_class_members(bound, members, ZEND_GENERICS_MAX_ARGS);
+	const zend_type *single[1] = { &bound };
+	const zend_type **mem = members;
+	if (num_members == (uint32_t) -1) {
+		mem = single;
+		num_members = 1;
+	}
+
+	if (ZEND_TYPE_HAS_LIST(atom) && ZEND_TYPE_IS_INTERSECTION(atom)) {
+		/* A1&A2 <: bound iff some bound member accepts the intersection:
+		 * a class member is satisfied by ANY part, an intersection member
+		 * needs every part satisfied by SOME argument part. */
+		zend_class_entry *parts[ZEND_GENERICS_MAX_ARGS];
+		uint32_t num_parts = 0;
+		const zend_type *ap;
+		ZEND_TYPE_LIST_FOREACH(ZEND_TYPE_LIST(atom), ap) {
+			zend_class_entry *pce = zend_lookup_class_ex(ZEND_TYPE_NAME(*ap), NULL, lookup_flags);
+			if (!pce) {
+				if (!EG(exception)) {
+					zend_throw_error(NULL,
+						"Cannot stamp %s: class %s for type parameter %s was not found",
+						ZSTR_VAL(display_name), ZSTR_VAL(ZEND_TYPE_NAME(*ap)),
+						ZSTR_VAL(param->name));
+				}
+				return -1;
+			}
+			ZEND_ASSERT(num_parts < ZEND_GENERICS_MAX_ARGS);
+			parts[num_parts++] = pce;
+		} ZEND_TYPE_LIST_FOREACH_END();
+
+		for (uint32_t m = 0; m < num_members; m++) {
+			const zend_type bm = *mem[m];
+			bool ok;
+			if (ZEND_TYPE_HAS_LIST(bm)) {
+				ok = true;
+				const zend_type *bp;
+				ZEND_TYPE_LIST_FOREACH(ZEND_TYPE_LIST(bm), bp) {
+					zend_class_entry *bce = zend_lookup_class_ex(ZEND_TYPE_NAME(*bp), NULL, lookup_flags);
+					if (!bce) {
+						if (!EG(exception)) {
+							zend_throw_error(NULL,
+								"Cannot stamp %s: bound class %s of type parameter %s was not found",
+								ZSTR_VAL(display_name), ZSTR_VAL(ZEND_TYPE_NAME(*bp)),
+								ZSTR_VAL(param->name));
+						}
+						return -1;
+					}
+					bool any = false;
+					for (uint32_t a = 0; a < num_parts; a++) {
+						if (instanceof_function(parts[a], bce)) { any = true; break; }
+					}
+					if (!any) { ok = false; break; }
+				} ZEND_TYPE_LIST_FOREACH_END();
+			} else {
+				zend_class_entry *bce = zend_lookup_class_ex(ZEND_TYPE_NAME(bm), NULL, lookup_flags);
+				if (!bce) {
+					if (!EG(exception)) {
+						zend_throw_error(NULL,
+							"Cannot stamp %s: bound class %s of type parameter %s was not found",
+							ZSTR_VAL(display_name), ZSTR_VAL(ZEND_TYPE_NAME(bm)),
+							ZSTR_VAL(param->name));
+					}
+					return -1;
+				}
+				ok = false;
+				for (uint32_t a = 0; a < num_parts; a++) {
+					if (instanceof_function(parts[a], bce)) { ok = true; break; }
+				}
+			}
+			if (ok) {
+				return 1;
+			}
+		}
+		return 0;
+	}
+
+	/* single class atom */
+	zend_class_entry *ce = zend_lookup_class_ex(ZEND_TYPE_NAME(atom), NULL, lookup_flags);
+	if (!ce) {
+		if (!EG(exception)) {
+			zend_throw_error(NULL,
+				"Cannot stamp %s: class %s for type parameter %s was not found",
+				ZSTR_VAL(display_name), ZSTR_VAL(ZEND_TYPE_NAME(atom)),
+				ZSTR_VAL(param->name));
+		}
+		return -1;
+	}
+	for (uint32_t m = 0; m < num_members; m++) {
+		int r = zend_generics_class_satisfies_bound_member(ce, *mem[m],
+			lookup_flags, display_name, param);
+		if (r != 0) {
+			return r;
+		}
+	}
+	return 0;
+}
+
+/* Whole argument against the whole bound. */
+static int zend_generics_arg_satisfies_bound_type(
+		const zend_type arg, const zend_type bound, uint32_t lookup_flags,
+		const zend_string *display_name, const zend_generic_param *param)
+{
+	uint32_t bmask = ZEND_TYPE_PURE_MASK(bound);
+
+	/* builtin members of the argument satisfy only builtin bound members */
+	if (ZEND_TYPE_PURE_MASK(arg) & ~bmask) {
+		return 0;
+	}
+	if (ZEND_TYPE_HAS_LIST(arg) && !ZEND_TYPE_IS_INTERSECTION(arg)) {
+		const zend_type *el;
+		ZEND_TYPE_LIST_FOREACH(ZEND_TYPE_LIST(arg), el) {
+			int r = zend_generics_atom_satisfies_bound(*el, bound,
+				lookup_flags, display_name, param);
+			if (r != 1) {
+				return r;
+			}
+		} ZEND_TYPE_LIST_FOREACH_END();
+		return 1;
+	}
+	if (ZEND_TYPE_HAS_NAME(arg) || ZEND_TYPE_HAS_LIST(arg)) {
+		return zend_generics_atom_satisfies_bound(arg, bound,
+			lookup_flags, display_name, param);
+	}
+	return 1; /* pure-mask argument, already subset-checked above */
+}
+
+/* Parse a canonical bound string into a transient zend_type. Class-name refs
+ * inside it are owned and must be released with
+ * zend_generics_arg_release_names. */
+static bool zend_generics_parse_bound_type(const zend_string *bound_name, zend_type *out)
+{
+	zend_generic_name_slice slice = { ZSTR_VAL(bound_name), ZSTR_LEN(bound_name) };
+	uint32_t mask = zend_generics_scalar_mask(&slice);
+	if (mask) {
+		*out = (zend_type) ZEND_TYPE_INIT_MASK(mask);
+		return true;
+	}
+	if (zend_generics_slice_is_composite(&slice)) {
+		return zend_generics_build_composite_arg(&slice, out);
+	}
+	*out = (zend_type) ZEND_TYPE_INIT_CLASS(
+		zend_generics_request_type_name(
+			zend_string_init(slice.start, slice.len, 0)), 0, 0);
+	return true;
 }
 
 static bool zend_generics_check_bounds(
@@ -955,86 +1134,41 @@ static bool zend_generics_check_bounds(
 			continue;
 		}
 
-		zend_class_entry *bound_ce = zend_lookup_class_ex(param->bound_name, NULL, lookup_flags);
-		if (!bound_ce) {
-			if (!EG(exception)) {
-				zend_throw_error(NULL,
-					"Cannot stamp %s: bound class %s of type parameter %s was not found",
-					ZSTR_VAL(display_name), ZSTR_VAL(param->bound_name),
-					ZSTR_VAL(param->name));
-			}
+		zend_type bound_type;
+		if (!zend_generics_parse_bound_type(param->bound_name, &bound_type)) {
+			zend_throw_error(NULL,
+				"Cannot stamp %s: malformed bound %s of type parameter %s",
+				ZSTR_VAL(display_name), ZSTR_VAL(param->bound_name),
+				ZSTR_VAL(param->name));
 			return false;
 		}
 
-		if (param->bound_kind == ZEND_GENERIC_BOUND_IMPLEMENTS
-				&& !(bound_ce->ce_flags & ZEND_ACC_INTERFACE)) {
-			zend_throw_error(NULL,
-				"Bound %s of type parameter %s on %s must be an interface "
-				"(declared with \"implements\")",
-				ZSTR_VAL(param->bound_name), ZSTR_VAL(param->name),
-				ZSTR_VAL(template_ce->name));
-			return false;
-		}
-		if (param->bound_kind == ZEND_GENERIC_BOUND_EXTENDS
-				&& (bound_ce->ce_flags & (ZEND_ACC_INTERFACE | ZEND_ACC_TRAIT | ZEND_ACC_ENUM))) {
-			zend_throw_error(NULL,
-				"Bound %s of type parameter %s on %s must be a class "
-				"(declared with \"extends\")",
-				ZSTR_VAL(param->bound_name), ZSTR_VAL(param->name),
-				ZSTR_VAL(template_ce->name));
-			return false;
-		}
-
+		bool failed = false;
 		/* A pack bound applies to every argument in its slice. */
 		uint32_t arg_start, arg_count;
 		zend_generics_param_arg_slice(gp, binding->num_args, i, &arg_start, &arg_count);
 		for (uint32_t j = arg_start; j < arg_start + arg_count; j++) {
 			const zend_type arg = binding->args[j];
-			if (!ZEND_TYPE_HAS_NAME(arg) && !ZEND_TYPE_HAS_LIST(arg)) {
-				zend_throw_error(NULL,
-					"Cannot stamp %s: scalar type argument does not satisfy the bound %s "
-					"of type parameter %s", ZSTR_VAL(display_name),
-					ZSTR_VAL(param->bound_name), ZSTR_VAL(param->name));
-				return false;
-			}
-
-			if (ZEND_TYPE_HAS_NAME(arg) && ZEND_TYPE_PURE_MASK(arg) == 0) {
-				zend_class_entry *arg_ce = zend_lookup_class_ex(ZEND_TYPE_NAME(arg), NULL, lookup_flags);
-				if (!arg_ce) {
-					if (!EG(exception)) {
-						zend_throw_error(NULL,
-							"Cannot stamp %s: class %s for type parameter %s was not found",
-							ZSTR_VAL(display_name), ZSTR_VAL(ZEND_TYPE_NAME(arg)),
-							ZSTR_VAL(param->name));
-					}
-					return false;
-				}
-
-				if (!instanceof_function(arg_ce, bound_ce)) {
-					zend_throw_error(NULL,
-						"%s does not satisfy the bound %s of type parameter %s on %s",
-						ZSTR_VAL(arg_ce->name), ZSTR_VAL(bound_ce->name),
-						ZSTR_VAL(param->name), ZSTR_VAL(template_ce->name));
-					return false;
-				}
-				continue;
-			}
-
-			/* Composite (DNF) argument. */
-			int r = zend_generics_arg_satisfies_bound(arg, bound_ce,
+			int r = zend_generics_arg_satisfies_bound_type(arg, bound_type,
 				lookup_flags, display_name, param);
 			if (r < 0) {
-				return false;
+				failed = true;
+				break;
 			}
 			if (r == 0) {
 				zend_string *ts = zend_type_to_string(arg);
 				zend_throw_error(NULL,
 					"%s does not satisfy the bound %s of type parameter %s on %s",
-					ZSTR_VAL(ts), ZSTR_VAL(bound_ce->name),
+					ZSTR_VAL(ts), ZSTR_VAL(param->bound_name),
 					ZSTR_VAL(param->name), ZSTR_VAL(template_ce->name));
 				zend_string_release(ts);
-				return false;
+				failed = true;
+				break;
 			}
+		}
+		zend_generics_arg_release_names(bound_type);
+		if (failed) {
+			return false;
 		}
 	}
 	return true;
