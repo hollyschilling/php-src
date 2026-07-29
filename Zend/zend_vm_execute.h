@@ -18301,9 +18301,10 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_FUNC_CCONV ZEND_FETCH_CLASS_N
 			uint32_t param_idx = zend_generics_binding_arg_index(
 				scope, fetch_type >> ZEND_FETCH_CLASS_TYPE_PARAM_SHIFT);
 			zend_type type_arg = scope->generic_binding->args[param_idx];
-			if (ZEND_TYPE_HAS_NAME(type_arg)) {
+			if (ZEND_TYPE_HAS_NAME(type_arg) && ZEND_TYPE_PURE_MASK(type_arg) == 0) {
 				ZVAL_STR_COPY(EX_VAR(opline->result.var), ZEND_TYPE_NAME(type_arg));
 			} else {
+				/* scalar or composite (DNF) argument: render the full type */
 				ZVAL_STR(EX_VAR(opline->result.var), zend_type_to_string(type_arg));
 			}
 			break;
@@ -32980,9 +32981,10 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_FUNC_CCONV ZEND_FETCH_CLASS_N
 			uint32_t param_idx = zend_generics_binding_arg_index(
 				scope, fetch_type >> ZEND_FETCH_CLASS_TYPE_PARAM_SHIFT);
 			zend_type type_arg = scope->generic_binding->args[param_idx];
-			if (ZEND_TYPE_HAS_NAME(type_arg)) {
+			if (ZEND_TYPE_HAS_NAME(type_arg) && ZEND_TYPE_PURE_MASK(type_arg) == 0) {
 				ZVAL_STR_COPY(EX_VAR(opline->result.var), ZEND_TYPE_NAME(type_arg));
 			} else {
+				/* scalar or composite (DNF) argument: render the full type */
 				ZVAL_STR(EX_VAR(opline->result.var), zend_type_to_string(type_arg));
 			}
 			break;
@@ -41019,9 +41021,10 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_FUNC_CCONV ZEND_FETCH_CLASS_N
 			uint32_t param_idx = zend_generics_binding_arg_index(
 				scope, fetch_type >> ZEND_FETCH_CLASS_TYPE_PARAM_SHIFT);
 			zend_type type_arg = scope->generic_binding->args[param_idx];
-			if (ZEND_TYPE_HAS_NAME(type_arg)) {
+			if (ZEND_TYPE_HAS_NAME(type_arg) && ZEND_TYPE_PURE_MASK(type_arg) == 0) {
 				ZVAL_STR_COPY(EX_VAR(opline->result.var), ZEND_TYPE_NAME(type_arg));
 			} else {
+				/* scalar or composite (DNF) argument: render the full type */
 				ZVAL_STR(EX_VAR(opline->result.var), zend_type_to_string(type_arg));
 			}
 			break;
@@ -71083,9 +71086,10 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_CCONV ZEND_FETCH_CLASS_NAME_S
 			uint32_t param_idx = zend_generics_binding_arg_index(
 				scope, fetch_type >> ZEND_FETCH_CLASS_TYPE_PARAM_SHIFT);
 			zend_type type_arg = scope->generic_binding->args[param_idx];
-			if (ZEND_TYPE_HAS_NAME(type_arg)) {
+			if (ZEND_TYPE_HAS_NAME(type_arg) && ZEND_TYPE_PURE_MASK(type_arg) == 0) {
 				ZVAL_STR_COPY(EX_VAR(opline->result.var), ZEND_TYPE_NAME(type_arg));
 			} else {
+				/* scalar or composite (DNF) argument: render the full type */
 				ZVAL_STR(EX_VAR(opline->result.var), zend_type_to_string(type_arg));
 			}
 			break;
@@ -85662,9 +85666,10 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_CCONV ZEND_FETCH_CLASS_NAME_S
 			uint32_t param_idx = zend_generics_binding_arg_index(
 				scope, fetch_type >> ZEND_FETCH_CLASS_TYPE_PARAM_SHIFT);
 			zend_type type_arg = scope->generic_binding->args[param_idx];
-			if (ZEND_TYPE_HAS_NAME(type_arg)) {
+			if (ZEND_TYPE_HAS_NAME(type_arg) && ZEND_TYPE_PURE_MASK(type_arg) == 0) {
 				ZVAL_STR_COPY(EX_VAR(opline->result.var), ZEND_TYPE_NAME(type_arg));
 			} else {
+				/* scalar or composite (DNF) argument: render the full type */
 				ZVAL_STR(EX_VAR(opline->result.var), zend_type_to_string(type_arg));
 			}
 			break;
@@ -93701,9 +93706,10 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_CCONV ZEND_FETCH_CLASS_NAME_S
 			uint32_t param_idx = zend_generics_binding_arg_index(
 				scope, fetch_type >> ZEND_FETCH_CLASS_TYPE_PARAM_SHIFT);
 			zend_type type_arg = scope->generic_binding->args[param_idx];
-			if (ZEND_TYPE_HAS_NAME(type_arg)) {
+			if (ZEND_TYPE_HAS_NAME(type_arg) && ZEND_TYPE_PURE_MASK(type_arg) == 0) {
 				ZVAL_STR_COPY(EX_VAR(opline->result.var), ZEND_TYPE_NAME(type_arg));
 			} else {
+				/* scalar or composite (DNF) argument: render the full type */
 				ZVAL_STR(EX_VAR(opline->result.var), zend_type_to_string(type_arg));
 			}
 			break;

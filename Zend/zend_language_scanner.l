@@ -212,15 +212,18 @@ static void heredoc_label_dtor(zend_heredoc_label *heredoc_label) {
  * parse errors in generics-free PHP, so no valid program changes meaning.
  *
  * The region must have the exact shape of a static type-argument list --
- * optionally \-qualified type names, commas, whitespace and balanced nested
- * <...> -- closed by the matching '>', and then:
- *   - followed by '::': safe even with commas, since a '>' directly
- *     followed by '::' cannot continue any expression ('Foo<K, V>::make()');
- *   - followed by '(' with NO top-level comma: without the claim the text
- *     is a chained-comparison parse error because comparison operators are
- *     non-associative ('$o->m<T>($x)'). With a top-level comma the
- *     unclaimed reading can be a valid argument list ('f(A<B, C>(5))'), so
- *     we decline; the explicit '::<' form covers that spelling.
+ * optionally \-qualified type names, commas, whitespace, balanced nested
+ * <...> and composite (DNF) punctuation ('|', '&', parens, '?') -- closed by
+ * the matching '>', and then:
+ *   - followed by '::': safe even with commas or DNF, since a '>' directly
+ *     followed by '::' cannot continue any expression ('Foo<K, V>::make()',
+ *     'Vec<int|string>::class');
+ *   - followed by '(' with NO top-level comma and NO DNF punctuation:
+ *     without the claim the text is a chained-comparison parse error because
+ *     comparison operators are non-associative ('$o->m<T>($x)'). With a
+ *     comma or a union/intersection the unclaimed reading can be valid PHP
+ *     ('f(A<B, C>(5))', 'f((A<B)|(C>($x)))' via precedence), so we decline;
+ *     the explicit '::<' form covers those spellings.
  * Everything else declines to a plain '<'. */
 static bool zend_scan_is_generic_open(const unsigned char *cursor, const unsigned char *limit)
 {
@@ -228,6 +231,7 @@ static bool zend_scan_is_generic_open(const unsigned char *cursor, const unsigne
 		? cursor + ZEND_GENERIC_SCAN_MAX : limit;
 	uint32_t depth = 1;
 	bool top_level_comma = false;
+	bool saw_composite = false;
 	enum { EXPECT_ELEM, IN_NAME, AFTER_ELEM } state = EXPECT_ELEM;
 
 	while (cursor < end && depth > 0) {
@@ -271,6 +275,23 @@ static bool zend_scan_is_generic_open(const unsigned char *cursor, const unsigne
 			}
 			depth--;
 			state = AFTER_ELEM;
+		} else if (c == '|' || c == '&') {
+			if (state == EXPECT_ELEM) {
+				return false;
+			}
+			saw_composite = true;
+			state = EXPECT_ELEM;
+		} else if (c == '(' || c == '?') {
+			if (state != EXPECT_ELEM) {
+				return false;
+			}
+			saw_composite = true;
+		} else if (c == ')') {
+			if (state == EXPECT_ELEM) {
+				return false;
+			}
+			saw_composite = true;
+			state = AFTER_ELEM;
 		} else {
 			return false;
 		}
@@ -289,7 +310,7 @@ static bool zend_scan_is_generic_open(const unsigned char *cursor, const unsigne
 	if (*cursor == ':') {
 		return cursor + 1 < limit && cursor[1] == ':';
 	}
-	return *cursor == '(' && !top_level_comma;
+	return *cursor == '(' && !top_level_comma && !saw_composite;
 }
 
 void shutdown_scanner(void)

@@ -7467,6 +7467,149 @@ static bool zend_is_active_template_param(const zend_string *name)
 
 static void zend_append_generic_type_ref(smart_str *buf, zend_ast *ast, bool allow_params, bool allow_nested_params, bool allow_spread, bool *uses_params);
 
+/* Canonical name of one member of a composite (DNF) type argument: resolved
+ * FQ class name, canonical scalar spelling, "array", or "null" (unions
+ * only). Returns an owned string. Type parameters stay rejected inside
+ * composites in this version. */
+static zend_string *zend_generic_dnf_member_name(zend_ast *ast, bool in_intersection)
+{
+	if (ast->kind == ZEND_AST_TYPE) {
+		/* 'array' members, and the null member synthesized by '?T' sugar. */
+		ZEND_ASSERT(ast->attr == IS_ARRAY || ast->attr == IS_NULL);
+		if (in_intersection) {
+			zend_error_noreturn(E_COMPILE_ERROR,
+				"Type %s cannot be part of an intersection type",
+				ast->attr == IS_ARRAY ? "array" : "null");
+		}
+		if (ast->attr == IS_NULL) {
+			return zend_string_init("null", sizeof("null") - 1, 0);
+		}
+		return zend_string_init("array", sizeof("array") - 1, 0);
+	}
+	if (ast->kind == ZEND_AST_GENERIC_TYPE) {
+		smart_str tmp = {0};
+		zend_append_generic_type_ref(&tmp, ast, /* allow_params */ false,
+			/* allow_nested_params */ false, /* allow_spread */ false, NULL);
+		return smart_str_extract(&tmp);
+	}
+	zend_string *name = zend_ast_get_str(ast);
+	if (ast->attr == ZEND_NAME_NOT_FQ) {
+		if (zend_is_active_template_param(name)) {
+			zend_error_noreturn(E_COMPILE_ERROR,
+				"Type parameter %s cannot be a member of a composite type "
+				"argument (composite arguments must be concrete in this version)",
+				ZSTR_VAL(name));
+		}
+		uint8_t type_code = zend_lookup_builtin_type_by_name(name);
+		if (type_code != 0) {
+			if (in_intersection) {
+				zend_error_noreturn(E_COMPILE_ERROR,
+					"Type %s cannot be part of an intersection type", ZSTR_VAL(name));
+			}
+			switch (type_code) {
+				case IS_LONG:   return zend_string_init("int", 3, 0);
+				case IS_DOUBLE: return zend_string_init("float", 5, 0);
+				case IS_STRING: return zend_string_init("string", 6, 0);
+				case _IS_BOOL:  return zend_string_init("bool", 4, 0);
+				case IS_NULL:   return zend_string_init("null", 4, 0);
+				default:
+					zend_error_noreturn(E_COMPILE_ERROR,
+						"Built-in type \"%s\" cannot be used as a generic type argument",
+						ZSTR_VAL(name));
+			}
+		}
+	}
+	if (zend_get_class_fetch_type_ast(ast) != ZEND_FETCH_CLASS_DEFAULT) {
+		zend_error_noreturn(E_COMPILE_ERROR,
+			"Cannot use \"%s\" as a generic type argument, as it is reserved", ZSTR_VAL(name));
+	}
+	zend_string *resolved = zend_resolve_class_name_ast(ast);
+	zend_assert_valid_class_name(resolved, "a generic type argument");
+	return resolved;
+}
+
+static int zend_generic_dnf_member_cmp(const void *a, const void *b)
+{
+	zend_string *sa = *(zend_string *const *) a;
+	zend_string *sb = *(zend_string *const *) b;
+	return zend_binary_strcasecmp(ZSTR_VAL(sa), ZSTR_LEN(sa), ZSTR_VAL(sb), ZSTR_LEN(sb));
+}
+
+/* Sort members case-insensitively; adjacent duplicates are a compile error
+ * (mirrors the redundancy rule for declared union/intersection types). */
+static void zend_generic_dnf_sort_dedupe(zend_string **elems, uint32_t n)
+{
+	qsort(elems, n, sizeof(zend_string *), zend_generic_dnf_member_cmp);
+	for (uint32_t i = 1; i < n; i++) {
+		if (zend_string_equals_ci(elems[i - 1], elems[i])) {
+			zend_error_noreturn(E_COMPILE_ERROR,
+				"Duplicate type %s is redundant", ZSTR_VAL(elems[i]));
+		}
+	}
+}
+
+static zend_string *zend_generic_dnf_intersection_name(zend_ast *ast)
+{
+	const zend_ast_list *list = zend_ast_get_list(ast);
+	ZEND_ASSERT(list->children >= 2);
+	zend_string **elems = emalloc(list->children * sizeof(zend_string *));
+	for (uint32_t i = 0; i < list->children; i++) {
+		elems[i] = zend_generic_dnf_member_name(list->child[i], /* in_intersection */ true);
+	}
+	zend_generic_dnf_sort_dedupe(elems, list->children);
+	smart_str tmp = {0};
+	for (uint32_t i = 0; i < list->children; i++) {
+		if (i) {
+			smart_str_appendc(&tmp, '&');
+		}
+		smart_str_append(&tmp, elems[i]);
+		zend_string_release(elems[i]);
+	}
+	efree(elems);
+	return smart_str_extract(&tmp);
+}
+
+/* Append the canonical spelling of a composite (DNF) type argument: members
+ * sorted case-insensitively and deduplicated, intersections parenthesized
+ * inside unions ("a|(b&c)"), pure intersections bare ("a&b"). The sort makes
+ * the spelling an identity: Foo<A|B> and Foo<B|A> are one instantiation. */
+static void zend_append_generic_dnf_arg(smart_str *buf, zend_ast *ast)
+{
+	const zend_ast_list *list = zend_ast_get_list(ast);
+
+	if (ast->kind == ZEND_AST_TYPE_INTERSECTION) {
+		zend_string *inter = zend_generic_dnf_intersection_name(ast);
+		smart_str_append(buf, inter);
+		zend_string_release(inter);
+		return;
+	}
+
+	zend_string **elems = emalloc(list->children * sizeof(zend_string *));
+	for (uint32_t i = 0; i < list->children; i++) {
+		zend_ast *child = list->child[i];
+		if (child->kind == ZEND_AST_TYPE_INTERSECTION) {
+			zend_string *inner = zend_generic_dnf_intersection_name(child);
+			smart_str tmp = {0};
+			smart_str_appendc(&tmp, '(');
+			smart_str_append(&tmp, inner);
+			smart_str_appendc(&tmp, ')');
+			zend_string_release(inner);
+			elems[i] = smart_str_extract(&tmp);
+		} else {
+			elems[i] = zend_generic_dnf_member_name(child, /* in_intersection */ false);
+		}
+	}
+	zend_generic_dnf_sort_dedupe(elems, list->children);
+	for (uint32_t i = 0; i < list->children; i++) {
+		if (i) {
+			smart_str_appendc(buf, '|');
+		}
+		smart_str_append(buf, elems[i]);
+		zend_string_release(elems[i]);
+	}
+	efree(elems);
+}
+
 /* When allow_params is true, a bare type parameter is emitted under its
  * canonical declared name and *uses_params is set. When allow_nested_params
  * is additionally true (type positions and body class references, where
@@ -7476,6 +7619,17 @@ static void zend_append_generic_type_ref(smart_str *buf, zend_ast *ast, bool all
  * Spreads ("...Ts") are top-level only. */
 static void zend_append_generic_arg(smart_str *buf, zend_ast *ast, bool allow_params, bool allow_nested_params, bool allow_spread, bool *uses_params)
 {
+	if (ast->kind == ZEND_AST_TYPE_UNION || ast->kind == ZEND_AST_TYPE_INTERSECTION) {
+		/* Composite (DNF) argument: canonicalized, concrete-only. */
+		zend_append_generic_dnf_arg(buf, ast);
+		return;
+	}
+	if (ast->kind == ZEND_AST_TYPE) {
+		/* Bare 'array' argument. */
+		ZEND_ASSERT(ast->attr == IS_ARRAY);
+		smart_str_appendl(buf, "array", sizeof("array") - 1);
+		return;
+	}
 	if (ast->kind == ZEND_AST_GENERIC_TYPE) {
 		zend_append_generic_type_ref(buf, ast,
 			/* allow_params */ allow_nested_params && allow_params,
