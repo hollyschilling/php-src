@@ -48,7 +48,7 @@ try { $seq->pick<Price>(new Order()); } catch (TypeError $e) { echo $e->getMessa
 var_dump(get_class($seq->single<Price>()));
 
 // Structural errors are catchable and precise.
-try { $seq->map<Price,Order>($toPrice); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+try { $seq->map::<Price,Order>($toPrice); } catch (Error $e) { echo $e->getMessage(), "\n"; }
 try { $seq->count<Price>(); } catch (Error $e) { echo $e->getMessage(), "\n"; }
 try { $seq->nosuch<Price>(); } catch (Error $e) { echo $e->getMessage(), "\n"; }
 ?>

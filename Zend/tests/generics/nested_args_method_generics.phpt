@@ -22,7 +22,7 @@ class NameLength implements Projector<Name, Length> {
     public function project(Name $in): Length { return new Length(strlen($in->s)); }
 }
 
-$out = Runner::project<Name, Length, int>(
+$out = Runner::project::<Name, Length, int>(
     new Pair<Name, int>(new Name("holly"), 42), new NameLength());
 echo get_class($out), "\n";
 echo get_class($out->first), "\n";

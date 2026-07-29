@@ -40,7 +40,7 @@ try {
 
 // Structural errors stay precise through the extension path.
 extension PlainOps on Repository $repo { function plain(): int { return 1; } }
-try { $r->wrapFirst<Price,Price>(); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+try { $r->wrapFirst::<Price,Price>(); } catch (Error $e) { echo $e->getMessage(), "\n"; }
 try { $r->plain<Price>(); } catch (Error $e) { echo $e->getMessage(), "\n"; }
 ?>
 --EXPECT--

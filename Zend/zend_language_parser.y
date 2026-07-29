@@ -1801,14 +1801,20 @@ function_call:
 		}
 	|	class_name T_PAAMAYIM_NEKUDOTAYIM member_name argument_list
 			{ $$ = zend_ast_create(ZEND_AST_STATIC_CALL, $1, $3, $4); }
-	|	class_name T_PAAMAYIM_NEKUDOTAYIM T_STRING T_GENERIC_OPEN generic_arg_list '>' argument_list
+	|	class_name T_PAAMAYIM_NEKUDOTAYIM T_STRING T_GENERIC_OPEN generic_arg_list_closed argument_list
 			{ $$ = zend_ast_create(ZEND_AST_STATIC_CALL, $1,
-				  zend_ast_create(ZEND_AST_GENERIC_TYPE, $3, $5), $7); }
+				  zend_ast_create(ZEND_AST_GENERIC_TYPE, $3, $5), $6); }
+	|	class_name T_PAAMAYIM_NEKUDOTAYIM T_STRING T_TURBOFISH generic_arg_list_closed argument_list
+			{ $$ = zend_ast_create(ZEND_AST_STATIC_CALL, $1,
+				  zend_ast_create(ZEND_AST_GENERIC_TYPE, $3, $5), $6); }
 	|	variable_class_name T_PAAMAYIM_NEKUDOTAYIM member_name argument_list
 			{ $$ = zend_ast_create(ZEND_AST_STATIC_CALL, $1, $3, $4); }
-	|	variable_class_name T_PAAMAYIM_NEKUDOTAYIM T_STRING T_GENERIC_OPEN generic_arg_list '>' argument_list
+	|	variable_class_name T_PAAMAYIM_NEKUDOTAYIM T_STRING T_GENERIC_OPEN generic_arg_list_closed argument_list
 			{ $$ = zend_ast_create(ZEND_AST_STATIC_CALL, $1,
-				  zend_ast_create(ZEND_AST_GENERIC_TYPE, $3, $5), $7); }
+				  zend_ast_create(ZEND_AST_GENERIC_TYPE, $3, $5), $6); }
+	|	variable_class_name T_PAAMAYIM_NEKUDOTAYIM T_STRING T_TURBOFISH generic_arg_list_closed argument_list
+			{ $$ = zend_ast_create(ZEND_AST_STATIC_CALL, $1,
+				  zend_ast_create(ZEND_AST_GENERIC_TYPE, $3, $5), $6); }
 	|	callable_expr { $<num>$ = CG(zend_lineno); } argument_list {
 			$$ = zend_ast_create(ZEND_AST_CALL, $1, $3);
 			$$->lineno = $<num>2;
@@ -1935,9 +1941,12 @@ callable_variable:
 			{ $$ = zend_ast_create(ZEND_AST_DIM, $1, $3); }
 	|	array_object_dereferenceable T_OBJECT_OPERATOR property_name argument_list
 			{ $$ = zend_ast_create(ZEND_AST_METHOD_CALL, $1, $3, $4); }
-	|	array_object_dereferenceable T_OBJECT_OPERATOR T_STRING T_GENERIC_OPEN generic_arg_list '>' argument_list
+	|	array_object_dereferenceable T_OBJECT_OPERATOR T_STRING T_GENERIC_OPEN generic_arg_list_closed argument_list
 			{ $$ = zend_ast_create(ZEND_AST_METHOD_CALL, $1,
-				  zend_ast_create(ZEND_AST_GENERIC_TYPE, $3, $5), $7); }
+				  zend_ast_create(ZEND_AST_GENERIC_TYPE, $3, $5), $6); }
+	|	array_object_dereferenceable T_OBJECT_OPERATOR T_STRING T_TURBOFISH generic_arg_list_closed argument_list
+			{ $$ = zend_ast_create(ZEND_AST_METHOD_CALL, $1,
+				  zend_ast_create(ZEND_AST_GENERIC_TYPE, $3, $5), $6); }
 	|	array_object_dereferenceable T_NULLSAFE_OBJECT_OPERATOR property_name argument_list
 			{ $$ = zend_ast_create(ZEND_AST_NULLSAFE_METHOD_CALL, $1, $3, $4); }
 	|	function_call { $$ = $1; }
