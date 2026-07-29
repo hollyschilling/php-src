@@ -8059,6 +8059,12 @@ static zend_string *zend_generic_dnf_member_name(zend_ast *ast, bool in_intersec
 				"argument (composite arguments must be concrete in this version)",
 				ZSTR_VAL(name));
 		}
+		if (zend_active_method_type_param(name)) {
+			zend_error_noreturn(E_COMPILE_ERROR,
+				"Type parameter %s cannot be a member of a composite type "
+				"argument (composite arguments must be concrete in this version)",
+				ZSTR_VAL(name));
+		}
 		uint8_t type_code = zend_lookup_builtin_type_by_name(name);
 		if (type_code != 0) {
 			if (in_intersection) {
