@@ -7,7 +7,7 @@ class TA implements Tagged {}
 class TB implements Tagged {}
 class TC {}
 
-class Bag<...Ts implements Tagged> {}
+class Bag<...Ts: Tagged> {}
 
 new Bag<TA, TB>();
 echo "bounds ok\n";

@@ -3,7 +3,7 @@ Generics: bare use of a generic trait errors; trait bounds enforce at stamp time
 --FILE--
 <?php
 trait Cache<T> { public function remember(T $v): void {} }
-trait Sortable<T implements Stringable> { public function sortBy(T $k): void {} }
+trait Sortable<T: Stringable> { public function sortBy(T $k): void {} }
 
 try {
     eval("class Broken { use Cache; }");

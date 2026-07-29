@@ -4954,11 +4954,8 @@ ZEND_METHOD(ReflectionClass, getGenericTypeParameters)
 		array_init(&entry);
 		add_assoc_str(&entry, "name", zend_string_copy(param->name));
 		if (param->bound_name) {
-			add_assoc_string(&entry, "boundKind",
-				param->bound_kind == ZEND_GENERIC_BOUND_EXTENDS ? "extends" : "implements");
 			add_assoc_str(&entry, "bound", zend_string_copy(param->bound_name));
 		} else {
-			add_assoc_null(&entry, "boundKind");
 			add_assoc_null(&entry, "bound");
 		}
 		add_assoc_bool(&entry, "variadic", i == generic_params->pack_index);
