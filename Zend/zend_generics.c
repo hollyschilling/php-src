@@ -98,7 +98,9 @@ static bool zend_generics_parse_name_ex(
 			p += 2;
 		} else if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
 				|| (c >= '0' && c <= '9') || c == '_' || c == '\\'
-				|| (unsigned char) c >= 0x80 || c == ',')) {
+				|| (unsigned char) c >= 0x80 || c == ','
+				/* composite (DNF) argument spellings: "a|(b&c)" */
+				|| c == '|' || c == '&' || c == '(' || c == ')')) {
 			return false;
 		}
 	}
@@ -124,15 +126,47 @@ static uint32_t zend_generics_scalar_mask(const zend_generic_name_slice *slice)
 			break;
 		case 4:
 			if (zend_binary_strcasecmp(slice->start, 4, "bool", 4) == 0) return MAY_BE_BOOL;
+			if (zend_binary_strcasecmp(slice->start, 4, "null", 4) == 0) return MAY_BE_NULL;
 			break;
 		case 5:
 			if (zend_binary_strcasecmp(slice->start, 5, "float", 5) == 0) return MAY_BE_DOUBLE;
+			if (zend_binary_strcasecmp(slice->start, 5, "array", 5) == 0) return MAY_BE_ARRAY;
 			break;
 		case 6:
 			if (zend_binary_strcasecmp(slice->start, 6, "string", 6) == 0) return MAY_BE_STRING;
 			break;
 	}
 	return 0;
+}
+
+/* Does a mangled name carry composite (DNF) arguments? Such instantiations
+ * are runtime-stamped only in this version (no preload persist). This is
+ * deliberately conservative: nested composites count too. */
+static zend_always_inline bool zend_generics_name_has_composite_args(const zend_string *name)
+{
+	return memchr(ZSTR_VAL(name), '|', ZSTR_LEN(name)) != NULL
+		|| memchr(ZSTR_VAL(name), '&', ZSTR_LEN(name)) != NULL;
+}
+
+/* Is this argument slice itself composite ('a|b', 'a&b')? A '|' or '&'
+ * inside a nested <...> belongs to the nested instantiation's own argument
+ * list ('Box<int|string>' is a plain name at this level), so only depth-0
+ * occurrences count. */
+static bool zend_generics_slice_is_composite(const zend_generic_name_slice *slice)
+{
+	uint32_t depth = 0;
+	const char *end = slice->start + slice->len;
+	for (const char *p = slice->start; p < end; p++) {
+		char c = *p;
+		if (c == '<') {
+			depth++;
+		} else if (c == '>') {
+			if (depth) depth--;
+		} else if ((c == '|' || c == '&') && depth == 0) {
+			return true;
+		}
+	}
+	return false;
 }
 
 /* Returns the index of the template type parameter a single-label class-name
@@ -368,7 +402,16 @@ static bool zend_generics_substitute_single(
 	if (ZEND_TYPE_HAS_NAME(arg)) {
 		type->ptr = take_refs
 			? zend_string_copy(ZEND_TYPE_NAME(arg)) : ZEND_TYPE_NAME(arg);
-		type->type_mask = _ZEND_TYPE_NAME_BIT | extra_mask;
+		/* Preserve the argument's own builtin members too ("Foo|null"). */
+		type->type_mask = _ZEND_TYPE_NAME_BIT | extra_mask
+			| (ZEND_TYPE_FULL_MASK(arg) & _ZEND_TYPE_MAY_BE_MASK);
+	} else if (ZEND_TYPE_HAS_LIST(arg)) {
+		/* Composite (DNF) argument: arena-copy the list; names are owned by
+		 * the binding for the never-destroyed arg_info case and addref'd for
+		 * prop/const types, exactly like copy_ctor's conventions. */
+		*type = arg;
+		ZEND_TYPE_FULL_MASK(*type) |= extra_mask;
+		zend_generics_type_copy_ctor(type, take_refs);
 	} else {
 		type->ptr = NULL;
 		type->type_mask = ZEND_TYPE_PURE_MASK(arg) | extra_mask;
@@ -392,13 +435,15 @@ ZEND_API bool zend_generics_name_mentions_params(
 	p++; /* skip the outer base name and its '<' */
 	while (p < end) {
 		char c = *p;
-		if (c == ',' || c == '<' || c == '>' || c == '.') {
+		if (c == ',' || c == '<' || c == '>' || c == '.'
+				|| c == '|' || c == '&' || c == '(' || c == ')') {
 			p++;
 			continue;
 		}
 		const char *label = p;
 		bool qualified = false;
-		while (p < end && *p != ',' && *p != '<' && *p != '>') {
+		while (p < end && *p != ',' && *p != '<' && *p != '>'
+				&& *p != '|' && *p != '&' && *p != '(' && *p != ')') {
 			if (*p == '\\') {
 				qualified = true;
 			}
@@ -976,6 +1021,51 @@ static void zend_generics_rebuild_dispatch_ptrs(
 	}
 }
 
+/* Does a composite argument satisfy a class/interface bound?
+ * Union: every member must satisfy; intersection: one member suffices;
+ * any builtin member (scalar, array, null) fails. Returns 1 (yes), 0 (no),
+ * -1 (lookup error thrown). */
+static int zend_generics_arg_satisfies_bound(
+		const zend_type arg, zend_class_entry *bound_ce, uint32_t lookup_flags,
+		const zend_string *display_name, const zend_generic_param *param)
+{
+	if (ZEND_TYPE_HAS_LIST(arg)) {
+		bool is_inter = ZEND_TYPE_IS_INTERSECTION(arg);
+		if (ZEND_TYPE_PURE_MASK(arg) != 0 && !is_inter) {
+			return 0;
+		}
+		int any = 0;
+		const zend_type *list_type;
+		ZEND_TYPE_LIST_FOREACH(ZEND_TYPE_LIST(arg), list_type) {
+			int r = zend_generics_arg_satisfies_bound(*list_type, bound_ce,
+				lookup_flags, display_name, param);
+			if (r < 0) {
+				return -1;
+			}
+			if (is_inter) {
+				any |= r;
+			} else if (r != 1) {
+				return 0;
+			}
+		} ZEND_TYPE_LIST_FOREACH_END();
+		return is_inter ? any : 1;
+	}
+	if (ZEND_TYPE_PURE_MASK(arg) != 0 || !ZEND_TYPE_HAS_NAME(arg)) {
+		return 0;
+	}
+	zend_class_entry *ce = zend_lookup_class_ex(ZEND_TYPE_NAME(arg), NULL, lookup_flags);
+	if (!ce) {
+		if (!EG(exception)) {
+			zend_throw_error(NULL,
+				"Cannot stamp %s: class %s for type parameter %s was not found",
+				ZSTR_VAL(display_name), ZSTR_VAL(ZEND_TYPE_NAME(arg)),
+				ZSTR_VAL(param->name));
+		}
+		return -1;
+	}
+	return instanceof_function(ce, bound_ce) ? 1 : 0;
+}
+
 static bool zend_generics_check_bounds(
 		const zend_class_entry *template_ce, const zend_generic_binding *binding,
 		const zend_string *display_name, bool use_autoload)
@@ -1024,7 +1114,7 @@ static bool zend_generics_check_bounds(
 		zend_generics_param_arg_slice(gp, binding->num_args, i, &arg_start, &arg_count);
 		for (uint32_t j = arg_start; j < arg_start + arg_count; j++) {
 			const zend_type arg = binding->args[j];
-			if (!ZEND_TYPE_HAS_NAME(arg)) {
+			if (!ZEND_TYPE_HAS_NAME(arg) && !ZEND_TYPE_HAS_LIST(arg)) {
 				zend_throw_error(NULL,
 					"Cannot stamp %s: scalar type argument does not satisfy the bound %s "
 					"of type parameter %s", ZSTR_VAL(display_name),
@@ -1032,22 +1122,41 @@ static bool zend_generics_check_bounds(
 				return false;
 			}
 
-			zend_class_entry *arg_ce = zend_lookup_class_ex(ZEND_TYPE_NAME(arg), NULL, lookup_flags);
-			if (!arg_ce) {
-				if (!EG(exception)) {
-					zend_throw_error(NULL,
-						"Cannot stamp %s: class %s for type parameter %s was not found",
-						ZSTR_VAL(display_name), ZSTR_VAL(ZEND_TYPE_NAME(arg)),
-						ZSTR_VAL(param->name));
+			if (ZEND_TYPE_HAS_NAME(arg) && ZEND_TYPE_PURE_MASK(arg) == 0) {
+				zend_class_entry *arg_ce = zend_lookup_class_ex(ZEND_TYPE_NAME(arg), NULL, lookup_flags);
+				if (!arg_ce) {
+					if (!EG(exception)) {
+						zend_throw_error(NULL,
+							"Cannot stamp %s: class %s for type parameter %s was not found",
+							ZSTR_VAL(display_name), ZSTR_VAL(ZEND_TYPE_NAME(arg)),
+							ZSTR_VAL(param->name));
+					}
+					return false;
 				}
-				return false;
+
+				if (!instanceof_function(arg_ce, bound_ce)) {
+					zend_throw_error(NULL,
+						"%s does not satisfy the bound %s of type parameter %s on %s",
+						ZSTR_VAL(arg_ce->name), ZSTR_VAL(bound_ce->name),
+						ZSTR_VAL(param->name), ZSTR_VAL(template_ce->name));
+					return false;
+				}
+				continue;
 			}
 
-			if (!instanceof_function(arg_ce, bound_ce)) {
+			/* Composite (DNF) argument. */
+			int r = zend_generics_arg_satisfies_bound(arg, bound_ce,
+				lookup_flags, display_name, param);
+			if (r < 0) {
+				return false;
+			}
+			if (r == 0) {
+				zend_string *ts = zend_type_to_string(arg);
 				zend_throw_error(NULL,
 					"%s does not satisfy the bound %s of type parameter %s on %s",
-					ZSTR_VAL(arg_ce->name), ZSTR_VAL(bound_ce->name),
+					ZSTR_VAL(ts), ZSTR_VAL(bound_ce->name),
 					ZSTR_VAL(param->name), ZSTR_VAL(template_ce->name));
+				zend_string_release(ts);
 				return false;
 			}
 		}
@@ -1067,7 +1176,9 @@ static void zend_generics_collect_type_names(
 		zend_string *name = ZEND_TYPE_NAME(type);
 		if (memchr(ZSTR_VAL(name), '<', ZSTR_LEN(name))
 				/* Symbolic template positions ("C<T>") are per-instantiation;
-				 * only concrete names are preload-stampable. */
+				 * only concrete names are preload-stampable. Composite (DNF)
+				 * arguments are runtime-stamped in this version. */
+				&& !zend_generics_name_has_composite_args(name)
 				&& !(owner_gp && zend_generics_name_mentions_params(name, owner_gp))) {
 			zend_hash_add_empty_element(candidates, name);
 		}
@@ -1100,7 +1211,8 @@ static void zend_generics_collect_op_array(
 		for (int i = 0; i < op_array->last_literal; i++) {
 			const zval *zv = &op_array->literals[i];
 			if (Z_TYPE_P(zv) == IS_STRING
-					&& memchr(Z_STRVAL_P(zv), '<', Z_STRLEN_P(zv))) {
+					&& memchr(Z_STRVAL_P(zv), '<', Z_STRLEN_P(zv))
+					&& !zend_generics_name_has_composite_args(Z_STR_P(zv))) {
 				zend_generic_name_slice base_slice;
 				zend_generic_name_slice arg_slices[ZEND_GENERICS_MAX_ARGS];
 				uint32_t num_args;
@@ -1223,17 +1335,94 @@ static const char *zend_generics_scalar_type_name(uint32_t type_mask)
 		case MAY_BE_DOUBLE: return "float";
 		case MAY_BE_STRING: return "string";
 		case MAY_BE_BOOL:   return "bool";
+		case MAY_BE_ARRAY:  return "array";
+		case MAY_BE_NULL:   return "null";
 		EMPTY_SWITCH_DEFAULT_CASE()
+	}
+}
+
+static int zend_generics_member_cmp(const void *a, const void *b)
+{
+	zend_string *sa = *(zend_string *const *) a;
+	zend_string *sb = *(zend_string *const *) b;
+	return zend_binary_strcasecmp(ZSTR_VAL(sa), ZSTR_LEN(sa), ZSTR_VAL(sb), ZSTR_LEN(sb));
+}
+
+/* Render a composite argument back to its canonical mangled spelling (the
+ * same case-insensitive member sort the compiler applies), so substituted
+ * composite references ("C<T>" with T = int|string) produce valid
+ * instantiation keys. */
+static void zend_generics_append_composite_arg(smart_str *buf, const zend_type arg)
+{
+	zend_string *elems[ZEND_GENERICS_MAX_ARGS + 6];
+	uint32_t n = 0;
+	char sep = '|';
+
+	if (ZEND_TYPE_HAS_LIST(arg) && ZEND_TYPE_IS_INTERSECTION(arg)) {
+		sep = '&';
+		const zend_type *list_type;
+		ZEND_TYPE_LIST_FOREACH(ZEND_TYPE_LIST(arg), list_type) {
+			elems[n++] = zend_string_copy(ZEND_TYPE_NAME(*list_type));
+		} ZEND_TYPE_LIST_FOREACH_END();
+	} else {
+		if (ZEND_TYPE_HAS_NAME(arg)) {
+			elems[n++] = zend_string_copy(ZEND_TYPE_NAME(arg));
+		} else if (ZEND_TYPE_HAS_LIST(arg)) {
+			const zend_type *list_type;
+			ZEND_TYPE_LIST_FOREACH(ZEND_TYPE_LIST(arg), list_type) {
+				if (ZEND_TYPE_HAS_LIST(*list_type)) {
+					/* nested intersection member: "(a&b)" */
+					smart_str tmp = {0};
+					smart_str_appendc(&tmp, '(');
+					const zend_type *it;
+					bool first = true;
+					ZEND_TYPE_LIST_FOREACH(ZEND_TYPE_LIST(*list_type), it) {
+						if (!first) {
+							smart_str_appendc(&tmp, '&');
+						}
+						first = false;
+						smart_str_append(&tmp, ZEND_TYPE_NAME(*it));
+					} ZEND_TYPE_LIST_FOREACH_END();
+					smart_str_appendc(&tmp, ')');
+					elems[n++] = smart_str_extract(&tmp);
+				} else {
+					elems[n++] = zend_string_copy(ZEND_TYPE_NAME(*list_type));
+				}
+			} ZEND_TYPE_LIST_FOREACH_END();
+		}
+		uint32_t mask = ZEND_TYPE_PURE_MASK(arg);
+		static const struct { uint32_t bit; const char *name; } scalars[] = {
+			{ MAY_BE_ARRAY, "array" }, { MAY_BE_BOOL, "bool" },
+			{ MAY_BE_DOUBLE, "float" }, { MAY_BE_LONG, "int" },
+			{ MAY_BE_NULL, "null" }, { MAY_BE_STRING, "string" },
+		};
+		for (uint32_t i = 0; i < sizeof(scalars) / sizeof(scalars[0]); i++) {
+			if (mask & scalars[i].bit) {
+				elems[n++] = zend_string_init(scalars[i].name, strlen(scalars[i].name), 0);
+			}
+		}
+	}
+
+	qsort(elems, n, sizeof(zend_string *), zend_generics_member_cmp);
+	for (uint32_t i = 0; i < n; i++) {
+		if (i) {
+			smart_str_appendc(buf, sep);
+		}
+		smart_str_append(buf, elems[i]);
+		zend_string_release(elems[i]);
 	}
 }
 
 static void zend_generics_append_binding_arg(smart_str *buf, const zend_type arg)
 {
-	if (ZEND_TYPE_HAS_NAME(arg)) {
+	uint32_t mask = ZEND_TYPE_PURE_MASK(arg);
+	if (ZEND_TYPE_HAS_NAME(arg) && mask == 0) {
 		smart_str_append(buf, ZEND_TYPE_NAME(arg));
+	} else if (!ZEND_TYPE_HAS_NAME(arg) && !ZEND_TYPE_HAS_LIST(arg)
+			&& (mask & (mask - 1)) == 0) {
+		smart_str_appends(buf, zend_generics_scalar_type_name(mask));
 	} else {
-		smart_str_appends(buf,
-			zend_generics_scalar_type_name(ZEND_TYPE_PURE_MASK(arg)));
+		zend_generics_append_composite_arg(buf, arg);
 	}
 }
 
@@ -1284,7 +1473,8 @@ static zend_string *zend_generics_rewrite_composite(
 
 	while (p < end) {
 		char c = *p;
-		if (c == ',' || c == '<' || c == '>') {
+		if (c == ',' || c == '<' || c == '>'
+				|| c == '|' || c == '&' || c == '(' || c == ')') {
 			smart_str_appendc(&buf, c);
 			p++;
 			continue;
@@ -1298,7 +1488,8 @@ static zend_string *zend_generics_rewrite_composite(
 		}
 		const char *label = p;
 		bool qualified = false;
-		while (p < end && *p != ',' && *p != '<' && *p != '>') {
+		while (p < end && *p != ',' && *p != '<' && *p != '>'
+				&& *p != '|' && *p != '&' && *p != '(' && *p != ')') {
 			if (*p == '\\') {
 				qualified = true;
 			}
@@ -1492,6 +1683,178 @@ static bool zend_generics_graft_parent(
 	return true;
 }
 
+/* Release every class-name reference a binding argument holds, including
+ * names inside composite type lists (the list buffers are arena-allocated
+ * and die with the request). */
+ZEND_API void zend_generics_arg_release_names(zend_type arg)
+{
+	if (ZEND_TYPE_HAS_LIST(arg)) {
+		const zend_type *list_type;
+		ZEND_TYPE_LIST_FOREACH(ZEND_TYPE_LIST(arg), list_type) {
+			zend_generics_arg_release_names(*list_type);
+		} ZEND_TYPE_LIST_FOREACH_END();
+	} else if (ZEND_TYPE_HAS_NAME(arg)) {
+		zend_string_release_ex(ZEND_TYPE_NAME(arg), 0);
+	}
+}
+
+/* Build the type for a pure-intersection argument slice ("a&b<x>&c"):
+ * every member must be a class name. */
+static bool zend_generics_build_intersection_arg(
+		const zend_generic_name_slice *slice, zend_type *out)
+{
+	zend_type elems[ZEND_GENERICS_MAX_ARGS];
+	uint32_t num_elems = 0;
+	uint32_t depth = 0;
+	const char *end = slice->start + slice->len;
+	const char *start = slice->start;
+
+	for (const char *q = slice->start; ; q++) {
+		if (q == end || (*q == '&' && depth == 0)) {
+			if (q == start || num_elems >= ZEND_GENERICS_MAX_ARGS) {
+				goto fail;
+			}
+			zend_generic_name_slice m = { start, (size_t) (q - start) };
+			if (zend_generics_scalar_mask(&m) != 0
+					|| zend_generics_slice_is_composite(&m)) {
+				goto fail; /* only class types intersect */
+			}
+			zend_string *nm = zend_generics_request_type_name(
+				zend_string_init(m.start, m.len, 0));
+			elems[num_elems] = (zend_type) ZEND_TYPE_INIT_CLASS(nm, 0, 0);
+			num_elems++;
+			if (q == end) {
+				break;
+			}
+			start = q + 1;
+		} else if (*q == '<') {
+			depth++;
+		} else if (*q == '>') {
+			if (!depth) goto fail;
+			depth--;
+		} else if (*q == '(' || *q == ')') {
+			if (!depth) goto fail;
+		}
+	}
+	if (depth != 0 || num_elems < 2) {
+		goto fail;
+	}
+	{
+		zend_type_list *l = zend_arena_alloc(&CG(arena), ZEND_TYPE_LIST_SIZE(num_elems));
+		l->num_types = num_elems;
+		memcpy(l->types, elems, num_elems * sizeof(zend_type));
+		*out = (zend_type) ZEND_TYPE_INIT_INTERSECTION(l, _ZEND_TYPE_ARENA_BIT);
+	}
+	return true;
+fail:
+	for (uint32_t i = 0; i < num_elems; i++) {
+		zend_generics_arg_release_names(elems[i]);
+	}
+	return false;
+}
+
+/* Build the zend_type for a composite (DNF) argument slice ("a|(b&c)",
+ * "int|string", "foo|null", "a&b"). Scalar/array/null members become mask
+ * bits, class members request-canonical name types; multi-class unions and
+ * intersections become arena-allocated type lists. Instances stamped from
+ * composite arguments are runtime-local in this version (preload refuses
+ * them upstream). Returns false on malformed input; the caller throws. */
+static bool zend_generics_build_composite_arg(
+		const zend_generic_name_slice *slice, zend_type *out)
+{
+	zend_generic_name_slice members[ZEND_GENERICS_MAX_ARGS];
+	uint32_t num_members = 0;
+	{
+		uint32_t depth = 0;
+		const char *end = slice->start + slice->len;
+		const char *start = slice->start;
+		for (const char *q = slice->start; ; q++) {
+			if (q == end || (*q == '|' && depth == 0)) {
+				if (q == start || num_members >= ZEND_GENERICS_MAX_ARGS) {
+					return false;
+				}
+				members[num_members].start = start;
+				members[num_members].len = q - start;
+				num_members++;
+				if (q == end) {
+					break;
+				}
+				start = q + 1;
+			} else if (*q == '<' || *q == '(') {
+				depth++;
+			} else if (*q == '>' || *q == ')') {
+				if (!depth) return false;
+				depth--;
+			}
+		}
+		if (depth != 0) {
+			return false;
+		}
+	}
+
+	/* Whole argument is one bare intersection ("a&b"). */
+	if (num_members == 1) {
+		return zend_generics_build_intersection_arg(&members[0], out);
+	}
+
+	uint32_t mask = 0;
+	zend_type elems[ZEND_GENERICS_MAX_ARGS];
+	uint32_t num_elems = 0;
+
+	for (uint32_t i = 0; i < num_members; i++) {
+		zend_generic_name_slice m = members[i];
+		if (m.len >= 2 && m.start[0] == '(') {
+			if (m.start[m.len - 1] != ')') {
+				goto fail;
+			}
+			m.start++;
+			m.len -= 2;
+			if (!zend_generics_build_intersection_arg(&m, &elems[num_elems])) {
+				goto fail;
+			}
+			num_elems++;
+			continue;
+		}
+		if (zend_generics_slice_is_composite(&m)) {
+			goto fail; /* intersections inside unions must be parenthesized */
+		}
+		uint32_t sm = zend_generics_scalar_mask(&m);
+		if (sm) {
+			mask |= sm;
+			continue;
+		}
+		zend_string *nm = zend_generics_request_type_name(
+			zend_string_init(m.start, m.len, 0));
+		elems[num_elems] = (zend_type) ZEND_TYPE_INIT_CLASS(nm, 0, 0);
+		num_elems++;
+	}
+
+	if (num_elems == 0) {
+		if (mask == 0 || mask == MAY_BE_NULL) {
+			return false;
+		}
+		*out = (zend_type) ZEND_TYPE_INIT_MASK(mask);
+		return true;
+	}
+	if (num_elems == 1 && !ZEND_TYPE_HAS_LIST(elems[0])) {
+		*out = elems[0];
+		ZEND_TYPE_FULL_MASK(*out) |= mask;
+		return true;
+	}
+	{
+		zend_type_list *l = zend_arena_alloc(&CG(arena), ZEND_TYPE_LIST_SIZE(num_elems));
+		l->num_types = num_elems;
+		memcpy(l->types, elems, num_elems * sizeof(zend_type));
+		*out = (zend_type) ZEND_TYPE_INIT_UNION(l, _ZEND_TYPE_ARENA_BIT | mask);
+	}
+	return true;
+fail:
+	for (uint32_t i = 0; i < num_elems; i++) {
+		zend_generics_arg_release_names(elems[i]);
+	}
+	return false;
+}
+
 static zend_class_entry *zend_generics_stamp_instantiation_impl(
 		zend_string *name, zend_string *lc_name, bool use_autoload)
 {
@@ -1550,23 +1913,44 @@ static zend_class_entry *zend_generics_stamp_instantiation_impl(
 	binding->owned_names_cap = 0;
 	binding->owned_names = NULL;
 	for (uint32_t i = 0; i < num_args; i++) {
-		uint32_t scalar_mask = zend_generics_scalar_mask(&arg_slices[i]);
+		const zend_generic_name_slice *slice = &arg_slices[i];
+		uint32_t scalar_mask = zend_generics_scalar_mask(slice);
 		if (scalar_mask) {
+			if (UNEXPECTED(scalar_mask == MAY_BE_NULL)) {
+				/* null is a union member, never a standalone argument. */
+				goto malformed_arg;
+			}
 			binding->args[i] = (zend_type) ZEND_TYPE_INIT_MASK(scalar_mask);
+		} else if (zend_generics_slice_is_composite(slice)) {
+			if (UNEXPECTED(CG(compiler_options) & ZEND_COMPILE_PRELOAD)) {
+				zend_throw_error(NULL,
+					"Cannot stamp %s during preloading: composite type arguments "
+					"are runtime-stamped in this version", ZSTR_VAL(name));
+				goto release_built_args;
+			}
+			if (!zend_generics_build_composite_arg(slice, &binding->args[i])) {
+				goto malformed_arg;
+			}
 		} else {
 			zend_string *arg_name = zend_generics_request_type_name(
-				zend_string_init(arg_slices[i].start, arg_slices[i].len, 0));
+				zend_string_init(slice->start, slice->len, 0));
 			binding->args[i] = (zend_type) ZEND_TYPE_INIT_CLASS(arg_name, 0, 0);
 		}
+		continue;
+malformed_arg:
+		zend_throw_error(NULL, "Malformed generic class name \"%s\"", ZSTR_VAL(name));
+release_built_args:
+		for (uint32_t j = 0; j < i; j++) {
+			zend_generics_arg_release_names(binding->args[j]);
+		}
+		return NULL;
 	}
 
 	if (!zend_generics_check_bounds(template_ce, binding, name, use_autoload)) {
 		/* Interning is a no-op at runtime under opcache, so the arg names
 		 * are real refs; the binding won't outlive this failure. */
 		for (uint32_t i = 0; i < num_args; i++) {
-			if (ZEND_TYPE_HAS_NAME(binding->args[i])) {
-				zend_string_release(ZEND_TYPE_NAME(binding->args[i]));
-			}
+			zend_generics_arg_release_names(binding->args[i]);
 		}
 		return NULL;
 	}

@@ -62,6 +62,10 @@ ZEND_API zend_function *zend_generics_get_method_instantiation(
  * secondarily, the scope's class binding). Owned string or NULL + throw. */
 ZEND_API zend_string *zend_generics_resolve_type_symbol(const char *sym, size_t sym_len);
 
+/* Release the class-name references a binding argument holds, including
+ * names inside composite (DNF) type lists; list buffers are arena-owned. */
+ZEND_API void zend_generics_arg_release_names(zend_type arg);
+
 /* Set by the tracing JIT (opcache): called for every stamped method clone so
  * the JIT can attach a per-clone trace extension (own counters, own type
  * sources, own compiled-trace slots) instead of the template's, which the

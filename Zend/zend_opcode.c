@@ -27,6 +27,7 @@
 #include "zend_sort.h"
 #include "zend_constants.h"
 #include "zend_observer.h"
+#include "zend_generics.h"
 
 #include "zend_vm.h"
 
@@ -478,9 +479,7 @@ ZEND_API void destroy_zend_class(zval *zv)
 				/* Struct is arena-allocated; the arg names and any owned
 				 * substituted composite type names ("C<Bag>") are refs. */
 				for (uint32_t i = 0; i < ce->generic_binding->num_args; i++) {
-					if (ZEND_TYPE_HAS_NAME(ce->generic_binding->args[i])) {
-						zend_string_release_ex(ZEND_TYPE_NAME(ce->generic_binding->args[i]), 0);
-					}
+					zend_generics_arg_release_names(ce->generic_binding->args[i]);
 				}
 				for (uint32_t i = 0; i < ce->generic_binding->num_owned_names; i++) {
 					zend_string_release_ex(ce->generic_binding->owned_names[i], 0);

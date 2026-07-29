@@ -1874,10 +1874,13 @@ check_fetch_type:
 			ZEND_ASSERT(param_idx < scope->generic_binding->num_args);
 			arg = scope->generic_binding->args[param_idx];
 have_type_param:;
-			if (UNEXPECTED(!ZEND_TYPE_HAS_NAME(arg))) {
+			if (UNEXPECTED(!ZEND_TYPE_HAS_NAME(arg) || ZEND_TYPE_PURE_MASK(arg) != 0)) {
 				zend_string *type_str = zend_type_to_string(arg);
 				zend_throw_or_error(fetch_type, NULL,
-					"Cannot use scalar type argument %s as a class", ZSTR_VAL(type_str));
+					ZEND_TYPE_HAS_NAME(arg) || ZEND_TYPE_HAS_LIST(arg)
+						? "Cannot use composite type argument %s as a class"
+						: "Cannot use scalar type argument %s as a class",
+					ZSTR_VAL(type_str));
 				zend_string_release(type_str);
 				return NULL;
 			}
