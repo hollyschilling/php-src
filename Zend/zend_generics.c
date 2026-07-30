@@ -2381,46 +2381,59 @@ ZEND_API zend_function *zend_generics_get_method_instantiation(
 	binding->owned_names_cap = 0;
 	binding->owned_names = NULL;
 	for (uint32_t i = 0; i < num_args; i++) {
-		uint32_t scalar_mask = zend_generics_scalar_mask(&arg_slices[i]);
+		const zend_generic_name_slice *slice = &arg_slices[i];
+		uint32_t scalar_mask = zend_generics_scalar_mask(slice);
 		if (scalar_mask) {
+			if (UNEXPECTED(scalar_mask == MAY_BE_NULL)) {
+				zend_throw_error(NULL, "Cannot bind %s::%s(): malformed type argument",
+					ZSTR_VAL(ce->name), ZSTR_VAL(method_name));
+				num_args = i;
+				goto fail_release_args;
+			}
 			binding->args[i] = (zend_type) ZEND_TYPE_INIT_MASK(scalar_mask);
+		} else if (zend_generics_slice_is_composite(slice)) {
+			if (!zend_generics_build_composite_arg(slice, &binding->args[i])) {
+				zend_throw_error(NULL, "Cannot bind %s::%s(): malformed type argument",
+					ZSTR_VAL(ce->name), ZSTR_VAL(method_name));
+				num_args = i;
+				goto fail_release_args;
+			}
 		} else {
 			zend_string *arg_name = zend_generics_request_type_name(
-				zend_string_init(arg_slices[i].start, arg_slices[i].len, 0));
+				zend_string_init(slice->start, slice->len, 0));
 			binding->args[i] = (zend_type) ZEND_TYPE_INIT_CLASS(arg_name, 0, 0);
 		}
 	}
 
-	/* Bounds, per method parameter (no packs on methods). */
+	/* Bounds, per method parameter (no packs on methods); same
+	 * subtype-against-composite semantics as class-level bounds. */
 	for (uint32_t i = 0; i < mgp->num_params; i++) {
 		const zend_generic_param *param = &mgp->params[i];
 		if (!param->bound_name) {
 			continue;
 		}
-		if (!ZEND_TYPE_HAS_NAME(binding->args[i])) {
+		zend_type bound_type;
+		if (!zend_generics_parse_bound_type(param->bound_name, &bound_type)) {
 			zend_throw_error(NULL,
-				"Cannot bind %s::%s(): scalar type argument does not satisfy the bound %s "
-				"of type parameter %s", ZSTR_VAL(ce->name), ZSTR_VAL(method_name),
+				"Cannot bind %s::%s(): malformed bound %s of type parameter %s",
+				ZSTR_VAL(ce->name), ZSTR_VAL(method_name),
 				ZSTR_VAL(param->bound_name), ZSTR_VAL(param->name));
 			goto fail;
 		}
-		zend_class_entry *arg_ce = zend_lookup_class(ZEND_TYPE_NAME(binding->args[i]));
-		zend_class_entry *bound_ce = arg_ce ? zend_lookup_class(param->bound_name) : NULL;
-		if (!arg_ce || !bound_ce) {
-			if (!EG(exception)) {
-				zend_throw_error(NULL, "Cannot bind %s::%s(): class %s was not found",
-					ZSTR_VAL(ce->name), ZSTR_VAL(method_name),
-					!arg_ce ? ZSTR_VAL(ZEND_TYPE_NAME(binding->args[i]))
-						: ZSTR_VAL(param->bound_name));
-			}
+		int r = zend_generics_arg_satisfies_bound_type(binding->args[i], bound_type,
+			/* lookup_flags */ 0, method_name, param);
+		zend_generics_arg_release_names(bound_type);
+		if (r < 0) {
 			goto fail;
 		}
-		if (!instanceof_function(arg_ce, bound_ce)) {
+		if (r == 0) {
+			zend_string *ts = zend_type_to_string(binding->args[i]);
 			zend_throw_error(NULL,
 				"%s does not satisfy the bound %s of type parameter %s on %s::%s()",
-				ZSTR_VAL(arg_ce->name), ZSTR_VAL(bound_ce->name),
+				ZSTR_VAL(ts), ZSTR_VAL(param->bound_name),
 				ZSTR_VAL(param->name), ZSTR_VAL(ce->name),
 				ZSTR_VAL(base->common.function_name));
+			zend_string_release(ts);
 			goto fail;
 		}
 	}
@@ -2520,10 +2533,9 @@ ZEND_API zend_function *zend_generics_get_method_instantiation(
 	}
 
 fail:
+fail_release_args:
 	for (uint32_t i = 0; i < num_args; i++) {
-		if (ZEND_TYPE_HAS_NAME(binding->args[i])) {
-			zend_string_release(ZEND_TYPE_NAME(binding->args[i]));
-		}
+		zend_generics_arg_release_names(binding->args[i]);
 	}
 	zend_string_release(cache_key);
 	return NULL;

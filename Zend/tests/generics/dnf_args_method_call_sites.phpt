@@ -33,7 +33,7 @@ try {
 }
 ?>
 --EXPECT--
-string(10) "int|string"
+string(10) "string|int"
 string(7) "(B&C)|A"
 string(3) "B&C"
 string(11) "Vec<A|null>"
