@@ -30,19 +30,23 @@ var_dump($pi->getGenericTypeArguments());
 --EXPECT--
 array(2) {
   [0]=>
-  array(3) {
+  array(4) {
     ["name"]=>
     string(2) "Tp"
     ["bound"]=>
     string(9) "Countable"
+    ["variance"]=>
+    NULL
     ["variadic"]=>
     bool(true)
   }
   [1]=>
-  array(3) {
+  array(4) {
     ["name"]=>
     string(1) "R"
     ["bound"]=>
+    NULL
+    ["variance"]=>
     NULL
     ["variadic"]=>
     bool(false)

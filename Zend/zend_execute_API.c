@@ -159,6 +159,7 @@ void init_executor(void) /* {{{ */
 	EG(extension_autoload_attempted) = NULL;
 	EG(generics_stamping) = NULL;
 	EG(generics_method_cache) = NULL;
+	EG(generics_variance_cache) = NULL;
 	EG(generics_type_names) = NULL;
 
 	EG(ticks_count) = 0;
@@ -560,6 +561,13 @@ void shutdown_executor(void) /* {{{ */
 			zend_hash_destroy(EG(generics_type_names));
 			FREE_HASHTABLE(EG(generics_type_names));
 			EG(generics_type_names) = NULL;
+		}
+		/* Like generics_type_names: destructors above may have re-populated
+		 * (or re-allocated) the variance-edge cache; tear it down last. */
+		if (EG(generics_variance_cache)) {
+			zend_hash_destroy(EG(generics_variance_cache));
+			FREE_HASHTABLE(EG(generics_variance_cache));
+			EG(generics_variance_cache) = NULL;
 		}
 	}
 

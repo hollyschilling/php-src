@@ -10951,6 +10951,26 @@ static void zend_compile_extension_decl(zend_ast *ast) /* {{{ */
 /* }}} */
 
 static zend_generic_params *zend_compile_generic_params_list(const zend_ast *params_ast, bool allow_pack)
+ZEND_API uint32_t zend_generic_variance_attr(zend_ast *ident)
+{
+	zend_string *word = zend_ast_get_str(ident);
+	uint32_t attr;
+	if (zend_string_equals_literal_ci(word, "out")) {
+		attr = ZEND_GENERIC_VARIANCE_OUT;
+	} else if (zend_string_equals_literal_ci(word, "in")) {
+		attr = ZEND_GENERIC_VARIANCE_IN;
+	} else {
+		zend_error_noreturn(E_COMPILE_ERROR,
+			"Expected 'in' or 'out' before a generic type parameter name, found \"%s\"",
+			ZSTR_VAL(word));
+	}
+	/* The identifier node never joins the tree; release its string here so
+	 * the orphaned arena node holds nothing. */
+	zend_ast_destroy(ident);
+	return attr;
+}
+
+static void zend_compile_generic_params(zend_class_entry *ce, const zend_ast *params_ast)
 {
 	const zend_ast_list *list = zend_ast_get_list((zend_ast *) params_ast);
 	zend_generic_params *generic_params;
@@ -10998,8 +11018,23 @@ static zend_generic_params *zend_compile_generic_params_list(const zend_ast *par
 			generic_params->pack_index = i;
 		}
 
+		uint32_t variance = param_ast->attr & ZEND_GENERIC_VARIANCE_MASK;
+		if (variance) {
+			if (!(ce->ce_flags & ZEND_ACC_INTERFACE)) {
+				zend_error_noreturn(E_COMPILE_ERROR,
+					"Variance annotations are only permitted on interface type "
+					"parameters (parameter %s)", ZSTR_VAL(param_name));
+			}
+			if (param_ast->attr & ZEND_GENERIC_PARAM_PACK) {
+				zend_error_noreturn(E_COMPILE_ERROR,
+					"Variance annotations cannot be combined with a type "
+					"parameter pack (parameter %s)", ZSTR_VAL(param_name));
+			}
+			ce->ce_flags2 |= ZEND_ACC2_GENERIC_VARIANT;
+		}
 		generic_params->params[i].name = zend_new_interned_string(zend_string_copy(param_name));
-		generic_params->params[i].bound_kind = param_ast->attr & ZEND_GENERIC_BOUND_MASK;
+		generic_params->params[i].bound_kind =
+			param_ast->attr & (ZEND_GENERIC_BOUND_MASK | ZEND_GENERIC_VARIANCE_MASK);
 		if (bound_ast) {
 			/* 'T: <type>' -- the bound is canonicalized with the same
 			 * machinery as type arguments (FQ names, canonical scalars,
@@ -11220,6 +11255,12 @@ static zend_class_entry *zend_compile_class_decl(znode *result, const zend_ast *
 
 	if ((ce->ce_flags & (ZEND_ACC_IMPLICIT_ABSTRACT_CLASS|ZEND_ACC_INTERFACE|ZEND_ACC_TRAIT|ZEND_ACC_EXPLICIT_ABSTRACT_CLASS)) == ZEND_ACC_IMPLICIT_ABSTRACT_CLASS) {
 		zend_verify_abstract_class(ce);
+	}
+
+	if (ce->ce_flags2 & ZEND_ACC2_GENERIC_VARIANT) {
+		/* Every member is compiled; enforce the positional discipline that
+		 * makes the declared variance sound. */
+		zend_generics_check_variance_positions(ce);
 	}
 
 	CG(active_class_entry) = original_ce;

@@ -210,6 +210,9 @@ struct _zend_executor_globals {
 	/* Per-request generic METHOD instantiations, keyed "<ce ptr>:<lc mangled
 	 * method name>"; values are stamped zend_function clones (spike). */
 	HashTable *generics_method_cache;
+	/* variance-edge results between stamped instantiations, keyed
+	 * "instance_ce ptr:iface_ce ptr"; lazily allocated per request */
+	HashTable *generics_variance_cache;
 	/* Canonical CE-cache-capable copies of runtime-created type-name strings
 	 * (generic binding arguments, substituted composites), keyed by content;
 	 * lazily allocated, torn down at the tail of shutdown_executor. */

@@ -847,6 +847,12 @@ generic_param:
 		T_STRING						{ $$ = zend_ast_create(ZEND_AST_GENERIC_PARAM, $1, NULL); }
 	|	T_STRING ':' generic_bound
 			{ $$ = zend_ast_create_ex(ZEND_AST_GENERIC_PARAM, ZEND_GENERIC_BOUND_TYPE, $1, $3); }
+	|	T_STRING T_STRING
+			{ $$ = zend_ast_create_ex(ZEND_AST_GENERIC_PARAM,
+				  zend_generic_variance_attr($1), $2, NULL); }
+	|	T_STRING T_STRING ':' generic_bound
+			{ $$ = zend_ast_create_ex(ZEND_AST_GENERIC_PARAM,
+				  zend_generic_variance_attr($1) | ZEND_GENERIC_BOUND_TYPE, $2, $4); }
 	|	T_ELLIPSIS T_STRING
 			{ $$ = zend_ast_create_ex(ZEND_AST_GENERIC_PARAM, ZEND_GENERIC_PARAM_PACK, $2, NULL); }
 	|	T_ELLIPSIS T_STRING ':' generic_bound

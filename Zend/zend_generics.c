@@ -1036,13 +1036,17 @@ static bool zend_generics_build_composite_arg(
  * exception on lookup failure. */
 static int zend_generics_class_satisfies_bound_member(
 		zend_class_entry *ce, const zend_type bm, uint32_t lookup_flags,
-		const zend_string *display_name, const zend_generic_param *param)
+		const zend_string *display_name, const zend_generic_param *param,
+		bool quiet)
 {
 	if (ZEND_TYPE_HAS_LIST(bm)) {
 		const zend_type *pt;
 		ZEND_TYPE_LIST_FOREACH(ZEND_TYPE_LIST(bm), pt) {
 			zend_class_entry *pce = zend_lookup_class_ex(ZEND_TYPE_NAME(*pt), NULL, lookup_flags);
 			if (!pce) {
+				if (quiet) {
+					return 0;
+				}
 				if (!EG(exception)) {
 					zend_throw_error(NULL,
 						"Cannot stamp %s: bound class %s of type parameter %s was not found",
@@ -1059,6 +1063,9 @@ static int zend_generics_class_satisfies_bound_member(
 	}
 	zend_class_entry *bce = zend_lookup_class_ex(ZEND_TYPE_NAME(bm), NULL, lookup_flags);
 	if (!bce) {
+		if (quiet) {
+			return 0;
+		}
 		if (!EG(exception)) {
 			zend_throw_error(NULL,
 				"Cannot stamp %s: bound class %s of type parameter %s was not found",
@@ -1096,7 +1103,8 @@ static uint32_t zend_generics_bound_class_members(
  * against the whole bound. */
 static int zend_generics_atom_satisfies_bound(
 		const zend_type atom, const zend_type bound, uint32_t lookup_flags,
-		const zend_string *display_name, const zend_generic_param *param)
+		const zend_string *display_name, const zend_generic_param *param,
+		bool quiet)
 {
 	const zend_type *members[ZEND_GENERICS_MAX_ARGS];
 	uint32_t num_members = zend_generics_bound_class_members(bound, members, ZEND_GENERICS_MAX_ARGS);
@@ -1117,6 +1125,9 @@ static int zend_generics_atom_satisfies_bound(
 		ZEND_TYPE_LIST_FOREACH(ZEND_TYPE_LIST(atom), ap) {
 			zend_class_entry *pce = zend_lookup_class_ex(ZEND_TYPE_NAME(*ap), NULL, lookup_flags);
 			if (!pce) {
+				if (quiet) {
+					return 0;
+				}
 				if (!EG(exception)) {
 					zend_throw_error(NULL,
 						"Cannot stamp %s: class %s for type parameter %s was not found",
@@ -1138,6 +1149,9 @@ static int zend_generics_atom_satisfies_bound(
 				ZEND_TYPE_LIST_FOREACH(ZEND_TYPE_LIST(bm), bp) {
 					zend_class_entry *bce = zend_lookup_class_ex(ZEND_TYPE_NAME(*bp), NULL, lookup_flags);
 					if (!bce) {
+						if (quiet) {
+							return 0;
+						}
 						if (!EG(exception)) {
 							zend_throw_error(NULL,
 								"Cannot stamp %s: bound class %s of type parameter %s was not found",
@@ -1155,6 +1169,9 @@ static int zend_generics_atom_satisfies_bound(
 			} else {
 				zend_class_entry *bce = zend_lookup_class_ex(ZEND_TYPE_NAME(bm), NULL, lookup_flags);
 				if (!bce) {
+					if (quiet) {
+						return 0;
+					}
 					if (!EG(exception)) {
 						zend_throw_error(NULL,
 							"Cannot stamp %s: bound class %s of type parameter %s was not found",
@@ -1178,6 +1195,9 @@ static int zend_generics_atom_satisfies_bound(
 	/* single class atom */
 	zend_class_entry *ce = zend_lookup_class_ex(ZEND_TYPE_NAME(atom), NULL, lookup_flags);
 	if (!ce) {
+		if (quiet) {
+			return 0;
+		}
 		if (!EG(exception)) {
 			zend_throw_error(NULL,
 				"Cannot stamp %s: class %s for type parameter %s was not found",
@@ -1188,7 +1208,7 @@ static int zend_generics_atom_satisfies_bound(
 	}
 	for (uint32_t m = 0; m < num_members; m++) {
 		int r = zend_generics_class_satisfies_bound_member(ce, *mem[m],
-			lookup_flags, display_name, param);
+			lookup_flags, display_name, param, quiet);
 		if (r != 0) {
 			return r;
 		}
@@ -1199,7 +1219,8 @@ static int zend_generics_atom_satisfies_bound(
 /* Whole argument against the whole bound. */
 static int zend_generics_arg_satisfies_bound_type(
 		const zend_type arg, const zend_type bound, uint32_t lookup_flags,
-		const zend_string *display_name, const zend_generic_param *param)
+		const zend_string *display_name, const zend_generic_param *param,
+		bool quiet)
 {
 	uint32_t bmask = ZEND_TYPE_PURE_MASK(bound);
 
@@ -1211,7 +1232,7 @@ static int zend_generics_arg_satisfies_bound_type(
 		const zend_type *el;
 		ZEND_TYPE_LIST_FOREACH(ZEND_TYPE_LIST(arg), el) {
 			int r = zend_generics_atom_satisfies_bound(*el, bound,
-				lookup_flags, display_name, param);
+				lookup_flags, display_name, param, quiet);
 			if (r != 1) {
 				return r;
 			}
@@ -1220,7 +1241,7 @@ static int zend_generics_arg_satisfies_bound_type(
 	}
 	if (ZEND_TYPE_HAS_NAME(arg) || ZEND_TYPE_HAS_LIST(arg)) {
 		return zend_generics_atom_satisfies_bound(arg, bound,
-			lookup_flags, display_name, param);
+			lookup_flags, display_name, param, quiet);
 	}
 	return 1; /* pure-mask argument, already subset-checked above */
 }
@@ -1274,7 +1295,7 @@ static bool zend_generics_check_bounds(
 		for (uint32_t j = arg_start; j < arg_start + arg_count; j++) {
 			const zend_type arg = binding->args[j];
 			int r = zend_generics_arg_satisfies_bound_type(arg, bound_type,
-				lookup_flags, display_name, param);
+				lookup_flags, display_name, param, /* quiet */ false);
 			if (r < 0) {
 				failed = true;
 				break;
@@ -2182,6 +2203,362 @@ ZEND_API zend_class_entry *zend_generics_stamp_instantiation(
 	zend_hash_del(EG(generics_stamping), lc_name);
 	return ce;
 }
+
+/* Resolve a compiler-emitted symbolic generic class reference ("Vec<T>" or
+ * a bare "T"-shaped composite from a template body) against the executing
+ * scope's binding. Returns an owned string, or NULL with an exception. */
+/* ---- Variance ----------------------------------------------------------
+ * Declared on interface type parameters only ('in' / 'out', stored in
+ * bound_kind). Soundness comes from the positional discipline checked at
+ * declaration; the runtime side only adds subtype edges between stamped
+ * instantiations of one variant template. */
+
+static zend_always_inline uint32_t zend_generics_param_variance(
+		const zend_generic_params *gp, uint32_t i)
+{
+	return gp->params[i].bound_kind & ZEND_GENERIC_VARIANCE_MASK;
+}
+
+/* Polarity: +1 output, -1 input, 0 invariant. */
+static int zend_generics_compose_polarity(int pol, uint32_t variance)
+{
+	if (variance & ZEND_GENERIC_VARIANCE_OUT) return pol;
+	if (variance & ZEND_GENERIC_VARIANCE_IN) return -pol;
+	return 0;
+}
+
+static ZEND_COLD ZEND_NORETURN void zend_generics_variance_error(
+		const zend_class_entry *ce, const zend_generic_param *param, int pol,
+		bool foreign, const char *kind, const zend_string *member)
+{
+	const char *vword = (param->bound_kind & ZEND_GENERIC_VARIANCE_OUT)
+		? "Covariant" : "Contravariant";
+	if (foreign) {
+		zend_error_noreturn(E_COMPILE_ERROR,
+			"%s type parameter %s of %s may not appear inside arguments of "
+			"another generic reference in this version (%s of %s)",
+			vword, ZSTR_VAL(param->name), ZSTR_VAL(ce->name), kind,
+			member ? ZSTR_VAL(member) : "?");
+	}
+	if (pol == 0) {
+		zend_error_noreturn(E_COMPILE_ERROR,
+			"%s type parameter %s of %s may not appear in an invariant "
+			"position (%s of %s)",
+			vword, ZSTR_VAL(param->name), ZSTR_VAL(ce->name), kind,
+			member ? ZSTR_VAL(member) : "?");
+	}
+	zend_error_noreturn(E_COMPILE_ERROR,
+		"%s type parameter %s of %s may not appear in an %s position (%s of %s)",
+		vword, ZSTR_VAL(param->name), ZSTR_VAL(ce->name),
+		pol > 0 ? "output" : "input", kind, member ? ZSTR_VAL(member) : "?");
+}
+
+/* Does the raw slice mention any VARIANT parameter as a bare label? Used for
+ * the conservative foreign-nested rule. */
+static const zend_generic_param *zend_generics_slice_mentions_variant(
+		const zend_class_entry *ce, const char *s, size_t len)
+{
+	const zend_generic_params *gp = ce->generic_params;
+	const char *p = s, *end = s + len;
+	while (p < end) {
+		char c = *p;
+		if (c == ',' || c == '<' || c == '>' || c == '.'
+				|| c == '|' || c == '&' || c == '(' || c == ')') {
+			p++;
+			continue;
+		}
+		const char *label = p;
+		bool qualified = false;
+		while (p < end && *p != ',' && *p != '<' && *p != '>'
+				&& *p != '|' && *p != '&' && *p != '(' && *p != ')') {
+			if (*p == '\\') qualified = true;
+			p++;
+		}
+		if (p < end && *p == '<') {
+			continue; /* base name of a nested reference */
+		}
+		if (!qualified) {
+			for (uint32_t i = 0; i < gp->num_params; i++) {
+				if (zend_generics_param_variance(gp, i)
+						&& zend_binary_strcasecmp(label, p - label,
+							ZSTR_VAL(gp->params[i].name), ZSTR_LEN(gp->params[i].name)) == 0) {
+					return &gp->params[i];
+				}
+			}
+		}
+	}
+	return NULL;
+}
+
+static void zend_generics_check_slice_polarity(
+		const zend_class_entry *ce, const char *s, size_t len, int pol,
+		const char *kind, const zend_string *member);
+
+/* One member of a slice: a bare label, or a nested reference base<args>. */
+static void zend_generics_check_member_polarity(
+		const zend_class_entry *ce, const char *s, size_t len, int pol,
+		const char *kind, const zend_string *member)
+{
+	/* strip one level of parens ("(a&b)") */
+	while (len >= 2 && s[0] == '(' && s[len - 1] == ')') {
+		s++;
+		len -= 2;
+	}
+	const char *lt = NULL;
+	uint32_t depth = 0;
+	for (const char *p = s; p < s + len; p++) {
+		if (*p == '<') { if (depth == 0) { lt = p; break; } }
+	}
+	(void) depth;
+	if (lt) {
+		/* nested reference */
+		if (zend_binary_strcasecmp(s, lt - s, ZSTR_VAL(ce->name), ZSTR_LEN(ce->name)) == 0) {
+			/* self-reference: compose polarity through own variance */
+			const zend_generic_params *gp = ce->generic_params;
+			/* split args of the nested list */
+			const char *arg = lt + 1;
+			const char *end = s + len - 1; /* before closing '>' */
+			uint32_t d = 0, idx = 0;
+			const char *as = arg;
+			for (const char *p = arg; p <= end; p++) {
+				if (p == end || (*p == ',' && d == 0)) {
+					if (idx < gp->num_params) {
+						zend_generics_check_slice_polarity(ce, as, p - as,
+							zend_generics_compose_polarity(pol,
+								zend_generics_param_variance(gp, idx)),
+							kind, member);
+					}
+					idx++;
+					as = p + 1;
+				} else if (*p == '<' || *p == '(') {
+					d++;
+				} else if (*p == '>' || *p == ')') {
+					if (d) d--;
+				}
+			}
+			return;
+		}
+		/* foreign reference: conservative rule */
+		const zend_generic_param *vp = zend_generics_slice_mentions_variant(ce, lt + 1, len - (lt + 1 - s));
+		if (vp) {
+			zend_generics_variance_error(ce, vp, pol, /* foreign */ true, kind, member);
+		}
+		return;
+	}
+	/* bare label */
+	const zend_generic_params *gp = ce->generic_params;
+	if (memchr(s, '\\', len)) {
+		return; /* qualified: never a parameter */
+	}
+	for (uint32_t i = 0; i < gp->num_params; i++) {
+		uint32_t v = zend_generics_param_variance(gp, i);
+		if (v && zend_binary_strcasecmp(s, len,
+				ZSTR_VAL(gp->params[i].name), ZSTR_LEN(gp->params[i].name)) == 0) {
+			if ((pol > 0 && !(v & ZEND_GENERIC_VARIANCE_OUT))
+					|| (pol < 0 && !(v & ZEND_GENERIC_VARIANCE_IN))
+					|| pol == 0) {
+				zend_generics_variance_error(ce, &gp->params[i], pol, false, kind, member);
+			}
+			return;
+		}
+	}
+}
+
+/* Split a slice on top-level '|' / '&' (DNF members share the position's
+ * polarity) and check each member. */
+static void zend_generics_check_slice_polarity(
+		const zend_class_entry *ce, const char *s, size_t len, int pol,
+		const char *kind, const zend_string *member)
+{
+	/* skip a "..." spread prefix (packs are never variant) */
+	if (len >= 3 && s[0] == '.' && s[1] == '.' && s[2] == '.') {
+		s += 3;
+		len -= 3;
+	}
+	uint32_t d = 0;
+	const char *ms = s;
+	for (const char *p = s; p <= s + len; p++) {
+		if (p == s + len || ((*p == '|' || *p == '&') && d == 0)) {
+			if (p > ms) {
+				zend_generics_check_member_polarity(ce, ms, p - ms, pol, kind, member);
+			}
+			ms = p + 1;
+		} else if (*p == '<' || *p == '(') {
+			d++;
+		} else if (*p == '>' || *p == ')') {
+			if (d) d--;
+		}
+	}
+}
+
+static void zend_generics_check_type_polarity(
+		const zend_class_entry *ce, zend_type type, int pol,
+		const char *kind, const zend_string *member)
+{
+	if (ZEND_TYPE_HAS_LIST(type)) {
+		const zend_type *lt;
+		ZEND_TYPE_LIST_FOREACH(ZEND_TYPE_LIST(type), lt) {
+			zend_generics_check_type_polarity(ce, *lt, pol, kind, member);
+		} ZEND_TYPE_LIST_FOREACH_END();
+		return;
+	}
+	if (ZEND_TYPE_HAS_NAME(type)) {
+		zend_string *name = ZEND_TYPE_NAME(type);
+		zend_generics_check_slice_polarity(ce, ZSTR_VAL(name), ZSTR_LEN(name),
+			pol, kind, member);
+	}
+}
+
+ZEND_API void zend_generics_check_variance_positions(const zend_class_entry *ce)
+{
+	const zend_generic_params *gp = ce->generic_params;
+	ZEND_ASSERT(gp && (ce->ce_flags & ZEND_ACC_INTERFACE));
+
+	zend_function *fn;
+	zend_string *key;
+	ZEND_HASH_MAP_FOREACH_STR_KEY_PTR(&ce->function_table, key, fn) {
+		if (fn->common.fn_flags & ZEND_ACC_STATIC) {
+			continue; /* statics are not part of the variance contract */
+		}
+		if (fn->type != ZEND_USER_FUNCTION || !fn->op_array.arg_info) {
+			continue;
+		}
+		const zend_op_array *op = &fn->op_array;
+		if (op->fn_flags & ZEND_ACC_HAS_RETURN_TYPE) {
+			zend_generics_check_type_polarity(ce, op->arg_info[-1].type, +1,
+				"return type", op->function_name);
+		}
+		uint32_t n = op->num_args + ((op->fn_flags & ZEND_ACC_VARIADIC) ? 1 : 0);
+		for (uint32_t i = 0; i < n; i++) {
+			int pol = ZEND_ARG_SEND_MODE(&op->arg_info[i]) ? 0 : -1;
+			zend_generics_check_type_polarity(ce, op->arg_info[i].type, pol,
+				"parameter type", op->function_name);
+		}
+	} ZEND_HASH_FOREACH_END();
+
+	zend_class_constant *c;
+	ZEND_HASH_MAP_FOREACH_STR_KEY_PTR(&ce->constants_table, key, c) {
+		if (ZEND_TYPE_IS_SET(c->type)) {
+			zend_generics_check_type_polarity(ce, c->type, +1, "constant", key);
+		}
+	} ZEND_HASH_FOREACH_END();
+
+	zend_property_info *prop;
+	ZEND_HASH_MAP_FOREACH_STR_KEY_PTR(&ce->properties_info, key, prop) {
+		if (!ZEND_TYPE_IS_SET(prop->type)) {
+			continue;
+		}
+		int pol = 0;
+		if (prop->hooks) {
+			bool has_get = prop->hooks[ZEND_PROPERTY_HOOK_GET] != NULL;
+			bool has_set = prop->hooks[ZEND_PROPERTY_HOOK_SET] != NULL;
+			if (has_get && !has_set) pol = +1;
+			else if (has_set && !has_get) pol = -1;
+		}
+		zend_generics_check_type_polarity(ce, prop->type, pol, "property", key);
+	} ZEND_HASH_FOREACH_END();
+
+	/* Deferred inheritance references: conservative foreign rule. */
+	for (uint32_t i = 0; i < gp->num_deferred_interfaces; i++) {
+		zend_string *ref = gp->deferred_interfaces[i];
+		const zend_generic_param *vp =
+			zend_generics_slice_mentions_variant(ce, ZSTR_VAL(ref), ZSTR_LEN(ref));
+		if (vp) {
+			zend_generics_variance_error(ce, vp, 0, true, "extended interface", ref);
+		}
+	}
+}
+
+static bool zend_generics_arg_types_identical(zend_type a, zend_type b)
+{
+	if (ZEND_TYPE_PURE_MASK(a) != ZEND_TYPE_PURE_MASK(b)) {
+		return false;
+	}
+	if (ZEND_TYPE_HAS_NAME(a) && ZEND_TYPE_HAS_NAME(b)) {
+		return zend_string_equals_ci(ZEND_TYPE_NAME(a), ZEND_TYPE_NAME(b));
+	}
+	if (ZEND_TYPE_HAS_LIST(a) && ZEND_TYPE_HAS_LIST(b)) {
+		if (ZEND_TYPE_IS_INTERSECTION(a) != ZEND_TYPE_IS_INTERSECTION(b)
+				|| ZEND_TYPE_LIST(a)->num_types != ZEND_TYPE_LIST(b)->num_types) {
+			return false;
+		}
+		for (uint32_t i = 0; i < ZEND_TYPE_LIST(a)->num_types; i++) {
+			if (!zend_generics_arg_types_identical(
+					ZEND_TYPE_LIST(a)->types[i], ZEND_TYPE_LIST(b)->types[i])) {
+				return false;
+			}
+		}
+		return true;
+	}
+	return !ZEND_TYPE_HAS_NAME(a) && !ZEND_TYPE_HAS_LIST(a)
+		&& !ZEND_TYPE_HAS_NAME(b) && !ZEND_TYPE_HAS_LIST(b);
+}
+
+static zend_always_inline bool zend_generics_quiet_subtype(zend_type a, zend_type b)
+{
+	return zend_generics_arg_satisfies_bound_type(a, b,
+		ZEND_FETCH_CLASS_NO_AUTOLOAD | ZEND_FETCH_CLASS_SILENT,
+		NULL, NULL, /* quiet */ true) == 1;
+}
+
+ZEND_API bool zend_generics_variant_implements(
+		const zend_class_entry *instance_ce, const zend_class_entry *iface_ce)
+{
+	if (!(iface_ce->ce_flags2 & ZEND_ACC2_GENERIC_INSTANCE)) {
+		return false;
+	}
+	const zend_generic_binding *want = iface_ce->generic_binding;
+	const zend_class_entry *tmpl = want->template_ce;
+	if (!(tmpl->ce_flags2 & ZEND_ACC2_GENERIC_VARIANT)) {
+		return false;
+	}
+
+	zend_string *key = zend_strpprintf(0, "%p:%p",
+		(void *) instance_ce, (void *) iface_ce);
+	if (EG(generics_variance_cache)) {
+		zval *zv = zend_hash_find(EG(generics_variance_cache), key);
+		if (zv) {
+			bool r = Z_TYPE_P(zv) == IS_TRUE;
+			zend_string_release(key);
+			return r;
+		}
+	}
+
+	bool result = false;
+	const zend_generic_params *gp = tmpl->generic_params;
+	uint32_t num_candidates = instance_ce->num_interfaces + 1;
+	for (uint32_t c = 0; c < num_candidates && !result; c++) {
+		const zend_class_entry *cand = (c == 0)
+			? instance_ce : instance_ce->interfaces[c - 1];
+		if (!(cand->ce_flags2 & ZEND_ACC2_GENERIC_INSTANCE)
+				|| cand->generic_binding->template_ce != tmpl) {
+			continue;
+		}
+		bool ok = true;
+		for (uint32_t i = 0; ok && i < gp->num_params; i++) {
+			uint32_t v = zend_generics_param_variance(gp, i);
+			zend_type a = cand->generic_binding->args[i];
+			zend_type b = want->args[i];
+			if (v & ZEND_GENERIC_VARIANCE_OUT) {
+				ok = zend_generics_quiet_subtype(a, b);
+			} else if (v & ZEND_GENERIC_VARIANCE_IN) {
+				ok = zend_generics_quiet_subtype(b, a);
+			} else {
+				ok = zend_generics_arg_types_identical(a, b);
+			}
+		}
+		result = ok;
+	}
+
+	if (!EG(generics_variance_cache)) {
+		ALLOC_HASHTABLE(EG(generics_variance_cache));
+		zend_hash_init(EG(generics_variance_cache), 16, NULL, NULL, 0);
+	}
+	zval zv;
+	ZVAL_BOOL(&zv, result);
+	zend_hash_add(EG(generics_variance_cache), key, &zv);
+	zend_string_release(key);
+	return result;
 
 /* ---- Generic METHODS (spike): explicit-args instantiation of method-level
  * type parameters ("function map<U>(...)" called as "$seq->map<Price>()").

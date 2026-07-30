@@ -4958,6 +4958,12 @@ ZEND_METHOD(ReflectionClass, getGenericTypeParameters)
 		} else {
 			add_assoc_null(&entry, "bound");
 		}
+		if (param->bound_kind & ZEND_GENERIC_VARIANCE_MASK) {
+			add_assoc_string(&entry, "variance",
+				(param->bound_kind & ZEND_GENERIC_VARIANCE_OUT) ? "out" : "in");
+		} else {
+			add_assoc_null(&entry, "variance");
+		}
 		add_assoc_bool(&entry, "variadic", i == generic_params->pack_index);
 		add_next_index_zval(return_value, &entry);
 	}

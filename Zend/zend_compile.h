@@ -385,6 +385,8 @@ typedef struct _zend_oparray_context {
 /*                                                        |     |     |     */
 /* Stamped instantiation of a generic template            |     |     |     */
 #define ZEND_ACC2_GENERIC_INSTANCE       (1 << 2)  /*  X  |     |     |     */
+/* Interface template with at least one in/out type parameter              */
+#define ZEND_ACC2_GENERIC_VARIANT        (1 << 3)  /*  X  |     |     |     */
 /*                                                        |     |     |     */
 /* Function Flags (unused: 30)                            |     |     |     */
 /* ==============                                         |     |     |     */
@@ -1190,6 +1192,15 @@ ZEND_API zend_string *zend_type_to_string(zend_type type);
 #define ZEND_GENERIC_BOUND_NONE       0
 #define ZEND_GENERIC_BOUND_TYPE       1
 #define ZEND_GENERIC_BOUND_MASK       0x3
+/* Variance of an interface type parameter, stored alongside the bound kind
+ * in zend_generic_param.bound_kind (and in the GENERIC_PARAM ast attr). */
+#define ZEND_GENERIC_VARIANCE_OUT     (1 << 3)
+#define ZEND_GENERIC_VARIANCE_IN      (1 << 4)
+#define ZEND_GENERIC_VARIANCE_MASK    (ZEND_GENERIC_VARIANCE_OUT|ZEND_GENERIC_VARIANCE_IN)
+
+/* Parser helper: maps the identifier before a generic type parameter name
+ * ("in" / "out") to its variance attr bits; compile error otherwise. */
+ZEND_API uint32_t zend_generic_variance_attr(zend_ast *ident);
 /* The parameter is a pack ("<...Ts>"); AST attr only, stored as
  * zend_generic_params.pack_index. */
 #define ZEND_GENERIC_PARAM_PACK       (1<<2)
