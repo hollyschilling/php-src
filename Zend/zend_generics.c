@@ -2559,6 +2559,7 @@ ZEND_API bool zend_generics_variant_implements(
 	zend_hash_add(EG(generics_variance_cache), key, &zv);
 	zend_string_release(key);
 	return result;
+}
 
 /* ---- Generic METHODS (spike): explicit-args instantiation of method-level
  * type parameters ("function map<U>(...)" called as "$seq->map<Price>()").
@@ -2798,7 +2799,7 @@ ZEND_API zend_function *zend_generics_get_method_instantiation(
 			goto fail;
 		}
 		int r = zend_generics_arg_satisfies_bound_type(binding->args[i], bound_type,
-			/* lookup_flags */ 0, method_name, param);
+			/* lookup_flags */ 0, method_name, param, /* quiet */ false);
 		zend_generics_arg_release_names(bound_type);
 		if (r < 0) {
 			goto fail;

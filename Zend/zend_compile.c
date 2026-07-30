@@ -10950,7 +10950,6 @@ static void zend_compile_extension_decl(zend_ast *ast) /* {{{ */
 }
 /* }}} */
 
-static zend_generic_params *zend_compile_generic_params_list(const zend_ast *params_ast, bool allow_pack)
 ZEND_API uint32_t zend_generic_variance_attr(zend_ast *ident)
 {
 	zend_string *word = zend_ast_get_str(ident);
@@ -10970,7 +10969,11 @@ ZEND_API uint32_t zend_generic_variance_attr(zend_ast *ident)
 	return attr;
 }
 
-static void zend_compile_generic_params(zend_class_entry *ce, const zend_ast *params_ast)
+/* `variance_ce` carries the declaring class entry when in/out annotations
+ * are permitted (interfaces); NULL forbids them (classes reach here with
+ * their non-interface ce, methods with NULL). */
+static zend_generic_params *zend_compile_generic_params_list(
+		const zend_ast *params_ast, bool allow_pack, zend_class_entry *variance_ce)
 {
 	const zend_ast_list *list = zend_ast_get_list((zend_ast *) params_ast);
 	zend_generic_params *generic_params;
@@ -11020,7 +11023,7 @@ static void zend_compile_generic_params(zend_class_entry *ce, const zend_ast *pa
 
 		uint32_t variance = param_ast->attr & ZEND_GENERIC_VARIANCE_MASK;
 		if (variance) {
-			if (!(ce->ce_flags & ZEND_ACC_INTERFACE)) {
+			if (!variance_ce || !(variance_ce->ce_flags & ZEND_ACC_INTERFACE)) {
 				zend_error_noreturn(E_COMPILE_ERROR,
 					"Variance annotations are only permitted on interface type "
 					"parameters (parameter %s)", ZSTR_VAL(param_name));
@@ -11030,7 +11033,7 @@ static void zend_compile_generic_params(zend_class_entry *ce, const zend_ast *pa
 					"Variance annotations cannot be combined with a type "
 					"parameter pack (parameter %s)", ZSTR_VAL(param_name));
 			}
-			ce->ce_flags2 |= ZEND_ACC2_GENERIC_VARIANT;
+			variance_ce->ce_flags2 |= ZEND_ACC2_GENERIC_VARIANT;
 		}
 		generic_params->params[i].name = zend_new_interned_string(zend_string_copy(param_name));
 		generic_params->params[i].bound_kind =
@@ -11064,7 +11067,7 @@ static void zend_compile_generic_params(zend_class_entry *ce, const zend_ast *pa
 
 static void zend_compile_generic_params(zend_class_entry *ce, const zend_ast *params_ast)
 {
-	ce->generic_params = zend_compile_generic_params_list(params_ast, /* allow_pack */ true);
+	ce->generic_params = zend_compile_generic_params_list(params_ast, /* allow_pack */ true, ce);
 	ce->ce_flags2 |= ZEND_ACC2_GENERIC_TEMPLATE;
 }
 
@@ -11080,7 +11083,7 @@ static void zend_compile_method_generic_params(
 	}
 
 	zend_generic_params *gp =
-		zend_compile_generic_params_list(params_ast, /* allow_pack */ false);
+		zend_compile_generic_params_list(params_ast, /* allow_pack */ false, NULL);
 
 	/* A method parameter shadowing an enclosing class parameter would make
 	 * the two substitution passes ambiguous. */
