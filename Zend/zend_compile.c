@@ -10715,11 +10715,13 @@ ZEND_API uint32_t zend_generic_variance_attr(zend_ast *ident)
 	return attr;
 }
 
-/* Shared by class templates (attach_ce) and generic METHOD prototypes
- * (attach_op): the parameter list attaches to its owner before bounds
- * compile, so bounds may mention the owner's own parameters. */
+/* `variance_ce` carries the declaring class entry when in/out annotations
+ * are permitted (interfaces); NULL forbids them (classes reach here with
+ * their non-interface ce, methods with NULL). The list attaches to its
+ * owner (attach_ce / attach_op) before bounds compile, so bounds may
+ * mention the owner's own parameters. */
 static zend_generic_params *zend_compile_generic_params_list(
-		const zend_ast *params_ast, bool allow_pack,
+		const zend_ast *params_ast, bool allow_pack, zend_class_entry *variance_ce,
 		zend_class_entry *attach_ce, zend_op_array *attach_op)
 {
 	const zend_ast_list *list = zend_ast_get_list((zend_ast *) params_ast);
@@ -10770,7 +10772,7 @@ static zend_generic_params *zend_compile_generic_params_list(
 
 		uint32_t variance = param_ast->attr & ZEND_GENERIC_VARIANCE_MASK;
 		if (variance) {
-			if (!attach_ce || !(attach_ce->ce_flags & ZEND_ACC_INTERFACE)) {
+			if (!variance_ce || !(variance_ce->ce_flags & ZEND_ACC_INTERFACE)) {
 				zend_error_noreturn(E_COMPILE_ERROR,
 					"Variance annotations are only permitted on interface type "
 					"parameters (parameter %s)", ZSTR_VAL(param_name));
@@ -10780,7 +10782,7 @@ static zend_generic_params *zend_compile_generic_params_list(
 					"Variance annotations cannot be combined with a type "
 					"parameter pack (parameter %s)", ZSTR_VAL(param_name));
 			}
-			attach_ce->ce_flags2 |= ZEND_ACC2_GENERIC_VARIANT;
+			variance_ce->ce_flags2 |= ZEND_ACC2_GENERIC_VARIANT;
 		}
 		generic_params->params[i].name = zend_new_interned_string(zend_string_copy(param_name));
 		generic_params->params[i].bound_kind =
@@ -10832,7 +10834,7 @@ static zend_generic_params *zend_compile_generic_params_list(
 
 static void zend_compile_generic_params(zend_class_entry *ce, const zend_ast *params_ast)
 {
-	zend_compile_generic_params_list(params_ast, /* allow_pack */ true, ce, NULL);
+	zend_compile_generic_params_list(params_ast, /* allow_pack */ true, ce, ce, NULL);
 }
 
 /* Generic METHOD prototype ("function map<U>(...)"): method-level type
@@ -10847,7 +10849,7 @@ static void zend_compile_method_generic_params(
 	}
 
 	zend_generic_params *gp = zend_compile_generic_params_list(
-		params_ast, /* allow_pack */ false, NULL, op_array);
+		params_ast, /* allow_pack */ false, NULL, NULL, op_array);
 
 	/* A method parameter shadowing an enclosing class parameter would make
 	 * the two substitution passes ambiguous. */
