@@ -36,6 +36,23 @@ foreach ($cases as $src) {
     }
 }
 
+// self:: / static:: receivers poison identically
+class P {
+    public static function probe(): void {
+        try { eval('$r = self::CONSTX<A, B>(1);'); echo "no error\n"; }
+        catch (ParseError $e) { echo str_starts_with($e->getMessage(), 'Ambiguous mix') ? "poisoned\n" : "other\n"; }
+        try { eval('$r = static::CONSTX<A|B>(1);'); echo "no error\n"; }
+        catch (ParseError $e) { echo str_starts_with($e->getMessage(), 'Ambiguous mix') ? "poisoned\n" : "other\n"; }
+    }
+}
+P::probe();
+
+// A comment between the member name and '<' breaks receiver detection:
+// the shape DECLINES (comparison reading, loud elsewhere) rather than
+// poisoning — token-shape rule, documented edge.
+try { eval('$r = $o->m/*c*/<A, B>(1);'); echo "no error\n"; }
+catch (ParseError $e) { echo str_starts_with($e->getMessage(), 'Ambiguous mix') ? "poisoned\n" : "declined (other parse error)\n"; }
+
 // Recovery spelling 1: parentheses keep the comparisons
 var_dump(($o->m < A) | (B > (1)));
 
@@ -56,6 +73,9 @@ poisoned
 poisoned
 poisoned
 poisoned
+poisoned
+poisoned
+declined (other parse error)
 int(1)
 bool(false)
 bool(false)
