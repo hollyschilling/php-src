@@ -53,6 +53,19 @@ ZEND_API uint32_t zend_generics_binding_arg_index(
  * names inside composite (DNF) type lists; list buffers are arena-owned. */
 ZEND_API void zend_generics_arg_release_names(zend_type arg);
 
+/* Compile-time positional check for a variant interface template ('in'/'out'
+ * parameters): output positions only for 'out', input only for 'in';
+ * self-references compose polarity, foreign-nested mentions are invariant
+ * positions in this version. Throws E_COMPILE_ERROR on violation. */
+ZEND_API void zend_generics_check_variance_positions(const zend_class_entry *ce);
+
+/* Runtime variance edge: does `instance_ce` implement `iface_ce` through a
+ * variant instantiation of the same interface template? Called from the
+ * instanceof machinery after identity checks miss; never autoloads, never
+ * throws; results are cached per request. */
+ZEND_API bool zend_generics_variant_implements(
+		const zend_class_entry *instance_ce, const zend_class_entry *iface_ce);
+
 /* Set by the tracing JIT (opcache): called for every stamped method clone so
  * the JIT can attach a per-clone trace extension (own counters, own type
  * sources, own compiled-trace slots) instead of the template's, which the

@@ -42,11 +42,13 @@ bool(false)
 bool(false)
 array(1) {
   [0]=>
-  array(3) {
+  array(4) {
     ["name"]=>
     string(1) "T"
     ["bound"]=>
     string(9) "Countable"
+    ["variance"]=>
+    NULL
     ["variadic"]=>
     bool(false)
   }
