@@ -43,6 +43,7 @@
 #include "zend_system_id.h"
 #include "zend_call_stack.h"
 #include "zend_attributes.h"
+#include "zend_extension_methods.h"
 #include "Optimizer/zend_func_info.h"
 
 /* Virtual current working directory support */
@@ -4782,7 +4783,15 @@ ZEND_API void zend_unfinished_calls_gc(zend_execute_data *execute_data, zend_exe
 			} while (--num_args);
 		}
 		if (ZEND_CALL_INFO(call) & ZEND_CALL_RELEASE_THIS) {
-			zend_get_gc_buffer_add_obj(buf, Z_OBJ(call->This));
+			if (UNEXPECTED(Z_TYPE(call->This) >= IS_FALSE && Z_TYPE(call->This) <= IS_ARRAY)) {
+				/* Scalar extension receiver: strip the call-info bits. */
+				zval tmp;
+				ZVAL_COPY_VALUE(&tmp, &call->This);
+				Z_TYPE_INFO(tmp) = Z_TYPE_INFO(call->This) & 0xffffu;
+				zend_get_gc_buffer_add_zval(buf, &tmp);
+			} else {
+				zend_get_gc_buffer_add_obj(buf, Z_OBJ(call->This));
+			}
 		}
 		if (ZEND_CALL_INFO(call) & ZEND_CALL_HAS_EXTRA_NAMED_PARAMS) {
 			zval *val;
@@ -4915,7 +4924,7 @@ static void cleanup_unfinished_calls(zend_execute_data *execute_data, uint32_t o
 			zend_vm_stack_free_args(EX(call));
 
 			if (ZEND_CALL_INFO(call) & ZEND_CALL_RELEASE_THIS) {
-				OBJ_RELEASE(Z_OBJ(call->This));
+				zend_vm_release_call_frame_this(call);
 			}
 			if (ZEND_CALL_INFO(call) & ZEND_CALL_HAS_EXTRA_NAMED_PARAMS) {
 				zend_free_extra_named_params(call->extra_named_params);
@@ -5017,7 +5026,15 @@ ZEND_API HashTable *zend_unfinished_execution_gc_ex(zend_execute_data *execute_d
 	}
 
 	if (EX_CALL_INFO() & ZEND_CALL_RELEASE_THIS) {
-		zend_get_gc_buffer_add_obj(gc_buffer, Z_OBJ(execute_data->This));
+		if (UNEXPECTED(Z_TYPE(execute_data->This) >= IS_FALSE && Z_TYPE(execute_data->This) <= IS_ARRAY)) {
+			/* Scalar extension receiver: strip the call-info bits. */
+			zval tmp;
+			ZVAL_COPY_VALUE(&tmp, &execute_data->This);
+			Z_TYPE_INFO(tmp) = Z_TYPE_INFO(execute_data->This) & 0xffffu;
+			zend_get_gc_buffer_add_zval(gc_buffer, &tmp);
+		} else {
+			zend_get_gc_buffer_add_obj(gc_buffer, Z_OBJ(execute_data->This));
+		}
 	}
 
 	if (EX_CALL_INFO() & ZEND_CALL_CLOSURE) {
