@@ -7965,6 +7965,20 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_FUNC_CCONV ZEND_FETCH_CLASS_C
 				HANDLE_EXCEPTION();
 			}
 
+			/* Surfaces: constants on a surface are outside the default view. */
+			if (UNEXPECTED(c->ce->surface_members != NULL)) {
+				const zval *surface_set = zend_surfaces_member_set(c->ce, 'c', constant_name);
+				if (surface_set
+				 && !zend_surfaces_constant_has_interface_face(ce, constant_name)
+				 && !zend_surfaces_access_allowed(c->ce, ce, surface_set)) {
+					zend_throw_error(NULL, "Cannot access surface constant %s::%s (grant it with \"use %s with surface[...]\")", ZSTR_VAL(c->ce->name), ZSTR_VAL(constant_name), ZSTR_VAL(ce->name));
+					ZVAL_UNDEF(EX_VAR(opline->result.var));
+
+
+					HANDLE_EXCEPTION();
+				}
+			}
+
 			if (ce->ce_flags & ZEND_ACC_TRAIT) {
 				zend_throw_error(NULL, "Cannot access trait constant %s::%s directly", ZSTR_VAL(ce->name), ZSTR_VAL(constant_name));
 				ZVAL_UNDEF(EX_VAR(opline->result.var));
@@ -9219,6 +9233,19 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_FUNC_CCONV ZEND_FETCH_CLASS_C
 				ZVAL_UNDEF(EX_VAR(opline->result.var));
 				FREE_OP(opline->op2_type, opline->op2.var);
 				HANDLE_EXCEPTION();
+			}
+
+			/* Surfaces: constants on a surface are outside the default view. */
+			if (UNEXPECTED(c->ce->surface_members != NULL)) {
+				const zval *surface_set = zend_surfaces_member_set(c->ce, 'c', constant_name);
+				if (surface_set
+				 && !zend_surfaces_constant_has_interface_face(ce, constant_name)
+				 && !zend_surfaces_access_allowed(c->ce, ce, surface_set)) {
+					zend_throw_error(NULL, "Cannot access surface constant %s::%s (grant it with \"use %s with surface[...]\")", ZSTR_VAL(c->ce->name), ZSTR_VAL(constant_name), ZSTR_VAL(ce->name));
+					ZVAL_UNDEF(EX_VAR(opline->result.var));
+					FREE_OP(opline->op2_type, opline->op2.var);
+					HANDLE_EXCEPTION();
+				}
 			}
 
 			if (ce->ce_flags & ZEND_ACC_TRAIT) {
@@ -26347,6 +26374,20 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_FUNC_CCONV ZEND_FETCH_CLASS_C
 				HANDLE_EXCEPTION();
 			}
 
+			/* Surfaces: constants on a surface are outside the default view. */
+			if (UNEXPECTED(c->ce->surface_members != NULL)) {
+				const zval *surface_set = zend_surfaces_member_set(c->ce, 'c', constant_name);
+				if (surface_set
+				 && !zend_surfaces_constant_has_interface_face(ce, constant_name)
+				 && !zend_surfaces_access_allowed(c->ce, ce, surface_set)) {
+					zend_throw_error(NULL, "Cannot access surface constant %s::%s (grant it with \"use %s with surface[...]\")", ZSTR_VAL(c->ce->name), ZSTR_VAL(constant_name), ZSTR_VAL(ce->name));
+					ZVAL_UNDEF(EX_VAR(opline->result.var));
+
+
+					HANDLE_EXCEPTION();
+				}
+			}
+
 			if (ce->ce_flags & ZEND_ACC_TRAIT) {
 				zend_throw_error(NULL, "Cannot access trait constant %s::%s directly", ZSTR_VAL(ce->name), ZSTR_VAL(constant_name));
 				ZVAL_UNDEF(EX_VAR(opline->result.var));
@@ -26884,6 +26925,19 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_FUNC_CCONV ZEND_FETCH_CLASS_C
 				ZVAL_UNDEF(EX_VAR(opline->result.var));
 				FREE_OP(opline->op2_type, opline->op2.var);
 				HANDLE_EXCEPTION();
+			}
+
+			/* Surfaces: constants on a surface are outside the default view. */
+			if (UNEXPECTED(c->ce->surface_members != NULL)) {
+				const zval *surface_set = zend_surfaces_member_set(c->ce, 'c', constant_name);
+				if (surface_set
+				 && !zend_surfaces_constant_has_interface_face(ce, constant_name)
+				 && !zend_surfaces_access_allowed(c->ce, ce, surface_set)) {
+					zend_throw_error(NULL, "Cannot access surface constant %s::%s (grant it with \"use %s with surface[...]\")", ZSTR_VAL(c->ce->name), ZSTR_VAL(constant_name), ZSTR_VAL(ce->name));
+					ZVAL_UNDEF(EX_VAR(opline->result.var));
+					FREE_OP(opline->op2_type, opline->op2.var);
+					HANDLE_EXCEPTION();
+				}
 			}
 
 			if (ce->ce_flags & ZEND_ACC_TRAIT) {
@@ -34948,6 +35002,20 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_FUNC_CCONV ZEND_FETCH_CLASS_C
 				HANDLE_EXCEPTION();
 			}
 
+			/* Surfaces: constants on a surface are outside the default view. */
+			if (UNEXPECTED(c->ce->surface_members != NULL)) {
+				const zval *surface_set = zend_surfaces_member_set(c->ce, 'c', constant_name);
+				if (surface_set
+				 && !zend_surfaces_constant_has_interface_face(ce, constant_name)
+				 && !zend_surfaces_access_allowed(c->ce, ce, surface_set)) {
+					zend_throw_error(NULL, "Cannot access surface constant %s::%s (grant it with \"use %s with surface[...]\")", ZSTR_VAL(c->ce->name), ZSTR_VAL(constant_name), ZSTR_VAL(ce->name));
+					ZVAL_UNDEF(EX_VAR(opline->result.var));
+
+
+					HANDLE_EXCEPTION();
+				}
+			}
+
 			if (ce->ce_flags & ZEND_ACC_TRAIT) {
 				zend_throw_error(NULL, "Cannot access trait constant %s::%s directly", ZSTR_VAL(ce->name), ZSTR_VAL(constant_name));
 				ZVAL_UNDEF(EX_VAR(opline->result.var));
@@ -35326,6 +35394,19 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_FUNC_CCONV ZEND_FETCH_CLASS_C
 				ZVAL_UNDEF(EX_VAR(opline->result.var));
 				FREE_OP(opline->op2_type, opline->op2.var);
 				HANDLE_EXCEPTION();
+			}
+
+			/* Surfaces: constants on a surface are outside the default view. */
+			if (UNEXPECTED(c->ce->surface_members != NULL)) {
+				const zval *surface_set = zend_surfaces_member_set(c->ce, 'c', constant_name);
+				if (surface_set
+				 && !zend_surfaces_constant_has_interface_face(ce, constant_name)
+				 && !zend_surfaces_access_allowed(c->ce, ce, surface_set)) {
+					zend_throw_error(NULL, "Cannot access surface constant %s::%s (grant it with \"use %s with surface[...]\")", ZSTR_VAL(c->ce->name), ZSTR_VAL(constant_name), ZSTR_VAL(ce->name));
+					ZVAL_UNDEF(EX_VAR(opline->result.var));
+					FREE_OP(opline->op2_type, opline->op2.var);
+					HANDLE_EXCEPTION();
+				}
 			}
 
 			if (ce->ce_flags & ZEND_ACC_TRAIT) {
@@ -61289,6 +61370,20 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_CCONV ZEND_FETCH_CLASS_CONSTA
 				HANDLE_EXCEPTION();
 			}
 
+			/* Surfaces: constants on a surface are outside the default view. */
+			if (UNEXPECTED(c->ce->surface_members != NULL)) {
+				const zval *surface_set = zend_surfaces_member_set(c->ce, 'c', constant_name);
+				if (surface_set
+				 && !zend_surfaces_constant_has_interface_face(ce, constant_name)
+				 && !zend_surfaces_access_allowed(c->ce, ce, surface_set)) {
+					zend_throw_error(NULL, "Cannot access surface constant %s::%s (grant it with \"use %s with surface[...]\")", ZSTR_VAL(c->ce->name), ZSTR_VAL(constant_name), ZSTR_VAL(ce->name));
+					ZVAL_UNDEF(EX_VAR(opline->result.var));
+
+
+					HANDLE_EXCEPTION();
+				}
+			}
+
 			if (ce->ce_flags & ZEND_ACC_TRAIT) {
 				zend_throw_error(NULL, "Cannot access trait constant %s::%s directly", ZSTR_VAL(ce->name), ZSTR_VAL(constant_name));
 				ZVAL_UNDEF(EX_VAR(opline->result.var));
@@ -62543,6 +62638,19 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_CCONV ZEND_FETCH_CLASS_CONSTA
 				ZVAL_UNDEF(EX_VAR(opline->result.var));
 				FREE_OP(opline->op2_type, opline->op2.var);
 				HANDLE_EXCEPTION();
+			}
+
+			/* Surfaces: constants on a surface are outside the default view. */
+			if (UNEXPECTED(c->ce->surface_members != NULL)) {
+				const zval *surface_set = zend_surfaces_member_set(c->ce, 'c', constant_name);
+				if (surface_set
+				 && !zend_surfaces_constant_has_interface_face(ce, constant_name)
+				 && !zend_surfaces_access_allowed(c->ce, ce, surface_set)) {
+					zend_throw_error(NULL, "Cannot access surface constant %s::%s (grant it with \"use %s with surface[...]\")", ZSTR_VAL(c->ce->name), ZSTR_VAL(constant_name), ZSTR_VAL(ce->name));
+					ZVAL_UNDEF(EX_VAR(opline->result.var));
+					FREE_OP(opline->op2_type, opline->op2.var);
+					HANDLE_EXCEPTION();
+				}
 			}
 
 			if (ce->ce_flags & ZEND_ACC_TRAIT) {
@@ -79469,6 +79577,20 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_CCONV ZEND_FETCH_CLASS_CONSTA
 				HANDLE_EXCEPTION();
 			}
 
+			/* Surfaces: constants on a surface are outside the default view. */
+			if (UNEXPECTED(c->ce->surface_members != NULL)) {
+				const zval *surface_set = zend_surfaces_member_set(c->ce, 'c', constant_name);
+				if (surface_set
+				 && !zend_surfaces_constant_has_interface_face(ce, constant_name)
+				 && !zend_surfaces_access_allowed(c->ce, ce, surface_set)) {
+					zend_throw_error(NULL, "Cannot access surface constant %s::%s (grant it with \"use %s with surface[...]\")", ZSTR_VAL(c->ce->name), ZSTR_VAL(constant_name), ZSTR_VAL(ce->name));
+					ZVAL_UNDEF(EX_VAR(opline->result.var));
+
+
+					HANDLE_EXCEPTION();
+				}
+			}
+
 			if (ce->ce_flags & ZEND_ACC_TRAIT) {
 				zend_throw_error(NULL, "Cannot access trait constant %s::%s directly", ZSTR_VAL(ce->name), ZSTR_VAL(constant_name));
 				ZVAL_UNDEF(EX_VAR(opline->result.var));
@@ -80006,6 +80128,19 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_CCONV ZEND_FETCH_CLASS_CONSTA
 				ZVAL_UNDEF(EX_VAR(opline->result.var));
 				FREE_OP(opline->op2_type, opline->op2.var);
 				HANDLE_EXCEPTION();
+			}
+
+			/* Surfaces: constants on a surface are outside the default view. */
+			if (UNEXPECTED(c->ce->surface_members != NULL)) {
+				const zval *surface_set = zend_surfaces_member_set(c->ce, 'c', constant_name);
+				if (surface_set
+				 && !zend_surfaces_constant_has_interface_face(ce, constant_name)
+				 && !zend_surfaces_access_allowed(c->ce, ce, surface_set)) {
+					zend_throw_error(NULL, "Cannot access surface constant %s::%s (grant it with \"use %s with surface[...]\")", ZSTR_VAL(c->ce->name), ZSTR_VAL(constant_name), ZSTR_VAL(ce->name));
+					ZVAL_UNDEF(EX_VAR(opline->result.var));
+					FREE_OP(opline->op2_type, opline->op2.var);
+					HANDLE_EXCEPTION();
+				}
 			}
 
 			if (ce->ce_flags & ZEND_ACC_TRAIT) {
@@ -88070,6 +88205,20 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_CCONV ZEND_FETCH_CLASS_CONSTA
 				HANDLE_EXCEPTION();
 			}
 
+			/* Surfaces: constants on a surface are outside the default view. */
+			if (UNEXPECTED(c->ce->surface_members != NULL)) {
+				const zval *surface_set = zend_surfaces_member_set(c->ce, 'c', constant_name);
+				if (surface_set
+				 && !zend_surfaces_constant_has_interface_face(ce, constant_name)
+				 && !zend_surfaces_access_allowed(c->ce, ce, surface_set)) {
+					zend_throw_error(NULL, "Cannot access surface constant %s::%s (grant it with \"use %s with surface[...]\")", ZSTR_VAL(c->ce->name), ZSTR_VAL(constant_name), ZSTR_VAL(ce->name));
+					ZVAL_UNDEF(EX_VAR(opline->result.var));
+
+
+					HANDLE_EXCEPTION();
+				}
+			}
+
 			if (ce->ce_flags & ZEND_ACC_TRAIT) {
 				zend_throw_error(NULL, "Cannot access trait constant %s::%s directly", ZSTR_VAL(ce->name), ZSTR_VAL(constant_name));
 				ZVAL_UNDEF(EX_VAR(opline->result.var));
@@ -88448,6 +88597,19 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_CCONV ZEND_FETCH_CLASS_CONSTA
 				ZVAL_UNDEF(EX_VAR(opline->result.var));
 				FREE_OP(opline->op2_type, opline->op2.var);
 				HANDLE_EXCEPTION();
+			}
+
+			/* Surfaces: constants on a surface are outside the default view. */
+			if (UNEXPECTED(c->ce->surface_members != NULL)) {
+				const zval *surface_set = zend_surfaces_member_set(c->ce, 'c', constant_name);
+				if (surface_set
+				 && !zend_surfaces_constant_has_interface_face(ce, constant_name)
+				 && !zend_surfaces_access_allowed(c->ce, ce, surface_set)) {
+					zend_throw_error(NULL, "Cannot access surface constant %s::%s (grant it with \"use %s with surface[...]\")", ZSTR_VAL(c->ce->name), ZSTR_VAL(constant_name), ZSTR_VAL(ce->name));
+					ZVAL_UNDEF(EX_VAR(opline->result.var));
+					FREE_OP(opline->op2_type, opline->op2.var);
+					HANDLE_EXCEPTION();
+				}
 			}
 
 			if (ce->ce_flags & ZEND_ACC_TRAIT) {

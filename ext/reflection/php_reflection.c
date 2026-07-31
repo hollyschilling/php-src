@@ -48,6 +48,7 @@
 #include "zend_builtin_functions.h"
 #include "zend_smart_str.h"
 #include "zend_enum.h"
+#include "zend_surfaces.h"
 #include "zend_fibers.h"
 
 #define REFLECTION_ATTRIBUTE_IS_INSTANCEOF (1 << 1)
@@ -5354,6 +5355,140 @@ ZEND_METHOD(ReflectionClass, getInterfaceNames)
 	for (i=0; i < ce->num_interfaces; i++) {
 		add_next_index_str(return_value, zend_string_copy(ce->interfaces[i]->name));
 	}
+}
+/* }}} */
+
+/* Surfaces (RFC prototype) */
+static void reflection_surface_names_from_set(const zval *set, zval *return_value)
+{
+	array_init(return_value);
+	if (!set) {
+		return;
+	}
+	zval *v;
+	ZEND_HASH_PACKED_FOREACH_VAL(Z_ARR_P((zval *) set), v) {
+		add_next_index_str(return_value, zend_string_copy(Z_STR_P(v)));
+	} ZEND_HASH_FOREACH_END();
+}
+
+/* {{{ Returns the surface names of the class, including inherited ones */
+ZEND_METHOD(ReflectionClass, getSurfaceNames)
+{
+	reflection_object *intern;
+	zend_class_entry *ce;
+
+	ZEND_PARSE_PARAMETERS_NONE();
+	GET_REFLECTION_OBJECT_PTR(ce);
+
+	array_init(return_value);
+	for (const zend_class_entry *c = ce; c; c = c->parent) {
+		if (c->surface_decls) {
+			zend_string *name;
+			ZEND_HASH_FOREACH_STR_KEY(c->surface_decls, name) {
+				add_next_index_str(return_value, zend_string_copy(name));
+			} ZEND_HASH_FOREACH_END();
+		}
+		if (!(c->ce_flags & ZEND_ACC_LINKED)) {
+			break;
+		}
+	}
+}
+/* }}} */
+
+/* {{{ Whether the class (or an ancestor) declares the given surface */
+ZEND_METHOD(ReflectionClass, hasSurface)
+{
+	reflection_object *intern;
+	zend_class_entry *ce;
+	zend_string *name;
+
+	ZEND_PARSE_PARAMETERS_START(1, 1)
+		Z_PARAM_STR(name)
+	ZEND_PARSE_PARAMETERS_END();
+	GET_REFLECTION_OBJECT_PTR(ce);
+
+	RETURN_BOOL(zend_surfaces_find_owner(ce, name) != NULL);
+}
+/* }}} */
+
+/* {{{ Returns the interface a surface implements, or null */
+ZEND_METHOD(ReflectionClass, getSurfaceInterface)
+{
+	reflection_object *intern;
+	zend_class_entry *ce;
+	zend_string *name;
+
+	ZEND_PARSE_PARAMETERS_START(1, 1)
+		Z_PARAM_STR(name)
+	ZEND_PARSE_PARAMETERS_END();
+	GET_REFLECTION_OBJECT_PTR(ce);
+
+	const zend_class_entry *owner = zend_surfaces_find_owner(ce, name);
+	if (!owner) {
+		zend_throw_exception_ex(reflection_exception_ptr, 0,
+			"Surface %s does not exist", ZSTR_VAL(name));
+		RETURN_THROWS();
+	}
+	const zval *iface = zend_hash_find(owner->surface_decls, name);
+	ZEND_ASSERT(iface != NULL);
+	if (Z_TYPE_P(iface) == IS_STRING) {
+		RETURN_STR_COPY(Z_STR_P(iface));
+	}
+	RETURN_NULL();
+}
+/* }}} */
+
+/* {{{ Returns the surfaces this method is assigned to */
+ZEND_METHOD(ReflectionMethod, getSurfaceNames)
+{
+	reflection_object *intern;
+	zend_function *mptr;
+
+	ZEND_PARSE_PARAMETERS_NONE();
+	GET_REFLECTION_OBJECT_PTR(mptr);
+
+	const zval *set = NULL;
+	if (mptr->common.scope && mptr->common.function_name) {
+		zend_string *lc = zend_string_tolower(mptr->common.function_name);
+		set = zend_surfaces_member_set(mptr->common.scope, 'm', lc);
+		zend_string_release(lc);
+	}
+	reflection_surface_names_from_set(set, return_value);
+}
+/* }}} */
+
+/* {{{ Returns the surfaces this property is assigned to */
+ZEND_METHOD(ReflectionProperty, getSurfaceNames)
+{
+	reflection_object *intern;
+	property_reference *ref;
+
+	ZEND_PARSE_PARAMETERS_NONE();
+	GET_REFLECTION_OBJECT_PTR(ref);
+
+	const zval *set = NULL;
+	if (ref->prop) {
+		set = zend_surfaces_member_set(ref->prop->ce, 'p', ref->unmangled_name);
+	}
+	reflection_surface_names_from_set(set, return_value);
+}
+/* }}} */
+
+/* {{{ Returns the surfaces this class constant is assigned to */
+ZEND_METHOD(ReflectionClassConstant, getSurfaceNames)
+{
+	reflection_object *intern;
+	zend_class_constant *ref;
+
+	ZEND_PARSE_PARAMETERS_NONE();
+	GET_REFLECTION_OBJECT_PTR(ref);
+
+	const zval *name = reflection_prop_name(ZEND_THIS);
+	const zval *set = NULL;
+	if (!Z_ISUNDEF_P(name) && Z_TYPE_P(name) == IS_STRING) {
+		set = zend_surfaces_member_set(ref->ce, 'c', Z_STR_P(name));
+	}
+	reflection_surface_names_from_set(set, return_value);
 }
 /* }}} */
 

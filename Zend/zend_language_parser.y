@@ -167,6 +167,7 @@ static YYSIZE_T zend_yytnamerr(char*, const char*);
 %token <ident> T_TRAIT         "'trait'"
 %token <ident> T_INTERFACE     "'interface'"
 %token <ident> T_EXTENSION     "'extension'"
+%token <ident> T_SURFACE       "'surface'"
 %token <ident> T_ENUM          "'enum'"
 %token <ident> T_STRUCT        "'struct'"
 %token <ident> T_EXTENDS       "'extends'"
@@ -291,9 +292,11 @@ static YYSIZE_T zend_yytnamerr(char*, const char*);
 %type <ast> function_name non_empty_member_modifiers
 %type <ast> property_hook property_hook_list optional_property_hook_list hooked_property property_hook_body
 %type <ast> optional_parameter_list clone_argument_list non_empty_clone_argument_list
+%type <ast> surface_name_list surface_modifier surface_with_clause
+%type <ast> property_modifiers method_modifiers class_const_modifiers
 
-%type <num> returns_ref function fn is_reference is_variadic property_modifiers property_hook_modifiers
-%type <num> method_modifiers class_const_modifiers member_modifier optional_cpp_modifiers
+%type <num> returns_ref function fn is_reference is_variadic property_hook_modifiers
+%type <num> member_modifier optional_cpp_modifiers
 %type <num> optional_receiver_modifier
 %type <num> class_modifiers class_modifier anonymous_class_modifiers anonymous_class_modifiers_optional use_type backup_fn_flags extension_keyword
 
@@ -316,6 +319,7 @@ reserved_non_modifiers:
 	| T_FUNCTION | T_CONST | T_RETURN | T_PRINT | T_YIELD | T_LIST | T_SWITCH | T_ENDSWITCH | T_CASE | T_DEFAULT | T_BREAK
 	| T_ARRAY | T_CALLABLE | T_EXTENDS | T_IMPLEMENTS | T_NAMESPACE | T_TRAIT | T_INTERFACE | T_CLASS
 	| T_CLASS_C | T_TRAIT_C | T_FUNC_C | T_METHOD_C | T_LINE | T_FILE | T_DIR | T_NS_C | T_FN | T_MATCH | T_ENUM | T_EXTENSION
+	| T_SURFACE
 	| T_PROPERTY_C | T_STRUCT
 ;
 
@@ -423,11 +427,6 @@ top_statement:
 	|	T_NAMESPACE { RESET_DOC_COMMENT(); }
 		'{' top_statement_list '}'
 			{ $$ = zend_ast_create(ZEND_AST_NAMESPACE, NULL, $4); }
-	|	T_USE mixed_group_use_declaration ';'		{ $$ = $2; }
-	|	T_USE use_type group_use_declaration ';'	{ $$ = $3; $$->attr = $2; }
-	|	T_USE use_declarations ';'					{ $$ = $2; $$->attr = ZEND_SYMBOL_CLASS; }
-	|	T_USE use_type use_declarations ';'			{ $$ = $3; $$->attr = $2; }
-	|	T_USE T_EXTENSION use_declarations ';'		{ $$ = $3; $$->attr = ZEND_SYMBOL_EXTENSION; }
 ;
 
 use_type:
@@ -481,6 +480,12 @@ unprefixed_use_declaration:
 			{ $$ = zend_ast_create(ZEND_AST_USE_ELEM, $1, NULL); }
 	|	namespace_name T_AS T_STRING
 			{ $$ = zend_ast_create(ZEND_AST_USE_ELEM, $1, $3); }
+	|	namespace_name surface_with_clause
+			{ $$ = zend_ast_create(ZEND_AST_USE_GRANT,
+			      zend_ast_create(ZEND_AST_USE_ELEM, $1, NULL), $2); }
+	|	namespace_name T_AS T_STRING surface_with_clause
+			{ $$ = zend_ast_create(ZEND_AST_USE_GRANT,
+			      zend_ast_create(ZEND_AST_USE_ELEM, $1, $3), $4); }
 ;
 
 use_declaration:
@@ -488,6 +493,26 @@ use_declaration:
 			{ $$ = zend_ast_create(ZEND_AST_USE_ELEM, $1, NULL); }
 	|	legacy_namespace_name T_AS T_STRING
 			{ $$ = zend_ast_create(ZEND_AST_USE_ELEM, $1, $3); }
+	|	legacy_namespace_name surface_with_clause
+			{ $$ = zend_ast_create(ZEND_AST_USE_GRANT,
+			      zend_ast_create(ZEND_AST_USE_ELEM, $1, NULL), $2); }
+	|	legacy_namespace_name T_AS T_STRING surface_with_clause
+			{ $$ = zend_ast_create(ZEND_AST_USE_GRANT,
+			      zend_ast_create(ZEND_AST_USE_ELEM, $1, $3), $4); }
+;
+
+surface_with_clause:
+		T_STRING surface_modifier
+			{ if (!zend_string_equals_literal_ci(zend_ast_get_str($1), "with")) {
+			      zend_throw_exception_ex(zend_ce_compile_error, 0,
+			          "Unexpected identifier \"%s\", expected \"with\" before surface[...] in use statement",
+			          ZSTR_VAL(zend_ast_get_str($1)));
+			      YYERROR;
+			  }
+			  /* The "with" conjunction is consumed here; its node is never
+			   * attached to the tree, so release its string now. */
+			  zend_string_release(zend_ast_get_str($1));
+			  $$ = $2; }
 ;
 
 const_list:
@@ -515,6 +540,14 @@ inner_statement:
 
 statement:
 		'{' inner_statement_list '}' { $$ = $2; }
+	/* `use` is parsed as an ordinary statement so that surface grants may
+	 * appear inside function bodies; zend_compile_use() restricts what each
+	 * position may do (imports at top level, grant-only inside bodies). */
+	|	T_USE mixed_group_use_declaration ';'		{ $$ = $2; }
+	|	T_USE use_type group_use_declaration ';'	{ $$ = $3; $$->attr = $2; }
+	|	T_USE use_declarations ';'					{ $$ = $2; $$->attr = ZEND_SYMBOL_CLASS; }
+	|	T_USE use_type use_declarations ';'			{ $$ = $3; $$->attr = $2; }
+	|	T_USE T_EXTENSION use_declarations ';'		{ $$ = $3; $$->attr = ZEND_SYMBOL_EXTENSION; }
 	|	if_stmt { $$ = $1; }
 	|	alt_if_stmt { $$ = $1; }
 	|	T_WHILE '(' expr ')' while_statement
@@ -1046,22 +1079,56 @@ class_statement_list:
 
 attributed_class_statement:
 		property_modifiers optional_type_without_static property_list ';'
-			{ $$ = zend_ast_create(ZEND_AST_PROP_GROUP, $2, $3, NULL);
-			  $$->attr = $1; }
+			{ zend_ast *surfaces = zend_surface_names_from_modifiers($1);
+			  uint32_t flags = $1 ? zend_modifier_list_to_flags(ZEND_MODIFIER_TARGET_PROPERTY, $1) : ZEND_ACC_PUBLIC;
+			  if ($1 && !flags && EG(exception)) { YYERROR; }
+			  if (surfaces) {
+			      if (!zend_surface_member_modifiers_valid(flags)) { YYERROR; }
+			      if (!(flags & ZEND_ACC_PPP_MASK)) { flags |= ZEND_ACC_PUBLIC; }
+			  }
+			  $$ = zend_ast_create(ZEND_AST_PROP_GROUP, $2, $3, NULL);
+			  $$->attr = flags;
+			  if (surfaces) { $$ = zend_ast_create(ZEND_AST_SURFACE_MEMBER, $$, surfaces); } }
 	|	property_modifiers optional_type_without_static hooked_property
-			{ $$ = zend_ast_create(ZEND_AST_PROP_GROUP, $2, zend_ast_create_list(1, ZEND_AST_PROP_DECL, $3), NULL);
-			  $$->attr = $1; }
+			{ zend_ast *surfaces = zend_surface_names_from_modifiers($1);
+			  uint32_t flags = $1 ? zend_modifier_list_to_flags(ZEND_MODIFIER_TARGET_PROPERTY, $1) : ZEND_ACC_PUBLIC;
+			  if ($1 && !flags && EG(exception)) { YYERROR; }
+			  if (surfaces) {
+			      if (!zend_surface_member_modifiers_valid(flags)) { YYERROR; }
+			      if (!(flags & ZEND_ACC_PPP_MASK)) { flags |= ZEND_ACC_PUBLIC; }
+			  }
+			  $$ = zend_ast_create(ZEND_AST_PROP_GROUP, $2, zend_ast_create_list(1, ZEND_AST_PROP_DECL, $3), NULL);
+			  $$->attr = flags;
+			  if (surfaces) { $$ = zend_ast_create(ZEND_AST_SURFACE_MEMBER, $$, surfaces); } }
 	|	class_const_modifiers T_CONST class_const_list ';'
-			{ $$ = zend_ast_create(ZEND_AST_CLASS_CONST_GROUP, $3, NULL, NULL);
-			  $$->attr = $1; }
+			{ zend_ast *surfaces = zend_surface_names_from_modifiers($1);
+			  uint32_t flags = $1 ? zend_modifier_list_to_flags(ZEND_MODIFIER_TARGET_CONSTANT, $1) : ZEND_ACC_PUBLIC;
+			  if ($1 && !flags && EG(exception)) { YYERROR; }
+			  if (surfaces && !zend_surface_member_modifiers_valid(flags)) { YYERROR; }
+			  if (!(flags & ZEND_ACC_PPP_MASK)) { flags |= ZEND_ACC_PUBLIC; }
+			  $$ = zend_ast_create(ZEND_AST_CLASS_CONST_GROUP, $3, NULL, NULL);
+			  $$->attr = flags;
+			  if (surfaces) { $$ = zend_ast_create(ZEND_AST_SURFACE_MEMBER, $$, surfaces); } }
 	|	class_const_modifiers T_CONST type_expr class_const_list ';'
-			{ $$ = zend_ast_create(ZEND_AST_CLASS_CONST_GROUP, $4, NULL, $3);
-			  $$->attr = $1; }
+			{ zend_ast *surfaces = zend_surface_names_from_modifiers($1);
+			  uint32_t flags = $1 ? zend_modifier_list_to_flags(ZEND_MODIFIER_TARGET_CONSTANT, $1) : ZEND_ACC_PUBLIC;
+			  if ($1 && !flags && EG(exception)) { YYERROR; }
+			  if (surfaces && !zend_surface_member_modifiers_valid(flags)) { YYERROR; }
+			  if (!(flags & ZEND_ACC_PPP_MASK)) { flags |= ZEND_ACC_PUBLIC; }
+			  $$ = zend_ast_create(ZEND_AST_CLASS_CONST_GROUP, $4, NULL, $3);
+			  $$->attr = flags;
+			  if (surfaces) { $$ = zend_ast_create(ZEND_AST_SURFACE_MEMBER, $$, surfaces); } }
 	|	method_modifiers function returns_ref identifier backup_doc_comment '(' parameter_list ')'
 		optional_receiver_modifier return_type backup_fn_flags method_body backup_fn_flags
-			{ $$ = zend_ast_create_decl(ZEND_AST_METHOD, $3 | $1 | $13, $2, $5,
+			{ zend_ast *surfaces = zend_surface_names_from_modifiers($1);
+			  uint32_t flags = $1 ? zend_modifier_list_to_flags(ZEND_MODIFIER_TARGET_METHOD, $1) : ZEND_ACC_PUBLIC;
+			  if ($1 && !flags && EG(exception)) { YYERROR; }
+			  if (surfaces && !zend_surface_member_modifiers_valid(flags)) { YYERROR; }
+			  if (!(flags & ZEND_ACC_PPP_MASK)) { flags |= ZEND_ACC_PUBLIC; }
+			  $$ = zend_ast_create_decl(ZEND_AST_METHOD, $3 | flags | $13, $2, $5,
 				  zend_ast_get_str($4), $7, NULL, $12, $10, NULL); CG(extra_fn_flags) = $11;
-			  if ($9) { $$->attr |= ZEND_FN_IS_MUTATING; } }
+			  if ($9) { $$->attr |= ZEND_FN_IS_MUTATING; }
+			  if (surfaces) { $$ = zend_ast_create(ZEND_AST_SURFACE_MEMBER, $$, surfaces); } }
 	|	enum_case { $$ = $1; }
 ;
 
@@ -1070,6 +1137,21 @@ class_statement:
 	|	attributes attributed_class_statement { $$ = zend_ast_with_attributes($2, $1); }
 	|	T_USE class_name_list trait_adaptations
 			{ $$ = zend_ast_create(ZEND_AST_USE_TRAIT, $2, $3); }
+	|	T_SURFACE T_STRING ';'
+			{ $$ = zend_ast_create(ZEND_AST_SURFACE_DECL, $2, NULL); }
+	|	T_SURFACE T_STRING T_IMPLEMENTS class_name ';'
+			{ $$ = zend_ast_create(ZEND_AST_SURFACE_DECL, $2, $4); }
+;
+
+surface_name_list:
+		T_STRING
+			{ $$ = zend_ast_create_list(1, ZEND_AST_SURFACE_NAMES, $1); }
+	|	surface_name_list ',' T_STRING
+			{ $$ = zend_ast_list_add($1, $3); }
+;
+
+surface_modifier:
+		T_SURFACE '[' surface_name_list ']' { $$ = $3; }
 ;
 
 class_name_list:
@@ -1135,21 +1217,29 @@ method_body:
 	|	'{' inner_statement_list '}'	{ $$ = $2; }
 ;
 
+/* The modifier lists are validated here, before the member itself parses,
+ * so that modifier errors abort at the same point they did when these
+ * productions reduced directly to flags (later errors would leak the
+ * member's strings on YYERROR). The member actions then re-derive the flags
+ * from the list, which cannot fail once validated. */
 property_modifiers:
 		non_empty_member_modifiers
-			{ $$ = zend_modifier_list_to_flags(ZEND_MODIFIER_TARGET_PROPERTY, $1);
-			  if (!$$) { YYERROR; } }
-	|	T_VAR
-			{ $$ = ZEND_ACC_PUBLIC; }
+			{ uint32_t flags = zend_modifier_list_to_flags(ZEND_MODIFIER_TARGET_PROPERTY, $1);
+			  if (!flags && EG(exception)) { YYERROR; }
+			  zend_ast *surfaces = zend_surface_names_from_modifiers($1);
+			  if (surfaces && !zend_surface_member_modifiers_valid(flags)) { YYERROR; }
+			  $$ = $1; }
+	|	T_VAR						{ $$ = NULL; }
 ;
 
 method_modifiers:
-		%empty
-			{ $$ = ZEND_ACC_PUBLIC; }
+		%empty						{ $$ = NULL; }
 	|	non_empty_member_modifiers
-			{ $$ = zend_modifier_list_to_flags(ZEND_MODIFIER_TARGET_METHOD, $1);
-			  if (!$$) { YYERROR; }
-			  if (!($$ & ZEND_ACC_PPP_MASK)) { $$ |= ZEND_ACC_PUBLIC; } }
+			{ uint32_t flags = zend_modifier_list_to_flags(ZEND_MODIFIER_TARGET_METHOD, $1);
+			  if (!flags && EG(exception)) { YYERROR; }
+			  zend_ast *surfaces = zend_surface_names_from_modifiers($1);
+			  if (surfaces && !zend_surface_member_modifiers_valid(flags)) { YYERROR; }
+			  $$ = $1; }
 ;
 
 /* The receiver marker sits between the parameter list and the return type
@@ -1173,19 +1263,24 @@ optional_receiver_modifier:
 ;
 
 class_const_modifiers:
-		%empty
-			{ $$ = ZEND_ACC_PUBLIC; }
+		%empty						{ $$ = NULL; }
 	|	non_empty_member_modifiers
-			{ $$ = zend_modifier_list_to_flags(ZEND_MODIFIER_TARGET_CONSTANT, $1);
-			  if (!$$) { YYERROR; }
-			  if (!($$ & ZEND_ACC_PPP_MASK)) { $$ |= ZEND_ACC_PUBLIC; } }
+			{ uint32_t flags = zend_modifier_list_to_flags(ZEND_MODIFIER_TARGET_CONSTANT, $1);
+			  if (!flags && EG(exception)) { YYERROR; }
+			  zend_ast *surfaces = zend_surface_names_from_modifiers($1);
+			  if (surfaces && !zend_surface_member_modifiers_valid(flags)) { YYERROR; }
+			  $$ = $1; }
 ;
 
 non_empty_member_modifiers:
 		member_modifier
 			{ $$ = zend_ast_create_list(1, ZEND_AST_MODIFIER_LIST, zend_ast_create_zval_from_long($1)); }
+	|	surface_modifier
+			{ $$ = zend_ast_create_list(1, ZEND_AST_MODIFIER_LIST, $1); }
 	|	non_empty_member_modifiers member_modifier
 			{ $$ = zend_ast_list_add($1, zend_ast_create_zval_from_long($2)); }
+	|	non_empty_member_modifiers surface_modifier
+			{ $$ = zend_ast_list_add($1, $2); }
 ;
 
 member_modifier:
