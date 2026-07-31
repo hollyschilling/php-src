@@ -1048,6 +1048,35 @@ uint32_t zend_add_anonymous_class_modifier(uint32_t flags, uint32_t new_flag)
 	return new_flags;
 }
 
+/* Grammar error production support: enum/interface/trait declarations accept
+ * no modifiers; naming the offending modifier beats a bare parse error. */
+ZEND_COLD void zend_unexpected_class_modifiers(uint32_t flags, const char *decl_kind)
+{
+	const char *modifier =
+		(flags & ZEND_ACC_EXPLICIT_ABSTRACT_CLASS) ? "abstract" :
+		(flags & ZEND_ACC_FINAL) ? "final" : "readonly";
+	zend_throw_exception_ex(zend_ce_compile_error, 0,
+		"Cannot use the %s modifier on %s", modifier, decl_kind);
+}
+
+/* Structs share the class_modifiers production so every modifier parses and
+ * gets a targeted diagnostic; only readonly is meaningful (structs are
+ * implicitly final and never abstract). */
+bool zend_validate_struct_modifiers(uint32_t flags)
+{
+	if (flags & ZEND_ACC_EXPLICIT_ABSTRACT_CLASS) {
+		zend_throw_exception(zend_ce_compile_error,
+			"Cannot use the abstract modifier on a struct", 0);
+		return false;
+	}
+	if (flags & ZEND_ACC_FINAL) {
+		zend_throw_exception(zend_ce_compile_error,
+			"Cannot use the final modifier on a struct", 0);
+		return false;
+	}
+	return true;
+}
+
 uint32_t zend_add_member_modifier(uint32_t flags, uint32_t new_flag, zend_modifier_target target) /* {{{ */
 {
 	uint32_t new_flags = flags | new_flag;
@@ -3198,6 +3227,12 @@ static zend_op *zend_delayed_compile_prop(znode *result, zend_ast *ast, uint32_t
 			if ((type == BP_VAR_R) || (type == BP_VAR_IS)) {
 				opline->result_type = IS_TMP_VAR;
 				obj_node.op_type = IS_TMP_VAR;
+			} else if (type == BP_VAR_W || type == BP_VAR_RW || type == BP_VAR_UNSET) {
+				/* $this is the container of a property write; a value-class
+				 * receiver hands back an INDIRECT so the write separates the
+				 * This slot itself. BP_VAR_FUNC_ARG stays unmarked: its
+				 * by-value branch does not dereference INDIRECT. */
+				opline->extended_value = ZEND_FETCH_THIS_WRITE;
 			}
 		}
 		CG(active_op_array)->fn_flags |= ZEND_ACC_USES_THIS;
@@ -5523,6 +5558,23 @@ static void zend_compile_method_call(znode *result, zend_ast *ast, uint32_t type
 	} else {
 		zend_short_circuiting_mark_inner(obj_ast);
 		zend_compile_expr(&obj_node, obj_ast);
+		if (!nullsafe
+		 && (obj_node.op_type & (IS_VAR|IS_TMP_VAR))
+		 && method_ast->kind == ZEND_AST_ZVAL
+		 && Z_TYPE_P(zend_ast_get_zval(method_ast)) == IS_STRING) {
+			zend_op *fetch = &CG(active_op_array)->opcodes[CG(active_op_array)->last - 1];
+
+			if (fetch->opcode == ZEND_FETCH_OBJ_R
+			 && fetch->result_type == obj_node.op_type
+			 && fetch->result.var == obj_node.u.op.var
+			 && fetch->op1_type != IS_CONST
+			 && fetch->op2_type == IS_CONST) {
+				/* A property read in receiver position, adjacent to its INIT
+				 * (a literal method name compiles no code in between): let it
+				 * lend the slot to a mutating callee (the scoped borrow). */
+				fetch->opcode = ZEND_FETCH_OBJ_RECEIVER;
+			}
+		}
 		if (nullsafe) {
 			zend_emit_jmp_null(&obj_node, type);
 		}
@@ -8252,6 +8304,10 @@ static void zend_compile_params(zend_ast *ast, zend_ast *return_type_ast, uint32
 					"Property %s::$%s cannot have type %s",
 					ZSTR_VAL(scope->name), ZSTR_VAL(name), ZSTR_VAL(str));
 			}
+			if (!type_ast && (scope->ce_flags2 & ZEND_ACC2_VALUE_CLASS)) {
+				zend_error_noreturn(E_COMPILE_ERROR, "Struct property %s::$%s must have type",
+					ZSTR_VAL(scope->name), ZSTR_VAL(name));
+			}
 
 			if (!(property_flags & ZEND_ACC_READONLY) && (scope->ce_flags & ZEND_ACC_READONLY_CLASS)) {
 				property_flags |= ZEND_ACC_READONLY;
@@ -8572,6 +8628,37 @@ static zend_string *zend_begin_method_decl(zend_op_array *op_array, zend_string 
 		zend_error(E_COMPILE_ERROR, "Cannot use 'readonly' as method modifier");
 	}
 
+	if (op_array->fn_flags2 & ZEND_ACC2_MUTATING) {
+		/* Structs declare mutating implementations; interfaces declare
+		 * mutating requirements (permission, not obligation -- see the
+		 * effect-variance rule in do_inheritance_check_on_method). Traits
+		 * cannot be checked here: whether the consumer is a struct is only
+		 * known at flattening (zend_add_trait_method). */
+		if (!(ce->ce_flags2 & ZEND_ACC2_VALUE_CLASS)
+		 && !(ce->ce_flags & (ZEND_ACC_TRAIT|ZEND_ACC_INTERFACE))) {
+			zend_error_noreturn(E_COMPILE_ERROR,
+				"Cannot declare mutating method %s::%s() outside a struct",
+				ZSTR_VAL(ce->name), ZSTR_VAL(name));
+		}
+		if (fn_flags & ZEND_ACC_STATIC) {
+			zend_error_noreturn(E_COMPILE_ERROR,
+				"Mutating method %s::%s() cannot be static",
+				ZSTR_VAL(ce->name), ZSTR_VAL(name));
+		}
+		/* Magic methods dispatch through routes that never pass
+		 * ZEND_INIT_METHOD_CALL's receiver validation (get_closure for
+		 * __invoke, string casts for __toString, trampolines for __call),
+		 * so their pure-read by-value binding is not negotiable. The
+		 * constructor is the one built-in mutating member; `mutating` on it
+		 * is accepted as redundant documentation. */
+		if (ZSTR_LEN(name) > 2 && ZSTR_VAL(name)[0] == '_' && ZSTR_VAL(name)[1] == '_'
+		 && !zend_string_equals_literal_ci(name, ZEND_CONSTRUCTOR_FUNC_NAME)) {
+			zend_error_noreturn(E_COMPILE_ERROR,
+				"Cannot declare magic method %s::%s() mutating",
+				ZSTR_VAL(ce->name), ZSTR_VAL(name));
+		}
+	}
+
 	if ((fn_flags & ZEND_ACC_PRIVATE) && (fn_flags & ZEND_ACC_FINAL) && !zend_is_constructor(name)) {
 		zend_error(E_COMPILE_WARNING, "Private methods cannot be final as they are never overridden by other classes");
 	}
@@ -8583,7 +8670,8 @@ static zend_string *zend_begin_method_decl(zend_op_array *op_array, zend_string 
 		if (ce->ce_flags & ZEND_ACC_ANON_CLASS) {
 			zend_error_noreturn(E_COMPILE_ERROR, "Anonymous class method %s() must not be abstract",
 				ZSTR_VAL(name));
-		} else if (ce->ce_flags & (ZEND_ACC_ENUM|ZEND_ACC_INTERFACE)) {
+		} else if ((ce->ce_flags & (ZEND_ACC_ENUM|ZEND_ACC_INTERFACE))
+				|| (ce->ce_flags2 & ZEND_ACC2_VALUE_CLASS)) {
 			zend_error_noreturn(E_COMPILE_ERROR, "%s method %s::%s() must not be abstract",
 				zend_get_object_type_case(ce, true), ZSTR_VAL(ce->name), ZSTR_VAL(name));
 		} else {
@@ -8629,6 +8717,16 @@ static zend_string *zend_begin_method_decl(zend_op_array *op_array, zend_string 
 
 	if (zend_hash_add_ptr(&ce->function_table, lcname, op_array) == NULL) {
 		zend_error_noreturn(E_COMPILE_ERROR, "Cannot redeclare %s::%s()",
+			ZSTR_VAL(ce->name), ZSTR_VAL(name));
+	}
+
+	/* Magic methods incompatible with the value model are rejected; the pure
+	 * reads (__toString, __invoke, __debugInfo, __call, __callStatic) bind
+	 * $this by value like any struct method and are permitted. See
+	 * zend_is_value_class_forbidden_magic_method() for the classification. */
+	if ((ce->ce_flags2 & ZEND_ACC2_VALUE_CLASS)
+	 && zend_is_value_class_forbidden_magic_method(lcname)) {
+		zend_error_noreturn(E_COMPILE_ERROR, "Struct %s cannot include magic method %s()",
 			ZSTR_VAL(ce->name), ZSTR_VAL(name));
 	}
 
@@ -8800,6 +8898,11 @@ static zend_op_array *zend_compile_func_decl_ex(
 		op_array->function_name = zend_string_copy(decl->name);
 	} else if (is_method) {
 		bool has_body = stmt_ast != NULL;
+		/* The postfix `mutating` marker travels on the decl attr (fn_flags
+		 * has no free bits; bit 31 is ZEND_ACC_STRICT_TYPES). */
+		if (decl->attr & ZEND_FN_IS_MUTATING) {
+			op_array->fn_flags2 |= ZEND_ACC2_MUTATING;
+		}
 		lcname = zend_begin_method_decl(op_array, decl->name, has_body);
 	} else {
 		lcname = zend_begin_func_decl(result, op_array, decl, level);
@@ -9144,6 +9247,16 @@ static void zend_compile_property_hooks(
 		}
 		prop_info->hooks[hook_kind] = func;
 
+		if (hook_kind == ZEND_PROPERTY_HOOK_SET
+		 && (ce->ce_flags2 & ZEND_ACC2_VALUE_CLASS)) {
+			/* A struct's set hook is implicitly mutating -- it already binds
+			 * $this borrowed-exclusive; the flag lets it make nested mutating
+			 * calls. No syntax: setters mutate by definition. Trait-provided
+			 * hooks are stamped at flattening (the trait itself is not a
+			 * value class, and the same trait may serve classes). */
+			func->common.fn_flags2 |= ZEND_ACC2_MUTATING;
+		}
+
 		if (hook_kind == ZEND_PROPERTY_HOOK_SET) {
 			switch (zend_verify_property_hook_variance(prop_info, func)) {
 				case INHERITANCE_SUCCESS:
@@ -9191,6 +9304,12 @@ static void zend_compile_prop_decl(zend_ast *ast, zend_ast *type_ast, uint32_t f
 
 	if (ce->ce_flags & ZEND_ACC_ENUM) {
 		zend_error_noreturn(E_COMPILE_ERROR, "Enum %s cannot include properties", ZSTR_VAL(ce->name));
+	}
+
+	if ((ce->ce_flags2 & ZEND_ACC2_VALUE_CLASS) && (flags & ZEND_ACC_STATIC)) {
+		/* A static property is per-class state, not part of an instance's shape. */
+		zend_error_noreturn(E_COMPILE_ERROR, "Struct %s cannot include static properties",
+			ZSTR_VAL(ce->name));
 	}
 
 	if ((flags & ZEND_ACC_FINAL) && (flags & ZEND_ACC_PRIVATE)) {
@@ -9251,6 +9370,10 @@ static void zend_compile_prop_decl(zend_ast *ast, zend_ast *type_ast, uint32_t f
 					"Property %s::$%s cannot have type %s",
 					ZSTR_VAL(ce->name), ZSTR_VAL(name), ZSTR_VAL(str));
 			}
+		} else if (ce->ce_flags2 & ZEND_ACC2_VALUE_CLASS) {
+			/* A struct is a shape: every slot is declared and typed. */
+			zend_error_noreturn(E_COMPILE_ERROR, "Struct property %s::$%s must have type",
+				ZSTR_VAL(ce->name), ZSTR_VAL(name));
 		}
 
 		/* Doc comment has been appended as last element in ZEND_AST_PROP_ELEM ast */
@@ -9766,6 +9889,8 @@ static zend_class_entry *zend_compile_class_decl(znode *result, const zend_ast *
 		const char *type = "a class name";
 		if (decl->flags & ZEND_ACC_ENUM) {
 			type = "an enum name";
+		} else if (decl->attr & ZEND_CLASS_IS_VALUE_CLASS) {
+			type = "a struct name";
 		} else if (decl->flags & ZEND_ACC_INTERFACE) {
 			type = "an interface name";
 		} else if (decl->flags & ZEND_ACC_TRAIT) {
@@ -9813,6 +9938,9 @@ static zend_class_entry *zend_compile_class_decl(znode *result, const zend_ast *
 	}
 
 	ce->ce_flags |= decl->flags;
+	if (decl->attr & ZEND_CLASS_IS_VALUE_CLASS) {
+		ce->ce_flags2 |= ZEND_ACC2_VALUE_CLASS;
+	}
 	ce->info.user.filename = zend_string_copy(zend_get_compiled_filename());
 	ce->info.user.line_start = decl->start_lineno;
 	ce->info.user.line_end = decl->end_lineno;

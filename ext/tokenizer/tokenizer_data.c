@@ -104,6 +104,7 @@ char *get_token_type_name(int token_type)
 		case T_INTERFACE: return "T_INTERFACE";
 		case T_EXTENSION: return "T_EXTENSION";
 		case T_ENUM: return "T_ENUM";
+		case T_STRUCT: return "T_STRUCT";
 		case T_EXTENDS: return "T_EXTENDS";
 		case T_IMPLEMENTS: return "T_IMPLEMENTS";
 		case T_NAMESPACE: return "T_NAMESPACE";

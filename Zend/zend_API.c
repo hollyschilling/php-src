@@ -2870,6 +2870,41 @@ ZEND_API void zend_check_magic_method_implementation(const zend_class_entry *ce,
 }
 /* }}} */
 
+/* Whether lcname names a magic method a value class must not declare. Kept
+ * adjacent to zend_check_magic_method_implementation() above so the lists
+ * stay in sync when magic methods are added.
+ *
+ * The classification follows from the value model, not from a blanket rule:
+ * a copy hook (__clone) or lifetime hook (__destruct) would observe
+ * copy-on-write separation, which creates and destroys copies on an engine
+ * schedule; the shape is total, so there is nothing for __get/__set/__isset/
+ * __unset to simulate (and unset is banned outright); __sleep/__wakeup are
+ * the legacy serialization pair; __serialize/__unserialize are deferred with
+ * the wire-format decision (__unserialize is a mutating initializer and
+ * needs the mutating call convention from the unserializer); __set_state is
+ * deferred with var_export(). The pure reads -- __toString (Stringable),
+ * __invoke, __debugInfo, __call, __callStatic -- bind $this by value like
+ * any struct method and are permitted; __construct is the mutating member,
+ * reachable only through object creation. */
+ZEND_API bool zend_is_value_class_forbidden_magic_method(const zend_string *lcname)
+{
+	if (ZSTR_VAL(lcname)[0] != '_' || ZSTR_VAL(lcname)[1] != '_') {
+		return false;
+	}
+
+	return zend_string_equals_literal(lcname, ZEND_DESTRUCTOR_FUNC_NAME)
+		|| zend_string_equals_literal(lcname, ZEND_CLONE_FUNC_NAME)
+		|| zend_string_equals_literal(lcname, ZEND_GET_FUNC_NAME)
+		|| zend_string_equals_literal(lcname, ZEND_SET_FUNC_NAME)
+		|| zend_string_equals_literal(lcname, ZEND_UNSET_FUNC_NAME)
+		|| zend_string_equals_literal(lcname, ZEND_ISSET_FUNC_NAME)
+		|| zend_string_equals_literal(lcname, ZEND_SERIALIZE_FUNC_NAME)
+		|| zend_string_equals_literal(lcname, ZEND_UNSERIALIZE_FUNC_NAME)
+		|| zend_string_equals_literal(lcname, ZEND_SET_STATE_FUNC_NAME)
+		|| zend_string_equals(lcname, ZSTR_KNOWN(ZEND_STR_SLEEP))
+		|| zend_string_equals(lcname, ZSTR_KNOWN(ZEND_STR_WAKEUP));
+}
+
 ZEND_API void zend_add_magic_method(zend_class_entry *ce, zend_function *fptr, const zend_string *lcname)
 {
 	if (ZSTR_VAL(lcname)[0] != '_' || ZSTR_VAL(lcname)[1] != '_') {
@@ -2879,6 +2914,14 @@ ZEND_API void zend_add_magic_method(zend_class_entry *ce, zend_function *fptr, c
 	} else if (zend_string_equals_literal(lcname, ZEND_CONSTRUCTOR_FUNC_NAME)) {
 		ce->constructor = fptr;
 		ce->constructor->common.fn_flags |= ZEND_ACC_CTOR;
+		if (ce->ce_flags2 & ZEND_ACC2_VALUE_CLASS) {
+			/* A struct's constructor is the (so far only) mutating callee:
+			 * object creation lends it the fresh slot as a borrowed,
+			 * exclusive $this. All value-class call machinery keys on this
+			 * flag, not on ACC_CTOR, so the `mutating` modifier can join by
+			 * setting the same bit. */
+			ce->constructor->common.fn_flags2 |= ZEND_ACC2_MUTATING;
+		}
 	} else if (zend_string_equals_literal(lcname, ZEND_DESTRUCTOR_FUNC_NAME)) {
 		ce->destructor = fptr;
 	} else if (zend_string_equals_literal(lcname, ZEND_GET_FUNC_NAME)) {
@@ -4002,6 +4045,22 @@ get_function_via_handler:
 				retval = false;
 				if (error) {
 					zend_spprintf(error, 0, "cannot call abstract method %s::%s()", ZSTR_VAL(fcc->calling_scope->name), ZSTR_VAL(fcc->function_handler->common.function_name));
+				}
+			} else if ((fcc->function_handler->common.fn_flags2 & ZEND_ACC2_MUTATING)
+			 && fcc->object) {
+				/* A mutating callee is not reachable through callables; its
+				 * receiver must be lent by a call site that can separate it
+				 * in place (ZEND_INIT_METHOD_CALL). This resolver backs every
+				 * callable consumer (call_user_func, Closure::fromCallable,
+				 * INIT_USER_CALL, array_map, ...), and reporting through
+				 * *error keeps is_callable() non-throwing. */
+				retval = false;
+				if (error) {
+					if (fcc->function_handler->common.fn_flags & ZEND_ACC_CTOR) {
+						zend_spprintf(error, 0, "cannot call the constructor of struct %s explicitly", ZSTR_VAL(fcc->object->ce->name));
+					} else {
+						zend_spprintf(error, 0, "cannot call mutating method %s::%s() through a callable", ZSTR_VAL(fcc->object->ce->name), ZSTR_VAL(fcc->function_handler->common.function_name));
+					}
 				}
 			} else if (!fcc->object && !(fcc->function_handler->common.fn_flags & ZEND_ACC_STATIC)) {
 				retval = false;
@@ -5238,6 +5297,8 @@ ZEND_API ZEND_COLD const char *zend_get_object_type_case(const zend_class_entry 
 		return upper_case ? "Interface" : "interface";
 	} else if (ce->ce_flags & ZEND_ACC_ENUM) {
 		return upper_case ? "Enum" : "enum";
+	} else if (ce->ce_flags2 & ZEND_ACC2_VALUE_CLASS) {
+		return upper_case ? "Struct" : "struct";
 	} else {
 		return upper_case ? "Class" : "class";
 	}

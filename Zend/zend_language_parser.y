@@ -168,6 +168,7 @@ static YYSIZE_T zend_yytnamerr(char*, const char*);
 %token <ident> T_INTERFACE     "'interface'"
 %token <ident> T_EXTENSION     "'extension'"
 %token <ident> T_ENUM          "'enum'"
+%token <ident> T_STRUCT        "'struct'"
 %token <ident> T_EXTENDS       "'extends'"
 %token <ident> T_IMPLEMENTS    "'implements'"
 %token <ident> T_NAMESPACE     "'namespace'"
@@ -286,12 +287,14 @@ static YYSIZE_T zend_yytnamerr(char*, const char*);
 %type <ast> match match_arm_list non_empty_match_arm_list match_arm match_arm_cond_list
 %type <ast> enum_declaration_statement enum_backing_type enum_case enum_case_expr
 %type <ast> extension_declaration_statement extension_target
+%type <ast> struct_declaration_statement
 %type <ast> function_name non_empty_member_modifiers
 %type <ast> property_hook property_hook_list optional_property_hook_list hooked_property property_hook_body
 %type <ast> optional_parameter_list clone_argument_list non_empty_clone_argument_list
 
 %type <num> returns_ref function fn is_reference is_variadic property_modifiers property_hook_modifiers
 %type <num> method_modifiers class_const_modifiers member_modifier optional_cpp_modifiers
+%type <num> optional_receiver_modifier
 %type <num> class_modifiers class_modifier anonymous_class_modifiers anonymous_class_modifiers_optional use_type backup_fn_flags extension_keyword
 
 %type <ptr> backup_lex_pos
@@ -313,7 +316,7 @@ reserved_non_modifiers:
 	| T_FUNCTION | T_CONST | T_RETURN | T_PRINT | T_YIELD | T_LIST | T_SWITCH | T_ENDSWITCH | T_CASE | T_DEFAULT | T_BREAK
 	| T_ARRAY | T_CALLABLE | T_EXTENDS | T_IMPLEMENTS | T_NAMESPACE | T_TRAIT | T_INTERFACE | T_CLASS
 	| T_CLASS_C | T_TRAIT_C | T_FUNC_C | T_METHOD_C | T_LINE | T_FILE | T_DIR | T_NS_C | T_FN | T_MATCH | T_ENUM | T_EXTENSION
-	| T_PROPERTY_C
+	| T_PROPERTY_C | T_STRUCT
 ;
 
 semi_reserved:
@@ -395,6 +398,7 @@ attributed_statement:
 	|	interface_declaration_statement		{ $$ = $1; }
 	|	enum_declaration_statement			{ $$ = $1; }
 	|	extension_declaration_statement		{ $$ = $1; }
+	|	struct_declaration_statement		{ $$ = $1; }
 ;
 
 attributed_top_statement:
@@ -641,18 +645,41 @@ trait_declaration_statement:
 		T_TRAIT { $<num>$ = CG(zend_lineno); }
 		T_STRING backup_doc_comment '{' class_statement_list '}'
 			{ $$ = zend_ast_create_decl(ZEND_AST_CLASS, ZEND_ACC_TRAIT, $<num>2, $4, zend_ast_get_str($3), NULL, NULL, $6, NULL, NULL); }
+	|	class_modifiers T_TRAIT
+			{ $$ = NULL; zend_unexpected_class_modifiers($1, "a trait"); YYERROR; }
+;
+
+/* Structs are implicitly final and root: no extends_from. Modifiers share the
+ * class_modifiers production so each one parses and gets a targeted
+ * diagnostic (only readonly is valid; `readonly struct` mirrors `readonly
+ * class`). The value-class marker travels in the decl's attr, not its flags,
+ * because flags is OR'd wholesale into ce_flags and the marker lives in
+ * ce_flags2. */
+struct_declaration_statement:
+		class_modifiers T_STRUCT { $<num>$ = CG(zend_lineno); if (!zend_validate_struct_modifiers($1)) { YYERROR; } }
+		T_STRING implements_list backup_doc_comment '{' class_statement_list '}'
+			{ $$ = zend_ast_create_decl(ZEND_AST_CLASS, $1|ZEND_ACC_FINAL|ZEND_ACC_NO_DYNAMIC_PROPERTIES, $<num>3, $6, zend_ast_get_str($4), NULL, $5, $8, NULL, NULL);
+			  $$->attr = ZEND_CLASS_IS_VALUE_CLASS; }
+	|	T_STRUCT { $<num>$ = CG(zend_lineno); }
+		T_STRING implements_list backup_doc_comment '{' class_statement_list '}'
+			{ $$ = zend_ast_create_decl(ZEND_AST_CLASS, ZEND_ACC_FINAL|ZEND_ACC_NO_DYNAMIC_PROPERTIES, $<num>2, $5, zend_ast_get_str($3), NULL, $4, $7, NULL, NULL);
+			  $$->attr = ZEND_CLASS_IS_VALUE_CLASS; }
 ;
 
 interface_declaration_statement:
 		T_INTERFACE { $<num>$ = CG(zend_lineno); }
 		T_STRING interface_extends_list backup_doc_comment '{' class_statement_list '}'
 			{ $$ = zend_ast_create_decl(ZEND_AST_CLASS, ZEND_ACC_INTERFACE, $<num>2, $5, zend_ast_get_str($3), NULL, $4, $7, NULL, NULL); }
+	|	class_modifiers T_INTERFACE
+			{ $$ = NULL; zend_unexpected_class_modifiers($1, "an interface"); YYERROR; }
 ;
 
 enum_declaration_statement:
 		T_ENUM { $<num>$ = CG(zend_lineno); }
 		T_STRING enum_backing_type implements_list backup_doc_comment '{' class_statement_list '}'
 			{ $$ = zend_ast_create_decl(ZEND_AST_CLASS, ZEND_ACC_ENUM|ZEND_ACC_FINAL, $<num>2, $6, zend_ast_get_str($3), NULL, $5, $8, NULL, $4); }
+	|	class_modifiers T_ENUM
+			{ $$ = NULL; zend_unexpected_class_modifiers($1, "an enum"); YYERROR; }
 ;
 
 extension_target:
@@ -1031,9 +1058,10 @@ attributed_class_statement:
 			{ $$ = zend_ast_create(ZEND_AST_CLASS_CONST_GROUP, $4, NULL, $3);
 			  $$->attr = $1; }
 	|	method_modifiers function returns_ref identifier backup_doc_comment '(' parameter_list ')'
-		return_type backup_fn_flags method_body backup_fn_flags
-			{ $$ = zend_ast_create_decl(ZEND_AST_METHOD, $3 | $1 | $12, $2, $5,
-				  zend_ast_get_str($4), $7, NULL, $11, $9, NULL); CG(extra_fn_flags) = $10; }
+		optional_receiver_modifier return_type backup_fn_flags method_body backup_fn_flags
+			{ $$ = zend_ast_create_decl(ZEND_AST_METHOD, $3 | $1 | $13, $2, $5,
+				  zend_ast_get_str($4), $7, NULL, $12, $10, NULL); CG(extra_fn_flags) = $11;
+			  if ($9) { $$->attr |= ZEND_FN_IS_MUTATING; } }
 	|	enum_case { $$ = $1; }
 ;
 
@@ -1122,6 +1150,26 @@ method_modifiers:
 			{ $$ = zend_modifier_list_to_flags(ZEND_MODIFIER_TARGET_METHOD, $1);
 			  if (!$$) { YYERROR; }
 			  if (!($$ & ZEND_ACC_PPP_MASK)) { $$ |= ZEND_ACC_PUBLIC; } }
+;
+
+/* The receiver marker sits between the parameter list and the return type
+ * (`function m() mutating: void`), where no identifier can otherwise appear,
+ * so `mutating` needs no token and reserves nothing. */
+optional_receiver_modifier:
+		%empty
+			{ $$ = 0; }
+	|	T_STRING {
+			zend_string *marker = zend_ast_get_str($1);
+			bool ok = zend_string_equals_literal_ci(marker, "mutating");
+			if (!ok) {
+				zend_throw_exception_ex(zend_ce_compile_error, 0,
+					"Unexpected identifier \"%s\" in method signature, expecting \"mutating\"",
+					ZSTR_VAL(marker));
+			}
+			zend_ast_destroy($1);
+			if (!ok) { YYERROR; }
+			$$ = 1;
+		}
 ;
 
 class_const_modifiers:
