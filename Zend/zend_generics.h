@@ -53,10 +53,14 @@ ZEND_API uint32_t zend_generics_binding_arg_index(
  * names inside composite (DNF) type lists; list buffers are arena-owned. */
 ZEND_API void zend_generics_arg_release_names(zend_type arg);
 
-/* Compile-time positional check for a variant interface template ('in'/'out'
+/* Positional checks for a variant interface template ('in'/'out'
  * parameters): output positions only for 'out', input only for 'in';
- * self-references compose polarity, foreign-nested mentions are invariant
- * positions in this version. Throws E_COMPILE_ERROR on violation. */
+ * generic references (self or foreign) compose polarity through the
+ * referenced template's declared variance. The compile-time pass covers
+ * bare labels and self-references (E_COMPILE_ERROR on violation); the
+ * deep pass runs at the template's first instantiation, when foreign
+ * templates are resolvable, throws a catchable Error on violation, and
+ * caches passes per template in EG(generics_variance_cache). */
 ZEND_API void zend_generics_check_variance_positions(const zend_class_entry *ce);
 ZEND_API bool zend_generics_check_variance_deep(
 		const zend_class_entry *ce, bool use_autoload);
