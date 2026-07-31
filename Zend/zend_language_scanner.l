@@ -200,6 +200,177 @@ static void heredoc_label_dtor(zend_heredoc_label *heredoc_label) {
     efree(heredoc_label->label);
 }
 
+#define ZEND_GENERIC_SCAN_MAX 1024
+
+/* Bounded lookahead deciding whether a lone '<' opens a generic type-argument
+ * list in expression position. `cursor` points just past the '<'.
+ *
+ * Declaration headers and type positions accept a plain '<' at the grammar
+ * level, and 'new'/'instanceof' commit it outright, so this heuristic only
+ * matters where a comparison reading also exists. Its contract is
+ * soundness-first: it claims T_GENERIC_OPEN only for token shapes that are
+ * parse errors in generics-free PHP, so no valid program changes meaning.
+ *
+ * The region must have the exact shape of a static type-argument list --
+ * optionally \-qualified type names, commas, whitespace, balanced nested
+ * <...> and composite (DNF) punctuation ('|', '&', parens, '?') -- closed by
+ * the matching '>', and then:
+ *   - followed by '::': safe even with commas or DNF, since a '>' directly
+ *     followed by '::' cannot continue any expression ('Foo<K, V>::make()',
+ *     'Vec<int|string>::class');
+ *   - followed by '(' with NO top-level comma and NO DNF punctuation:
+ *     without the claim the text is a chained-comparison parse error because
+ *     comparison operators are non-associative ('$o->m<T>($x)'). With a
+ *     comma or a union/intersection the unclaimed reading can be valid PHP
+ *     ('f(A<B, C>(5))', 'f((A<B)|(C>($x)))' via precedence), so bare-name
+ *     positions decline (no generic reading exists there) and the meaning
+ *     is unchanged; in METHOD-RECEIVER position ('->name', '?->name',
+ *     '::name' before the '<'), where a generic call reading also exists,
+ *     the shape is POISONED -- a loud compile error -- so neither reading
+ *     wins silently. The explicit '::<' form spells the call; parentheses
+ *     spell the comparisons. Whitespace never changes the outcome.
+ * Everything else declines to a plain '<'. */
+typedef enum {
+	ZEND_GENERIC_SCAN_DECLINE = 0,
+	ZEND_GENERIC_SCAN_CLAIM,
+	ZEND_GENERIC_SCAN_POISON
+} zend_generic_scan_result;
+
+/* Does a method-receiver ("->name", "?->name", "::name", any interior
+ * whitespace) immediately precede the '<' at `lt`? Token-shape only. */
+static bool zend_scan_generic_receiver_precedes(
+		const unsigned char *lt, const unsigned char *start)
+{
+	const unsigned char *p = lt;
+	while (p > start && (p[-1] == ' ' || p[-1] == '\t' || p[-1] == '\r' || p[-1] == '\n')) {
+		p--;
+	}
+	const unsigned char *label_end = p;
+	while (p > start && ((p[-1] >= 'a' && p[-1] <= 'z') || (p[-1] >= 'A' && p[-1] <= 'Z')
+			|| (p[-1] >= '0' && p[-1] <= '9') || p[-1] == '_' || p[-1] >= 0x80)) {
+		p--;
+	}
+	if (p == label_end || (*p >= '0' && *p <= '9')) {
+		return false; /* no member label before the '<' */
+	}
+	while (p > start && (p[-1] == ' ' || p[-1] == '\t' || p[-1] == '\r' || p[-1] == '\n')) {
+		p--;
+	}
+	if (p - start >= 2 && p[-1] == '>' && p[-2] == '-') {
+		return true; /* '->' and '?->' */
+	}
+	if (p - start >= 2 && p[-1] == ':' && p[-2] == ':') {
+		return true; /* '::' */
+	}
+	return false;
+}
+
+static zend_generic_scan_result zend_scan_is_generic_open(
+		const unsigned char *cursor, const unsigned char *limit,
+		const unsigned char *lt, const unsigned char *buf_start)
+{
+	const unsigned char *end = cursor + ZEND_GENERIC_SCAN_MAX < limit
+		? cursor + ZEND_GENERIC_SCAN_MAX : limit;
+	uint32_t depth = 1;
+	uint32_t paren_depth = 0;
+	bool top_level_comma = false;
+	bool saw_composite = false;
+	enum { EXPECT_ELEM, IN_NAME, AFTER_ELEM } state = EXPECT_ELEM;
+
+	while (cursor < end && depth > 0) {
+		unsigned char c = *cursor++;
+
+		if (c == ' ' || c == '\t' || c == '\r' || c == '\n') {
+			if (state == IN_NAME) {
+				state = AFTER_ELEM;
+			}
+		} else if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_' || c >= 0x80) {
+			if (state == AFTER_ELEM) {
+				return false; /* two adjacent names: not a type-argument list */
+			}
+			state = IN_NAME;
+		} else if (c >= '0' && c <= '9') {
+			if (state != IN_NAME) {
+				return false; /* names cannot start with a digit; literals reject */
+			}
+		} else if (c == '\\') {
+			if (state == AFTER_ELEM) {
+				return false;
+			}
+			state = IN_NAME;
+		} else if (c == ',') {
+			if (state == EXPECT_ELEM) {
+				return false;
+			}
+			if (depth == 1) {
+				top_level_comma = true;
+			}
+			state = EXPECT_ELEM;
+		} else if (c == '<') {
+			if (state == EXPECT_ELEM) {
+				return false;
+			}
+			depth++;
+			state = EXPECT_ELEM;
+		} else if (c == '>') {
+			if (state == EXPECT_ELEM) {
+				return false; /* empty argument list */
+			}
+			depth--;
+			state = AFTER_ELEM;
+		} else if (c == '|' || c == '&') {
+			if (state == EXPECT_ELEM) {
+				return false;
+			}
+			saw_composite = true;
+			state = EXPECT_ELEM;
+		} else if (c == '(' || c == '?') {
+			if (state != EXPECT_ELEM) {
+				return false;
+			}
+			if (c == '(') {
+				paren_depth++;
+			}
+			saw_composite = true;
+		} else if (c == ')') {
+			if (state == EXPECT_ELEM || paren_depth == 0) {
+				return false; /* stray close: not a type-argument list */
+			}
+			paren_depth--;
+			saw_composite = true;
+			state = AFTER_ELEM;
+		} else {
+			return false;
+		}
+	}
+	if (depth != 0 || paren_depth != 0) {
+		return false;
+	}
+
+	/* Follow check: see the contract above. */
+	while (cursor < limit && (*cursor == ' ' || *cursor == '\t' || *cursor == '\r' || *cursor == '\n')) {
+		cursor++;
+	}
+	if (cursor >= limit) {
+		return ZEND_GENERIC_SCAN_DECLINE;
+	}
+	if (*cursor == ':') {
+		return (cursor + 1 < limit && cursor[1] == ':')
+			? ZEND_GENERIC_SCAN_CLAIM : ZEND_GENERIC_SCAN_DECLINE;
+	}
+	if (*cursor != '(') {
+		return ZEND_GENERIC_SCAN_DECLINE;
+	}
+	if (!top_level_comma && !saw_composite) {
+		return ZEND_GENERIC_SCAN_CLAIM;
+	}
+	/* Comma or DNF before '(': the unclaimed reading can be valid PHP 8.
+	 * Where a generic call reading also exists -- method-receiver position --
+	 * neither reading may win silently. */
+	return zend_scan_generic_receiver_precedes(lt, buf_start)
+		? ZEND_GENERIC_SCAN_POISON : ZEND_GENERIC_SCAN_DECLINE;
+}
+
 void shutdown_scanner(void)
 {
 	CG(parse_error) = 0;
@@ -2024,7 +2195,37 @@ OPTIONAL_WHITESPACE_OR_COMMENTS ({WHITESPACE}|{MULTI_LINE_COMMENT}|{SINGLE_LINE_
 }
 
 <ST_IN_SCRIPTING>">>" {
+	/* A '>>' that closes two nested generic argument lists is consumed as
+	 * T_SR by the parser's fused-close productions; no lexer state needed. */
 	RETURN_TOKEN(T_SR);
+}
+
+<ST_IN_SCRIPTING>"::<" {
+	/* Turbofish: the explicit generic-argument form. '<' cannot follow '::'
+	 * anywhere in generics-free PHP, so this token is unconditionally safe. */
+	RETURN_TOKEN(T_TURBOFISH);
+}
+
+<ST_IN_SCRIPTING>"<" {
+	switch (zend_scan_is_generic_open((const unsigned char *) YYCURSOR,
+			(const unsigned char *) YYLIMIT, (const unsigned char *) yytext,
+			(const unsigned char *) SCNG(yy_start))) {
+		case ZEND_GENERIC_SCAN_CLAIM:
+			RETURN_TOKEN(T_GENERIC_OPEN);
+		case ZEND_GENERIC_SCAN_POISON:
+			/* Deliberately rejected overlap: looks like generic type
+			 * arguments on a method receiver, but the comparison reading is
+			 * also valid PHP. Nothing wins silently. */
+			if (PARSER_MODE()) {
+				zend_throw_exception(zend_ce_parse_error,
+					"Ambiguous mix of comparison and generic syntax; write the "
+					"generic method call with '::<', or parenthesize the comparisons", 0);
+				RETURN_TOKEN(T_ERROR);
+			}
+			RETURN_TOKEN('<');
+		default:
+			RETURN_TOKEN('<');
+	}
 }
 
 <ST_IN_SCRIPTING>"&"{OPTIONAL_WHITESPACE_OR_COMMENTS}("$"|"...") {

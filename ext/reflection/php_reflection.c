@@ -4891,6 +4891,9 @@ ZEND_METHOD(ReflectionClass, isInstantiable)
 	if (ce->ce_flags & (ZEND_ACC_INTERFACE | ZEND_ACC_TRAIT | ZEND_ACC_EXPLICIT_ABSTRACT_CLASS | ZEND_ACC_IMPLICIT_ABSTRACT_CLASS | ZEND_ACC_ENUM)) {
 		RETURN_FALSE;
 	}
+	if (ce->ce_flags2 & ZEND_ACC2_GENERIC_TEMPLATE) {
+		RETURN_FALSE;
+	}
 
 	/* Basically, the class is instantiable. Though, if there is a constructor
 	 * and it is not publicly accessible, it isn't! */
@@ -4899,6 +4902,145 @@ ZEND_METHOD(ReflectionClass, isInstantiable)
 	}
 
 	RETURN_BOOL(ce->constructor->common.fn_flags & ZEND_ACC_PUBLIC);
+}
+/* }}} */
+
+/* {{{ Returns whether this class is a generic template */
+ZEND_METHOD(ReflectionClass, isGenericTemplate)
+{
+	reflection_object *intern;
+	zend_class_entry *ce;
+
+	ZEND_PARSE_PARAMETERS_NONE();
+	GET_REFLECTION_OBJECT_PTR(ce);
+	RETURN_BOOL(ce->ce_flags2 & ZEND_ACC2_GENERIC_TEMPLATE);
+}
+/* }}} */
+
+/* {{{ Returns whether this class is a stamped generic instantiation */
+ZEND_METHOD(ReflectionClass, isGenericInstantiation)
+{
+	reflection_object *intern;
+	zend_class_entry *ce;
+
+	ZEND_PARSE_PARAMETERS_NONE();
+	GET_REFLECTION_OBJECT_PTR(ce);
+	RETURN_BOOL(ce->ce_flags2 & ZEND_ACC2_GENERIC_INSTANCE);
+}
+/* }}} */
+
+/* {{{ Returns the generic type parameters (of the template, or of an
+       instantiation's template): [{name, boundKind, bound}] */
+ZEND_METHOD(ReflectionClass, getGenericTypeParameters)
+{
+	reflection_object *intern;
+	zend_class_entry *ce;
+
+	ZEND_PARSE_PARAMETERS_NONE();
+	GET_REFLECTION_OBJECT_PTR(ce);
+
+	const zend_generic_params *generic_params = ce->generic_params;
+	if (!generic_params && ce->generic_binding) {
+		generic_params = ce->generic_binding->template_ce->generic_params;
+	}
+
+	array_init(return_value);
+	if (!generic_params) {
+		return;
+	}
+	for (uint32_t i = 0; i < generic_params->num_params; i++) {
+		const zend_generic_param *param = &generic_params->params[i];
+		zval entry;
+		array_init(&entry);
+		add_assoc_str(&entry, "name", zend_string_copy(param->name));
+		if (param->bound_name) {
+			add_assoc_str(&entry, "bound", zend_string_copy(param->bound_name));
+		} else {
+			add_assoc_null(&entry, "bound");
+		}
+		if (param->bound_kind & ZEND_GENERIC_VARIANCE_MASK) {
+			add_assoc_string(&entry, "variance",
+				(param->bound_kind & ZEND_GENERIC_VARIANCE_OUT) ? "out" : "in");
+		} else {
+			add_assoc_null(&entry, "variance");
+		}
+		add_assoc_bool(&entry, "variadic", i == generic_params->pack_index);
+		add_next_index_zval(return_value, &entry);
+	}
+}
+/* }}} */
+
+/* {{{ Returns an instantiation's type arguments as type-name strings */
+ZEND_METHOD(ReflectionClass, getGenericTypeArguments)
+{
+	reflection_object *intern;
+	zend_class_entry *ce;
+
+	ZEND_PARSE_PARAMETERS_NONE();
+	GET_REFLECTION_OBJECT_PTR(ce);
+
+	array_init(return_value);
+	if (!ce->generic_binding) {
+		return;
+	}
+	for (uint32_t i = 0; i < ce->generic_binding->num_args; i++) {
+		zend_string *type_name = zend_type_to_string(ce->generic_binding->args[i]);
+		add_next_index_str(return_value, type_name);
+	}
+}
+/* }}} */
+
+/* {{{ Returns the template of a stamped instantiation, or null */
+ZEND_METHOD(ReflectionClass, getGenericTemplate)
+{
+	reflection_object *intern;
+	zend_class_entry *ce;
+
+	ZEND_PARSE_PARAMETERS_NONE();
+	GET_REFLECTION_OBJECT_PTR(ce);
+
+	if (!ce->generic_binding) {
+		RETURN_NULL();
+	}
+	zend_reflection_class_factory(ce->generic_binding->template_ce, return_value);
+}
+/* }}} */
+
+/* {{{ Returns a template's param-dependent interface references (unsubstituted,
+       e.g. "Collection<T>"); resolved per instantiation at stamp time */
+ZEND_METHOD(ReflectionClass, getGenericInterfaceNames)
+{
+	reflection_object *intern;
+	zend_class_entry *ce;
+
+	ZEND_PARSE_PARAMETERS_NONE();
+	GET_REFLECTION_OBJECT_PTR(ce);
+
+	array_init(return_value);
+	if (!ce->generic_params) {
+		return;
+	}
+	for (uint32_t i = 0; i < ce->generic_params->num_deferred_interfaces; i++) {
+		add_next_index_str(return_value,
+			zend_string_copy(ce->generic_params->deferred_interfaces[i]));
+	}
+}
+/* }}} */
+
+/* {{{ Returns a template's param-dependent parent reference (unsubstituted,
+       e.g. "Vec<T>"), or null. Concrete parents answer via getParentClass. */
+ZEND_METHOD(ReflectionClass, getGenericParentName)
+{
+	reflection_object *intern;
+	zend_class_entry *ce;
+
+	ZEND_PARSE_PARAMETERS_NONE();
+	GET_REFLECTION_OBJECT_PTR(ce);
+
+	if (!ce->generic_params || !ce->generic_params->deferred_parent) {
+		RETURN_NULL();
+	}
+	RETURN_STR_COPY(ce->generic_params->deferred_parent);
 }
 /* }}} */
 

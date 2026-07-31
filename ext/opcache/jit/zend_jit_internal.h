@@ -352,8 +352,20 @@ typedef struct _zend_jit_op_array_trace_extension {
 	zend_func_info func_info;
 	const zend_op_array *op_array;
 	size_t offset; /* offset from "zend_op" to corresponding "op_info" */
+	/* Generic family (template or stamped clone): per-clone code_slots
+	 * follow trace_info. Stored here, NOT in func_info.flags -- that field
+	 * is reused as scratch by the trace compiler. */
+	bool generic_trace;
 	zend_op_trace_info trace_info[1];
+	/* When func_info.flags carries ZEND_FUNC_GENERIC_TRACE, a parallel
+	 * "const void *code_slots[op_array->last]" array follows trace_info:
+	 * compiled root-trace entries per opline, per CLONE (opcodes -- and so
+	 * opline handlers -- are shared between every stamped clone of a generic
+	 * template, so machine code must never be installed into them). */
 } zend_jit_op_array_trace_extension;
+
+#define ZEND_JIT_TRACE_CODE_SLOTS(jit_extension, last) \
+	((const void**)((jit_extension)->trace_info + (last)))
 
 #define ZEND_OP_TRACE_INFO(opline, offset) \
 	((zend_op_trace_info*)(((char*)opline) + offset))
@@ -678,6 +690,8 @@ struct _zend_jit_trace_stack_frame {
 ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_CCONV zend_jit_func_trace_helper(ZEND_OPCODE_HANDLER_ARGS);
 ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_CCONV zend_jit_ret_trace_helper(ZEND_OPCODE_HANDLER_ARGS);
 ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_CCONV zend_jit_loop_trace_helper(ZEND_OPCODE_HANDLER_ARGS);
+ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_CCONV zend_jit_generic_func_trace_dispatch_helper(ZEND_OPCODE_HANDLER_ARGS);
+ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_CCONV zend_jit_generic_loop_trace_dispatch_helper(ZEND_OPCODE_HANDLER_ARGS);
 #endif
 
 int ZEND_FASTCALL zend_jit_trace_hot_root(zend_execute_data *execute_data, const zend_op *opline);

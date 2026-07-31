@@ -560,6 +560,47 @@ ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_CCONV zend_jit_loop_trace_helper(ZEN
 
 	ZEND_OPCODE_TAIL_CALL(zend_jit_trace_counter_helper);
 }
+
+/* Generic-family trace entry: the opline (and its handler slot) is shared by
+ * every stamped clone of the template, so compiled traces live in the
+ * EXECUTING clone's extension. Dispatch there before any counting. The body
+ * is duplicated per variant (like the plain trace helpers) so every
+ * ZEND_OPCODE_TAIL_CALL keeps the exact handler signature. */
+#define ZEND_JIT_GENERIC_TRACE_DISPATCH_BODY(cost_expr) do { \
+		zend_jit_op_array_trace_extension *jit_extension = \
+			(zend_jit_op_array_trace_extension*)ZEND_FUNC_INFO(&EX(func)->op_array); \
+		size_t offset = jit_extension->offset; \
+		uint8_t flags = ZEND_OP_TRACE_INFO(opline, offset)->trace_flags; \
+		\
+		if (flags & ZEND_JIT_TRACE_JITED) { \
+			const zend_op_array *op_array = &EX(func)->op_array; \
+			zend_vm_opcode_handler_t code = (zend_vm_opcode_handler_t) \
+				ZEND_JIT_TRACE_CODE_SLOTS(jit_extension, op_array->last) \
+					[opline - op_array->opcodes]; \
+			ZEND_OPCODE_TAIL_CALL(code); \
+		} \
+		if (UNEXPECTED(flags & ZEND_JIT_TRACE_BLACKLISTED)) { \
+			zend_vm_opcode_handler_t orig = \
+				ZEND_OP_TRACE_INFO(opline, offset)->orig_handler; \
+			ZEND_OPCODE_TAIL_CALL(orig); \
+		} \
+		\
+		*(ZEND_OP_TRACE_INFO(opline, offset)->counter) -= (cost_expr); \
+		\
+		ZEND_OPCODE_TAIL_CALL(zend_jit_trace_counter_helper); \
+	} while (0)
+
+ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_CCONV zend_jit_generic_func_trace_dispatch_helper(ZEND_OPCODE_HANDLER_ARGS)
+{
+	ZEND_JIT_GENERIC_TRACE_DISPATCH_BODY(
+		(ZEND_JIT_COUNTER_INIT + JIT_G(hot_func) - 1) / JIT_G(hot_func));
+}
+
+ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_CCONV zend_jit_generic_loop_trace_dispatch_helper(ZEND_OPCODE_HANDLER_ARGS)
+{
+	ZEND_JIT_GENERIC_TRACE_DISPATCH_BODY(
+		(ZEND_JIT_COUNTER_INIT + JIT_G(hot_loop) - 1) / JIT_G(hot_loop));
+}
 #endif
 
 #define TRACE_RECORD(_op, _info, _ptr) \
@@ -679,7 +720,7 @@ static int zend_jit_trace_record_fake_init_call_ex(zend_execute_data *call, zend
 		} else if (func->type == ZEND_USER_FUNCTION) {
 			jit_extension =
 				(zend_jit_op_array_trace_extension*)ZEND_FUNC_INFO(&func->op_array);
-			if (UNEXPECTED(!jit_extension && (func->op_array.fn_flags & ZEND_ACC_CLOSURE))
+			if (UNEXPECTED(!jit_extension)
 			 || (jit_extension && !(jit_extension->func_info.flags & ZEND_FUNC_JIT_ON_HOT_TRACE))
 			 || (func->op_array.fn_flags & ZEND_ACC_FAKE_CLOSURE)) {
 				func = NULL;
@@ -1294,7 +1335,7 @@ zend_jit_trace_stop ZEND_FASTCALL zend_jit_trace_execute(zend_execute_data  *ex,
 				} else if (func->type == ZEND_USER_FUNCTION) {
 					jit_extension =
 						(zend_jit_op_array_trace_extension*)ZEND_FUNC_INFO(&func->op_array);
-					if (UNEXPECTED(!jit_extension && (func->op_array.fn_flags & ZEND_ACC_CLOSURE))
+					if (UNEXPECTED(!jit_extension)
 					 || (jit_extension && !(jit_extension->func_info.flags & ZEND_FUNC_JIT_ON_HOT_TRACE))
 					 || (func->op_array.fn_flags & ZEND_ACC_FAKE_CLOSURE)) {
 						func = NULL;
