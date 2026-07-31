@@ -398,7 +398,7 @@ dynamic:
 	property_info = (zend_property_info*)Z_PTR_P(zv);
 	flags = property_info->flags;
 
-	if (flags & (ZEND_ACC_CHANGED|ZEND_ACC_PRIVATE|ZEND_ACC_PROTECTED)) {
+	if (flags & (ZEND_ACC_CHANGED|ZEND_ACC_PRIVATE|ZEND_ACC_PROTECTED|ZEND_ACC_MODULE_INTERNAL)) {
 		const zend_class_entry *scope = get_fake_or_executed_scope();
 
 		if (property_info->ce != scope) {
@@ -413,7 +413,7 @@ dynamic:
 					property_info = p;
 					flags = property_info->flags;
 					goto found;
-				} else if (flags & ZEND_ACC_PUBLIC) {
+				} else if ((flags & (ZEND_ACC_PUBLIC|ZEND_ACC_MODULE_INTERNAL)) == ZEND_ACC_PUBLIC) {
 					goto found;
 				}
 			}
@@ -427,6 +427,10 @@ wrong:
 						zend_bad_property_access(property_info, ce, member);
 					}
 					return ZEND_WRONG_PROPERTY_OFFSET;
+				}
+			} else if (flags & ZEND_ACC_MODULE_INTERNAL) {
+				if (UNEXPECTED(!zend_check_module_internal_access(property_info->ce, scope))) {
+					goto wrong;
 				}
 			} else {
 				ZEND_ASSERT(flags & ZEND_ACC_PROTECTED);
@@ -550,7 +554,7 @@ dynamic:
 	property_info = (zend_property_info*)Z_PTR_P(zv);
 	flags = property_info->flags;
 
-	if (flags & (ZEND_ACC_CHANGED|ZEND_ACC_PRIVATE|ZEND_ACC_PROTECTED)) {
+	if (flags & (ZEND_ACC_CHANGED|ZEND_ACC_PRIVATE|ZEND_ACC_PROTECTED|ZEND_ACC_MODULE_INTERNAL)) {
 		const zend_class_entry *scope = get_fake_or_executed_scope();
 		if (property_info->ce != scope) {
 			if (flags & ZEND_ACC_CHANGED) {
@@ -560,7 +564,7 @@ dynamic:
 					property_info = p;
 					flags = property_info->flags;
 					goto found;
-				} else if (flags & ZEND_ACC_PUBLIC) {
+				} else if ((flags & (ZEND_ACC_PUBLIC|ZEND_ACC_MODULE_INTERNAL)) == ZEND_ACC_PUBLIC) {
 					goto found;
 				}
 			}
@@ -574,6 +578,10 @@ wrong:
 						zend_bad_property_access(property_info, ce, member);
 					}
 					return ZEND_WRONG_PROPERTY_INFO;
+				}
+			} else if (flags & ZEND_ACC_MODULE_INTERNAL) {
+				if (UNEXPECTED(!zend_check_module_internal_access(property_info->ce, scope))) {
+					goto wrong;
 				}
 			} else {
 				ZEND_ASSERT(flags & ZEND_ACC_PROTECTED);
@@ -2088,7 +2096,7 @@ ZEND_API zend_function *zend_std_get_method(zend_object **obj_ptr, zend_string *
 	fbc = Z_FUNC_P(func);
 
 	/* Check access level */
-	if (fbc->op_array.fn_flags & (ZEND_ACC_CHANGED|ZEND_ACC_PRIVATE|ZEND_ACC_PROTECTED)) {
+	if (fbc->op_array.fn_flags & (ZEND_ACC_CHANGED|ZEND_ACC_PRIVATE|ZEND_ACC_PROTECTED|ZEND_ACC_MODULE_INTERNAL)) {
 		const zend_class_entry *scope = zend_get_executed_scope();
 
 		if (fbc->common.scope != scope) {
@@ -2098,12 +2106,14 @@ ZEND_API zend_function *zend_std_get_method(zend_object **obj_ptr, zend_string *
 				if (EXPECTED(updated_fbc != NULL)) {
 					fbc = updated_fbc;
 					goto exit;
-				} else if (fbc->op_array.fn_flags & ZEND_ACC_PUBLIC) {
+				} else if ((fbc->op_array.fn_flags & (ZEND_ACC_PUBLIC|ZEND_ACC_MODULE_INTERNAL)) == ZEND_ACC_PUBLIC) {
 					goto exit;
 				}
 			}
-			if (UNEXPECTED(fbc->op_array.fn_flags & ZEND_ACC_PRIVATE)
-			 || UNEXPECTED(!zend_check_protected(zend_get_function_root_class(fbc), scope))) {
+			if (UNEXPECTED(fbc->op_array.fn_flags & ZEND_ACC_MODULE_INTERNAL)
+			 ? UNEXPECTED(!zend_check_module_internal_access(fbc->common.scope, scope))
+			 : (UNEXPECTED(fbc->op_array.fn_flags & ZEND_ACC_PRIVATE)
+			 || UNEXPECTED(!zend_check_protected(zend_get_function_root_class(fbc), scope)))) {
 				if (zobj->ce->__call) {
 					fbc = zend_get_call_trampoline_func(zobj->ce->__call, method_name);
 				} else {
@@ -2184,9 +2194,9 @@ ZEND_API zend_function *zend_std_get_static_method(const zend_class_entry *ce, z
 	zval *func = zend_hash_find(&ce->function_table, lc_function_name);
 	if (EXPECTED(func)) {
 		fbc = Z_FUNC_P(func);
-		if (!(fbc->common.fn_flags & ZEND_ACC_PUBLIC)) {
+		if (!(fbc->common.fn_flags & ZEND_ACC_PUBLIC)
+		 || UNEXPECTED(fbc->common.fn_flags & ZEND_ACC_MODULE_INTERNAL)) {
 			const zend_class_entry *scope = zend_get_executed_scope();
-			ZEND_ASSERT(!(fbc->common.fn_flags & ZEND_ACC_PUBLIC));
 			if (!zend_check_method_accessible(fbc, scope)) {
 				zend_function *fallback_fbc = get_static_method_fallback(ce, function_name);
 				if (!fallback_fbc) {
@@ -2263,11 +2273,14 @@ ZEND_API zval *zend_std_get_static_property_with_info(zend_class_entry *ce, zend
 		goto undeclared_property;
 	}
 
-	if (!(property_info->flags & ZEND_ACC_PUBLIC)) {
+	if (!(property_info->flags & ZEND_ACC_PUBLIC)
+	 || UNEXPECTED(property_info->flags & ZEND_ACC_MODULE_INTERNAL)) {
 		const zend_class_entry *scope = get_fake_or_executed_scope();
 		if (property_info->ce != scope) {
-			if (UNEXPECTED(property_info->flags & ZEND_ACC_PRIVATE)
-			 || UNEXPECTED(!is_protected_compatible_scope(property_info->prototype->ce, scope))) {
+			if (UNEXPECTED(property_info->flags & ZEND_ACC_MODULE_INTERNAL)
+			 ? UNEXPECTED(!zend_check_module_internal_access(property_info->ce, scope))
+			 : (UNEXPECTED(property_info->flags & ZEND_ACC_PRIVATE)
+			 || UNEXPECTED(!is_protected_compatible_scope(property_info->prototype->ce, scope)))) {
 				if (type != BP_VAR_IS) {
 					zend_bad_property_access(property_info, ce, property_name);
 				}
@@ -2351,9 +2364,9 @@ ZEND_API zend_function *zend_std_get_constructor(zend_object *zobj) /* {{{ */
 	zend_function *constructor = zobj->ce->constructor;
 
 	if (constructor) {
-		if (UNEXPECTED(!(constructor->common.fn_flags & ZEND_ACC_PUBLIC))) {
+		if (UNEXPECTED(!(constructor->common.fn_flags & ZEND_ACC_PUBLIC))
+		 || UNEXPECTED(constructor->common.fn_flags & ZEND_ACC_MODULE_INTERNAL)) {
 			const zend_class_entry *scope = get_fake_or_executed_scope();
-			ZEND_ASSERT(!(constructor->common.fn_flags & ZEND_ACC_PUBLIC));
 			if (!zend_check_method_accessible(constructor, scope)) {
 				zend_bad_constructor_call(constructor, scope);
 				zend_object_store_ctor_failed(zobj);

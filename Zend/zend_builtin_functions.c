@@ -195,6 +195,21 @@ ZEND_FUNCTION(gc_enable)
 }
 /* }}} */
 
+/* {{{ Registers a loader invoked to load unknown module definitions at compile time */
+ZEND_FUNCTION(module_loader_register)
+{
+	zend_fcall_info fci;
+	zend_fcall_info_cache fcc;
+
+	ZEND_PARSE_PARAMETERS_START(1, 1)
+		Z_PARAM_FUNC(fci, fcc)
+	ZEND_PARSE_PARAMETERS_END();
+
+	zval_ptr_dtor(&EG(lang_module_loader));
+	ZVAL_COPY(&EG(lang_module_loader), &fci.function_name);
+}
+/* }}} */
+
 /* {{{ Deactivates the circular reference collector */
 ZEND_FUNCTION(gc_disable)
 {
