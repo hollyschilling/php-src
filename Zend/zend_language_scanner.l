@@ -298,6 +298,23 @@ static zend_generic_scan_result zend_scan_is_generic_open(
 				return false;
 			}
 			state = IN_NAME;
+		} else if (c == ':' && cursor < end && *cursor == '>') {
+			/* Module separator "Mod:>Member": consumed atomically, so its '>'
+			 * never counts as a list close. The member label must follow
+			 * immediately, exactly as the {LABEL}":>"{LABEL} token requires. */
+			if (state != IN_NAME) {
+				return false;
+			}
+			cursor++;
+			if (cursor >= end) {
+				return false;
+			}
+			unsigned char m = *cursor;
+			if (!((m >= 'a' && m <= 'z') || (m >= 'A' && m <= 'Z') || m == '_' || m >= 0x80)) {
+				return false;
+			}
+			cursor++;
+			state = IN_NAME;
 		} else if (c == ',') {
 			if (state == EXPECT_ELEM) {
 				return false;

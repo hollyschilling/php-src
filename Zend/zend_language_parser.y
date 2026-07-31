@@ -901,12 +901,12 @@ trait_declaration_statement:
  * ce_flags2. */
 struct_declaration_statement:
 		class_modifiers T_STRUCT { $<num>$ = CG(zend_lineno); if (!zend_validate_struct_modifiers($1)) { YYERROR; } }
-		T_STRING implements_list backup_doc_comment '{' class_statement_list '}'
-			{ $$ = zend_ast_create_decl(ZEND_AST_CLASS, $1|ZEND_ACC_FINAL|ZEND_ACC_NO_DYNAMIC_PROPERTIES, $<num>3, $6, zend_ast_get_str($4), NULL, $5, $8, NULL, NULL);
+		T_STRING generic_params implements_list backup_doc_comment '{' class_statement_list '}'
+			{ $$ = zend_ast_create_decl(ZEND_AST_CLASS, $1|ZEND_ACC_FINAL|ZEND_ACC_NO_DYNAMIC_PROPERTIES, $<num>3, $7, zend_ast_get_str($4), NULL, $6, $9, NULL, $5);
 			  $$->attr = ZEND_CLASS_IS_VALUE_CLASS; }
 	|	T_STRUCT { $<num>$ = CG(zend_lineno); }
-		T_STRING implements_list backup_doc_comment '{' class_statement_list '}'
-			{ $$ = zend_ast_create_decl(ZEND_AST_CLASS, ZEND_ACC_FINAL|ZEND_ACC_NO_DYNAMIC_PROPERTIES, $<num>2, $5, zend_ast_get_str($3), NULL, $4, $7, NULL, NULL);
+		T_STRING generic_params implements_list backup_doc_comment '{' class_statement_list '}'
+			{ $$ = zend_ast_create_decl(ZEND_AST_CLASS, ZEND_ACC_FINAL|ZEND_ACC_NO_DYNAMIC_PROPERTIES, $<num>2, $6, zend_ast_get_str($3), NULL, $5, $8, NULL, $4);
 			  $$->attr = ZEND_CLASS_IS_VALUE_CLASS; }
 ;
 
