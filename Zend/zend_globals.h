@@ -122,6 +122,11 @@ struct _zend_compiler_globals {
 	 * body; NULL outside. $this and static:: are banned while set. */
 	zend_string *extension_receiver;
 
+	/* Surface name list (ZEND_AST_SURFACE_NAMES) of the member declaration
+	 * currently being compiled; set by the ZEND_AST_SURFACE_MEMBER wrapper
+	 * and consumed by the member's compile function. NULL outside. */
+	zend_ast *pending_member_surfaces;
+
 	bool variable_width_locale;   /* UTF-8, Shift-JIS, Big5, ISO 2022, EUC, etc */
 	bool ascii_compatible_locale; /* locale uses ASCII characters as singletons */
 	                              /* and don't use them as lead/trail units     */
