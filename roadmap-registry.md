@@ -62,6 +62,7 @@ current master at claim time** (upstream moves: new opcodes/flags land every cyc
 |----------|--------|-------|
 | EG(extension_autoload_attempted) | extension-methods-autoload | lazily allocated per-request table |
 | EG(generics_stamping) | generics | lazily allocated per-request cycle-guard set (`ceae0add9a`) |
+| EG(generics_variance_cache) | generics | lazily allocated per-request table; `%p:%p` keys cache variance edges, `%p:decl` keys cache deep positional-check passes (`ae7d1fcaf3`); freed at executor TAIL |
 | Class-table IS_ALIAS_PTR entries for named extensions | extension-methods-autoload | destroy_zend_class skips |
 | Mangled instantiation names `fqcn<args>` (canonical FQ, lowercased key) | generics | planned — delimiters unspellable in declarations, no collision |
 | Post-construct refcount escape check; reflection-write rejection on ZEND_ACC_VALUE_CLASS | structs | planned |
