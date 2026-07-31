@@ -3148,8 +3148,30 @@ static void zend_compile_class_ref(znode *result, zend_ast *name_ast, uint32_t f
 			/* "new C<T>()" in a template body: symbolic until the executing
 			 * binding is known; the marker routes the fetch through runtime
 			 * substitution (zend_generics_resolve_type_symbol). */
+			if (UNEXPECTED(name_ast->child[0]->kind == ZEND_AST_ZVAL
+					&& name_ast->child[0]->attr == ZEND_NAME_MODULE)) {
+				zend_error_noreturn(E_COMPILE_ERROR,
+					"Module-qualified generic references cannot mention type parameters");
+			}
 			ZVAL_STR(&result->u.constant, zend_mark_generic_symbol(resolved));
 			return;
+		}
+		const zend_ast *base_ast = name_ast->child[0];
+		if (UNEXPECTED(base_ast->kind == ZEND_AST_ZVAL
+				&& base_ast->attr == ZEND_NAME_MODULE)
+				&& !(fetch_flags & (ZEND_FETCH_CLASS_NO_AUTOLOAD|ZEND_FETCH_CLASS_SILENT))) {
+			/* An instantiation named through a module import (Mod:>Vec<int>)
+			 * carries the same "\0" FQMN "\0" FQCN provenance marker as a bare
+			 * module reference, so the runtime acquisition gate recognises it.
+			 * The wrapped FQCN is the plain mangled name (Ns\Vec<int>), which
+			 * stamps and looks up normally once the marker is stripped. See the
+			 * non-generic ZEND_NAME_MODULE branch below. */
+			zend_lang_module *m;
+			zend_string *base_fqcn =
+				zend_resolve_module_qualified_name(zend_ast_get_str(base_ast), &m);
+			zend_string_release(base_fqcn);
+			resolved = zend_mark_module_provenance(m, resolved);
+		}
 		}
 		ZVAL_STR(&result->u.constant, resolved);
 		return;
@@ -3318,6 +3340,20 @@ static bool is_this_fetch(const zend_ast *ast) /* {{{ */
 					"Cannot use $this in an extension method (use the declared receiver $%s)",
 					ZSTR_VAL(CG(extension_receiver)));
 			}
+			return true;
+		}
+		/* In a mutating extension body the receiver variable is the frame's
+		 * This: compile its property and method accesses through the $this
+		 * forms so receiver writes land in place (bypassing value-class CoW
+		 * separation) and nested mutating calls follow the $this chain rule,
+		 * exactly as in native mutating struct methods. Plain value uses of
+		 * the variable, and uses inside nested closures, stay ordinary CV
+		 * accesses of the same object. */
+		if (UNEXPECTED(CG(extension_receiver) != NULL)
+		 && Z_TYPE_P(name) == IS_STRING
+		 && CG(active_op_array)
+		 && (CG(active_op_array)->fn_flags2 & ZEND_ACC2_MUTATING)
+		 && zend_string_equals(Z_STR_P(name), CG(extension_receiver))) {
 			return true;
 		}
 	}
@@ -9323,7 +9359,11 @@ static zend_string *zend_begin_method_decl(zend_op_array *op_array, zend_string 
 		 * cannot be checked here: whether the consumer is a struct is only
 		 * known at flattening (zend_add_trait_method). */
 		if (!(ce->ce_flags2 & ZEND_ACC2_VALUE_CLASS)
-		 && !(ce->ce_flags & (ZEND_ACC_TRAIT|ZEND_ACC_INTERFACE))) {
+		 && !(ce->ce_flags & (ZEND_ACC_TRAIT|ZEND_ACC_INTERFACE))
+		 && CG(extension_receiver) == NULL) {
+			/* Extension bodies compile against a synthetic CE; whether the
+			 * target is a struct is only known when the extension binds
+			 * (ZEND_BIND_EXTENSION validates it there). */
 			zend_error_noreturn(E_COMPILE_ERROR,
 				"Cannot declare mutating method %s::%s() outside a struct",
 				ZSTR_VAL(ce->name), ZSTR_VAL(name));
@@ -10738,6 +10778,13 @@ static void zend_compile_extension_decl(zend_ast *ast) /* {{{ */
 		zend_function *ext_fn;
 		ZEND_HASH_MAP_FOREACH_PTR(&ext_ce->function_table, ext_fn) {
 			ext_fn->common.fn_flags |= ZEND_ACC_NEVER_CACHE;
+			if (UNEXPECTED(ext_fn->common.fn_flags2 & ZEND_ACC2_MUTATING)) {
+				/* Scalars bind by value through the This handoff; there is
+				 * no caller slot to write back to. Deliberately unsupported. */
+				zend_error_noreturn(E_COMPILE_ERROR,
+					"Extension method %s() for scalar target %s cannot be mutating",
+					ZSTR_VAL(ext_fn->common.function_name), ZSTR_VAL(target_name));
+			}
 			ext_fn->common.fn_flags2 |= ZEND_ACC2_SCALAR_RECEIVER;
 		} ZEND_HASH_FOREACH_END();
 	}
@@ -10762,7 +10809,6 @@ static void zend_compile_extension_decl(zend_ast *ast) /* {{{ */
 }
 /* }}} */
 
-static zend_class_entry *zend_compile_class_decl(znode *result, const zend_ast *ast, bool toplevel) /* {{{ */
 ZEND_API uint32_t zend_generic_variance_attr(zend_ast *ident)
 {
 	zend_string *word = zend_ast_get_str(ident);
@@ -10879,7 +10925,7 @@ static void zend_compile_generic_params(zend_class_entry *ce, const zend_ast *pa
 	}
 }
 
-static void zend_compile_class_decl(znode *result, const zend_ast *ast, bool toplevel) /* {{{ */
+static zend_class_entry *zend_compile_class_decl(znode *result, const zend_ast *ast, bool toplevel) /* {{{ */
 {
 	const zend_ast_decl *decl = (const zend_ast_decl *) ast;
 	zend_ast *extends_ast = decl->child[0];

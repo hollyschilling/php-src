@@ -366,7 +366,7 @@ typedef struct _zend_oparray_context {
 /* Class cannot be serialized or unserialized             |     |     |     */
 #define ZEND_ACC_NOT_SERIALIZABLE        (1 << 29) /*  X  |     |     |     */
 /*                                                        |     |     |     */
-/* Class Flags 2 (ce_flags2) (unused: 0, 3-31)            |     |     |     */
+/* Class Flags 2 (ce_flags2) (unused: 3-31)               |     |     |     */
 /* =========================                              |     |     |     */
 /*                                                        |     |     |     */
 /* Value class: instances have value semantics. Assignment  |     |     |   */
