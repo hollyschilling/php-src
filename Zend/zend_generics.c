@@ -3098,8 +3098,11 @@ static zend_string *zend_generics_substitute_symbol_str(
 	}
 
 	/* Composite ("Sequence<U>", "Pair<Box<U>,C>"): parameters substitute at
-	 * any nesting depth, method space first, class space secondarily. */
-	return zend_generics_rewrite_composite(sym, sym_len, mgp, mbind, cgp, cbind);
+	 * any nesting depth, method space first, class space secondarily.
+	 * Re-canonicalize: member substitution can violate the sorted-member
+	 * identity or create duplicates ("Vec<null|Foo>" vs "Vec<Foo|null>"). */
+	return zend_generics_canonicalize_name(
+		zend_generics_rewrite_composite(sym, sym_len, mgp, mbind, cgp, cbind));
 }
 
 ZEND_API zend_string *zend_generics_resolve_type_symbol(const char *sym, size_t sym_len)

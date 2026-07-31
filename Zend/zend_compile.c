@@ -7930,7 +7930,10 @@ static zend_string *zend_generic_dnf_member_name(zend_ast *ast, bool in_intersec
 		{
 			zend_string *method_param = zend_active_method_type_param(name);
 			if (method_param) {
-				if (in_bound) {
+				if (allow_params) {
+					if (uses_params) {
+						*uses_params = true;
+					}
 					return zend_string_copy(method_param); /* methods have no packs */
 				}
 				zend_error_noreturn(E_COMPILE_ERROR,
