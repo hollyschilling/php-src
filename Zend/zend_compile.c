@@ -1369,6 +1369,31 @@ static zend_lang_module *zend_gated_import_module(zend_ast *ast)
 	return zend_hash_find_ptr_lc(FC(module_gated_imports), name);
 }
 
+/* Re-attach acquisition provenance to a resolved (mangled) generic
+ * instantiation name whose BASE was named through a module import
+ * (Mod:>Vec<int>) or a gated member alias (`use Mod:>Vec as V;` ... V<int>).
+ * The wrapped FQCN stays the plain mangled name, which stamps and looks up
+ * normally once the marker is stripped in zend_fetch_class_via_module; the
+ * stamped instantiation therefore keeps ONE identity across every spelling. */
+static zend_string *zend_mark_generic_ref_provenance(zend_ast *base_ast, zend_string *resolved)
+{
+	if (base_ast->kind != ZEND_AST_ZVAL) {
+		return resolved;
+	}
+	if (UNEXPECTED(base_ast->attr == ZEND_NAME_MODULE)) {
+		zend_lang_module *m;
+		zend_string *base_fqcn =
+			zend_resolve_module_qualified_name(zend_ast_get_str(base_ast), &m);
+		zend_string_release(base_fqcn);
+		return zend_mark_module_provenance(m, resolved);
+	}
+	zend_lang_module *gm = zend_gated_import_module(base_ast);
+	if (UNEXPECTED(gm != NULL)) {
+		return zend_mark_module_provenance(gm, resolved);
+	}
+	return resolved;
+}
+
 static zend_string *zend_resolve_class_name(zend_string *name, uint32_t type) /* {{{ */
 {
 	const char *compound;
@@ -3239,24 +3264,24 @@ static void zend_compile_class_ref(znode *result, zend_ast *name_ast, uint32_t f
 				zend_error_noreturn(E_COMPILE_ERROR,
 					"Module-qualified generic references cannot mention type parameters");
 			}
+			if (UNEXPECTED(zend_gated_import_module(name_ast->child[0]) != NULL)) {
+				/* Symbolic names cannot carry compile-time provenance; the
+				 * runtime substitution would fetch the plain name and hit the
+				 * acquisition gate with a misleading message. Same rule as
+				 * module-qualified references above. */
+				zend_error_noreturn(E_COMPILE_ERROR,
+					"Module-member-aliased generic references cannot mention type parameters");
+			}
 			ZVAL_STR(&result->u.constant, zend_mark_method_symbol(resolved));
 			return;
 		}
-		const zend_ast *base_ast = name_ast->child[0];
-		if (UNEXPECTED(base_ast->kind == ZEND_AST_ZVAL
-				&& base_ast->attr == ZEND_NAME_MODULE)
-				&& !(fetch_flags & (ZEND_FETCH_CLASS_NO_AUTOLOAD|ZEND_FETCH_CLASS_SILENT))) {
+		if (!(fetch_flags & (ZEND_FETCH_CLASS_NO_AUTOLOAD|ZEND_FETCH_CLASS_SILENT))) {
 			/* An instantiation named through a module import (Mod:>Vec<int>)
-			 * carries the same "\0" FQMN "\0" FQCN provenance marker as a bare
-			 * module reference, so the runtime acquisition gate recognises it.
-			 * The wrapped FQCN is the plain mangled name (Ns\Vec<int>), which
-			 * stamps and looks up normally once the marker is stripped. See the
-			 * non-generic ZEND_NAME_MODULE branch below. */
-			zend_lang_module *m;
-			zend_string *base_fqcn =
-				zend_resolve_module_qualified_name(zend_ast_get_str(base_ast), &m);
-			zend_string_release(base_fqcn);
-			resolved = zend_mark_module_provenance(m, resolved);
+			 * or a gated member alias (V<int>) carries the same "\0" FQMN "\0"
+			 * FQCN provenance marker as the equivalent non-generic reference,
+			 * so the runtime acquisition gate recognises it. Observation sites
+			 * (instanceof) pass SILENT/NO_AUTOLOAD and keep the plain name. */
+			resolved = zend_mark_generic_ref_provenance(name_ast->child[0], resolved);
 		}
 		ZVAL_STR(&result->u.constant, resolved);
 		return;
@@ -10806,6 +10831,9 @@ static void zend_compile_implements(zend_ast *ast) /* {{{ */
 				deferred[num_deferred++] = name;
 				continue;
 			}
+			/* Concrete-argument generic interface: link-time acquisition,
+			 * provenance as in the non-generic path below. */
+			name = zend_mark_generic_ref_provenance(class_ast->child[0], name);
 		} else {
 			name = zend_resolve_const_class_name_reference(class_ast, "interface name");
 		}
@@ -11311,7 +11339,11 @@ static zend_class_entry *zend_compile_class_decl(znode *result, const zend_ast *
 				ZEND_ASSERT(ce->generic_params != NULL);
 				ce->generic_params->deferred_parent = name;
 			} else {
-				ce->parent_name = name;
+				/* Concrete-argument generic parent: link-time acquisition,
+				 * so a module-qualified or gated-alias base carries the same
+				 * provenance as the non-generic path below. */
+				ce->parent_name =
+					zend_mark_generic_ref_provenance(extends_ast->child[0], name);
 			}
 		} else {
 			ce->parent_name = zend_resolve_const_class_name_reference(extends_ast, "class name");
