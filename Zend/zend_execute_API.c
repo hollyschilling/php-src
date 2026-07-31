@@ -2060,19 +2060,37 @@ zend_class_entry *zend_fetch_class_by_name(zend_string *class_name, zend_string 
 {
 	if (UNEXPECTED(ZSTR_LEN(class_name) > 0 && ZSTR_VAL(class_name)[0] == '\0')) {
 		if (ZSTR_LEN(class_name) > 1 && ZSTR_VAL(class_name)[1] == '\x01') {
-			/* Method-symbol marker ("\0\x01" SYM): a class reference whose
-			 * arguments mention METHOD-level type parameters; substitute
-			 * against the executing method instantiation, then resolve. */
+			/* Method-symbol marker ("\0\x01" FQMN "\0" SYM): a class reference
+			 * whose arguments mention type parameters; substitute against the
+			 * executing binding, then re-enter the ordinary fetch. A non-empty
+			 * FQMN re-wraps the substituted name as "\0" FQMN "\0" FQCN so the
+			 * module import the marking file made is honoured; an empty FQMN
+			 * fetches the plain name. Either way the acquisition gate applies
+			 * to symbolic references exactly as to concrete ones. */
+			const char *fqmn = ZSTR_VAL(class_name) + 2;
+			const char *sep = memchr(fqmn, '\0', ZSTR_LEN(class_name) - 2);
+			ZEND_ASSERT(sep != NULL && "malformed method-symbol marker");
+			size_t fqmn_len = sep - fqmn;
+			const char *sym = sep + 1;
 			zend_string *resolved = zend_generics_resolve_type_symbol(
-				ZSTR_VAL(class_name) + 2, ZSTR_LEN(class_name) - 2);
+				sym, ZSTR_VAL(class_name) + ZSTR_LEN(class_name) - sym);
 			if (!resolved) {
 				return NULL;
 			}
-			zend_class_entry *ce = zend_lookup_class_ex(resolved, NULL, fetch_type);
-			if (!ce) {
-				report_class_fetch_error(resolved, fetch_type);
+			zend_string *target = resolved;
+			if (fqmn_len) {
+				target = zend_string_alloc(2 + fqmn_len + ZSTR_LEN(resolved), 0);
+				char *p = ZSTR_VAL(target);
+				*p++ = '\0';
+				memcpy(p, fqmn, fqmn_len);
+				p += fqmn_len;
+				*p++ = '\0';
+				memcpy(p, ZSTR_VAL(resolved), ZSTR_LEN(resolved));
+				p[ZSTR_LEN(resolved)] = '\0';
+				zend_string_release(resolved);
 			}
-			zend_string_release(resolved);
+			zend_class_entry *ce = zend_fetch_class_by_name(target, NULL, fetch_type);
+			zend_string_release(target);
 			return ce;
 		}
 		return zend_fetch_class_via_module(class_name, fetch_type);

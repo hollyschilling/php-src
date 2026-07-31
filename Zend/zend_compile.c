@@ -3229,16 +3229,27 @@ static void zend_append_generic_arg(
 	smart_str *buf, zend_ast *ast, bool allow_params, bool allow_nested_params,
 	bool allow_spread, bool *uses_params, bool *uses_method_params);
 
-/* Build the method-symbol marker "\0" "\x01" SYM: a class reference whose
- * arguments mention METHOD-level type parameters, resolved at run time
- * against the executing method instantiation's binding. Consumes sym. */
-static zend_string *zend_mark_method_symbol(zend_string *sym)
+/* Build the method-symbol marker "\0" "\x01" FQMN "\0" SYM: a class reference
+ * whose arguments mention type parameters, resolved at run time against the
+ * executing binding. FQMN is empty for references without module provenance;
+ * a non-empty FQMN records that the base was named through a module import or
+ * a gated member alias, exactly as "\0" FQMN "\0" FQCN does for concrete
+ * references, so the acquisition gate applies uniformly after substitution.
+ * Consumes sym. */
+static zend_string *zend_mark_method_symbol(zend_string *sym, const zend_lang_module *m)
 {
-	zend_string *marked = zend_string_alloc(2 + ZSTR_LEN(sym), 0);
-	ZSTR_VAL(marked)[0] = '\0';
-	ZSTR_VAL(marked)[1] = '\x01';
-	memcpy(ZSTR_VAL(marked) + 2, ZSTR_VAL(sym), ZSTR_LEN(sym));
-	ZSTR_VAL(marked)[ZSTR_LEN(marked)] = '\0';
+	size_t fqmn_len = m ? ZSTR_LEN(m->fqmn) : 0;
+	zend_string *marked = zend_string_alloc(3 + fqmn_len + ZSTR_LEN(sym), 0);
+	char *p = ZSTR_VAL(marked);
+	*p++ = '\0';
+	*p++ = '\x01';
+	if (fqmn_len) {
+		memcpy(p, ZSTR_VAL(m->fqmn), fqmn_len);
+		p += fqmn_len;
+	}
+	*p++ = '\0';
+	memcpy(p, ZSTR_VAL(sym), ZSTR_LEN(sym));
+	p[ZSTR_LEN(sym)] = '\0';
 	zend_string_release(sym);
 	return marked;
 }
@@ -3258,21 +3269,21 @@ static void zend_compile_class_ref(znode *result, zend_ast *name_ast, uint32_t f
 		if (UNEXPECTED(uses_params || uses_method_params)) {
 			/* "new C<T>()" in a template body / "new Sequence<U>()" in a
 			 * generic method: symbolic until the executing binding is known;
-			 * the marker routes the fetch through runtime substitution. */
-			if (UNEXPECTED(name_ast->child[0]->kind == ZEND_AST_ZVAL
-					&& name_ast->child[0]->attr == ZEND_NAME_MODULE)) {
-				zend_error_noreturn(E_COMPILE_ERROR,
-					"Module-qualified generic references cannot mention type parameters");
+			 * the marker routes the fetch through runtime substitution. A
+			 * module-qualified or gated-alias base records its module in the
+			 * marker so the substituted fetch passes the acquisition gate. */
+			zend_lang_module *m = NULL;
+			zend_ast *base_ast = name_ast->child[0];
+			if (base_ast->kind == ZEND_AST_ZVAL) {
+				if (UNEXPECTED(base_ast->attr == ZEND_NAME_MODULE)) {
+					zend_string *base_fqcn = zend_resolve_module_qualified_name(
+						zend_ast_get_str(base_ast), &m);
+					zend_string_release(base_fqcn);
+				} else {
+					m = zend_gated_import_module(base_ast);
+				}
 			}
-			if (UNEXPECTED(zend_gated_import_module(name_ast->child[0]) != NULL)) {
-				/* Symbolic names cannot carry compile-time provenance; the
-				 * runtime substitution would fetch the plain name and hit the
-				 * acquisition gate with a misleading message. Same rule as
-				 * module-qualified references above. */
-				zend_error_noreturn(E_COMPILE_ERROR,
-					"Module-member-aliased generic references cannot mention type parameters");
-			}
-			ZVAL_STR(&result->u.constant, zend_mark_method_symbol(resolved));
+			ZVAL_STR(&result->u.constant, zend_mark_method_symbol(resolved, m));
 			return;
 		}
 		if (!(fetch_flags & (ZEND_FETCH_CLASS_NO_AUTOLOAD|ZEND_FETCH_CLASS_SILENT))) {
