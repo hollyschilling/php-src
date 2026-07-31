@@ -143,6 +143,12 @@ static zend_always_inline zend_class_entry *zend_get_function_root_class(const z
 
 static zend_always_inline bool zend_check_method_accessible(const zend_function *fn, const zend_class_entry *scope)
 {
+	if (UNEXPECTED(fn->common.fn_flags & ZEND_ACC_MODULE_INTERNAL)
+		&& fn->common.scope != scope
+		&& !zend_check_module_internal_access(fn->common.scope, scope)) {
+		return false;
+	}
+
 	if (!(fn->common.fn_flags & ZEND_ACC_PUBLIC)
 		&& fn->common.scope != scope
 		&& (UNEXPECTED(fn->common.fn_flags & ZEND_ACC_PRIVATE)

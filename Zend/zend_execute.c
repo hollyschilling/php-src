@@ -5319,7 +5319,8 @@ static zend_never_inline zend_execute_data *zend_init_dynamic_call_string(zend_s
 
 		lcname = zend_string_init(ZSTR_VAL(function), cname_length, 0);
 
-		called_scope = zend_fetch_class_by_name(lcname, NULL, ZEND_FETCH_CLASS_DEFAULT | ZEND_FETCH_CLASS_EXCEPTION);
+		called_scope = zend_fetch_class_by_name(lcname, NULL,
+			ZEND_FETCH_CLASS_DEFAULT | ZEND_FETCH_CLASS_EXCEPTION | ZEND_FETCH_CLASS_NO_MODULE_GATE);
 		if (UNEXPECTED(called_scope == NULL)) {
 			zend_string_release_ex(lcname, 0);
 			return NULL;
@@ -5464,7 +5465,8 @@ static zend_never_inline zend_execute_data *zend_init_dynamic_call_array(const z
 		}
 
 		if (Z_TYPE_P(obj) == IS_STRING) {
-			zend_class_entry *called_scope = zend_fetch_class_by_name(Z_STR_P(obj), NULL, ZEND_FETCH_CLASS_DEFAULT | ZEND_FETCH_CLASS_EXCEPTION);
+			zend_class_entry *called_scope = zend_fetch_class_by_name(Z_STR_P(obj), NULL,
+			ZEND_FETCH_CLASS_DEFAULT | ZEND_FETCH_CLASS_EXCEPTION | ZEND_FETCH_CLASS_NO_MODULE_GATE);
 
 			if (UNEXPECTED(called_scope == NULL)) {
 				return NULL;

@@ -280,6 +280,12 @@ struct _zend_executor_globals {
 
 	zend_objects_store objects_store;
 	zend_lazy_objects_store lazy_objects_store;
+
+	/* Module pattern: FQMN -> zend_lang_module*, lazily allocated. */
+	HashTable *lang_modules;
+	/* Userland module-definition loader (module_loader_register()). */
+	zval lang_module_loader;
+
 	zend_object *exception;
 	const zend_op *opline_before_exception;
 	zend_op exception_op[3];
