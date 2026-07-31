@@ -205,6 +205,15 @@ struct _zend_executor_globals {
 	HashTable *function_table;	/* function symbol table */
 	HashTable *class_table;		/* class table */
 	HashTable *zend_constants;	/* constants table */
+	/* lc mangled names currently being stamped (cycle guard); lazily allocated */
+	HashTable *generics_stamping;
+	/* variance-edge results between stamped instantiations, keyed
+	 * "instance_ce ptr:iface_ce ptr"; lazily allocated per request */
+	HashTable *generics_variance_cache;
+	/* Canonical CE-cache-capable copies of runtime-created type-name strings
+	 * (generic binding arguments, substituted composites), keyed by content;
+	 * lazily allocated, torn down at the tail of shutdown_executor. */
+	HashTable *generics_type_names;
 
 	zval          *vm_stack_top;
 	zval          *vm_stack_end;

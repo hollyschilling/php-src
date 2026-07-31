@@ -257,6 +257,8 @@ static size_t tsrm_tls_offset = -1;
 	_(hybrid_func_trace_counter,      IR_SKIP_PROLOGUE | IR_START_BR_TARGET) \
 	_(hybrid_ret_trace_counter,       IR_SKIP_PROLOGUE | IR_START_BR_TARGET) \
 	_(hybrid_loop_trace_counter,      IR_SKIP_PROLOGUE | IR_START_BR_TARGET) \
+	_(hybrid_generic_func_trace_dispatch, IR_SKIP_PROLOGUE | IR_START_BR_TARGET) \
+	_(hybrid_generic_loop_trace_dispatch, IR_SKIP_PROLOGUE | IR_START_BR_TARGET) \
 	_(trace_halt,                     IR_SKIP_PROLOGUE) \
 	_(trace_escape,                   IR_SKIP_PROLOGUE) \
 	_(trace_exit,                     IR_SKIP_PROLOGUE) \
@@ -2482,6 +2484,70 @@ static int zend_jit_hybrid_loop_trace_counter_stub(zend_jit_ctx *jit)
 	}
 
 	return _zend_jit_hybrid_trace_counter_stub(jit,
+		((ZEND_JIT_COUNTER_INIT + JIT_G(hot_loop) - 1) / JIT_G(hot_loop)));
+}
+
+/* Generic-family trace entry: opcodes (and so opline handlers) are shared by
+ * every stamped clone of a template, so compiled traces are stored in the
+ * EXECUTING clone's extension (ZEND_JIT_TRACE_CODE_SLOTS). Dispatch there
+ * before falling into the ordinary hot-counting logic. */
+static int _zend_jit_hybrid_generic_trace_dispatch_stub(zend_jit_ctx *jit, uint32_t cost)
+{
+	ir_ref func, jit_extension, offset, flags, if_jited, if_blacklisted;
+
+	func = ir_LOAD_A(jit_EX(func));
+	jit_extension = ir_LOAD_A(ir_ADD_OFFSET(func, offsetof(zend_op_array, reserved[zend_func_info_rid])));
+	offset = ir_LOAD_A(ir_ADD_OFFSET(jit_extension, offsetof(zend_jit_op_array_trace_extension, offset)));
+	flags = ir_LOAD_U8(ir_ADD_OFFSET(ir_ADD_A(offset, jit_IP(jit)), offsetof(zend_op_trace_info, trace_flags)));
+
+	if_jited = ir_IF(ir_AND_U8(flags, ir_CONST_U8(ZEND_JIT_TRACE_JITED)));
+	ir_IF_TRUE(if_jited);
+	{
+		ir_ref opcodes, last, diff, slots, code;
+
+		opcodes = ir_LOAD_A(ir_ADD_OFFSET(func, offsetof(zend_op_array, opcodes)));
+		last = ir_ZEXT_A(ir_LOAD_U32(ir_ADD_OFFSET(func, offsetof(zend_op_array, last))));
+		/* code_slots[] follows trace_info[last]; index = opline - opcodes.
+		 * Byte delta / sizeof(zend_op) * sizeof(void*) == delta >> 2, since
+		 * sizeof(zend_op) == 32 and sizeof(void*) == 8 (see the
+		 * sizeof(zend_op_trace_info) == sizeof(zend_op) assertion). */
+		ZEND_ASSERT(sizeof(zend_op) == 32 && sizeof(void*) == 8);
+		diff = ir_SUB_A(jit_IP(jit), opcodes);
+		slots = ir_ADD_A(
+			ir_ADD_OFFSET(jit_extension, offsetof(zend_jit_op_array_trace_extension, trace_info)),
+			ir_SHL_A(last, ir_CONST_ADDR(5)));
+		code = ir_LOAD_A(ir_ADD_A(slots, ir_SHR_A(diff, ir_CONST_ADDR(2))));
+		ir_IJMP(code);
+	}
+	ir_IF_FALSE(if_jited);
+
+	if_blacklisted = ir_IF(ir_AND_U8(flags, ir_CONST_U8(ZEND_JIT_TRACE_BLACKLISTED)));
+	ir_IF_TRUE_cold(if_blacklisted);
+	ir_IJMP(_zend_jit_orig_opline_handler(jit, offset));
+	ir_IF_FALSE(if_blacklisted);
+
+	/* Not compiled for this clone yet: ordinary counting (re-loads its own
+	 * context; the redundant loads only run on the cold pre-compile path). */
+	return _zend_jit_hybrid_trace_counter_stub(jit, cost);
+}
+
+static int zend_jit_hybrid_generic_func_trace_dispatch_stub(zend_jit_ctx *jit)
+{
+	if (ZEND_VM_KIND != ZEND_VM_KIND_HYBRID || !JIT_G(hot_func)) {
+		return 0;
+	}
+
+	return _zend_jit_hybrid_generic_trace_dispatch_stub(jit,
+		((ZEND_JIT_COUNTER_INIT + JIT_G(hot_func) - 1) / JIT_G(hot_func)));
+}
+
+static int zend_jit_hybrid_generic_loop_trace_dispatch_stub(zend_jit_ctx *jit)
+{
+	if (ZEND_VM_KIND != ZEND_VM_KIND_HYBRID || !JIT_G(hot_loop)) {
+		return 0;
+	}
+
+	return _zend_jit_hybrid_generic_trace_dispatch_stub(jit,
 		((ZEND_JIT_COUNTER_INIT + JIT_G(hot_loop) - 1) / JIT_G(hot_loop)));
 }
 

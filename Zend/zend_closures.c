@@ -21,6 +21,7 @@
 #include "zend_API.h"
 #include "zend_closures.h"
 #include "zend_exceptions.h"
+#include "zend_generics.h"
 #include "zend_interfaces.h"
 #include "zend_objects.h"
 #include "zend_objects_API.h"
@@ -780,6 +781,13 @@ static void zend_create_closure_ex(zval *res, zend_function *func, zend_class_en
 		zend_string_addref(closure->func.op_array.function_name);
 		if (closure->func.op_array.refcount) {
 			(*closure->func.op_array.refcount)++;
+		}
+
+		if (UNEXPECTED(scope && scope->generic_binding)) {
+			/* Closures declared inside a generic instantiation carry the
+			 * template's symbolic parameter types; substitute into this
+			 * closure's own signature copy. */
+			zend_generics_substitute_closure_signature(&closure->func.op_array, scope);
 		}
 
 		/* For fake closures, we want to reuse the static variables of the original function. */
