@@ -7871,7 +7871,7 @@ static void zend_append_generic_type_ref(smart_str *buf, zend_ast *ast, bool all
  * FQ class name, canonical scalar spelling, "array", or "null" (unions
  * only). Returns an owned string. Type parameters stay rejected inside
  * composites in this version. */
-static zend_string *zend_generic_dnf_member_name(zend_ast *ast, bool in_intersection)
+static zend_string *zend_generic_dnf_member_name(zend_ast *ast, bool in_intersection, bool in_bound)
 {
 	if (ast->kind == ZEND_AST_TYPE) {
 		/* 'array' members, and the null member synthesized by '?T' sugar. */
@@ -7888,18 +7888,50 @@ static zend_string *zend_generic_dnf_member_name(zend_ast *ast, bool in_intersec
 	}
 	if (ast->kind == ZEND_AST_GENERIC_TYPE) {
 		smart_str tmp = {0};
-		zend_append_generic_type_ref(&tmp, ast, /* allow_params */ false,
-			/* allow_nested_params */ false, /* allow_spread */ false, NULL, NULL);
+		bool uses_params = false;
+		bool uses_method_params = false;
+		/* In bound context the declaring template's (and method's) own
+		 * parameters may appear at any nesting depth ('Comparable<T>',
+		 * 'Comparable<U>'); they stay symbolic. */
+		zend_append_generic_type_ref(&tmp, ast, /* allow_params */ in_bound,
+			/* allow_nested_params */ in_bound, /* allow_spread */ false,
+			in_bound ? &uses_params : NULL,
+			in_bound ? &uses_method_params : NULL);
 		return smart_str_extract(&tmp);
 	}
 	zend_string *name = zend_ast_get_str(ast);
 	if (ast->attr == ZEND_NAME_NOT_FQ) {
-		if (zend_is_active_template_param(name)
-				|| zend_active_method_type_param(name)) {
+		if (zend_is_active_template_param(name)) {
+			if (in_bound) {
+				const zend_generic_params *gp = CG(active_class_entry)->generic_params;
+				for (uint32_t i = 0; i < gp->num_params; i++) {
+					if (zend_string_equals_ci(gp->params[i].name, name)) {
+						if (UNEXPECTED(i == gp->pack_index)) {
+							zend_error_noreturn(E_COMPILE_ERROR,
+								"Type parameter pack %s cannot be used in a generic bound",
+								ZSTR_VAL(name));
+						}
+						return zend_string_copy(gp->params[i].name);
+					}
+				}
+				ZEND_UNREACHABLE();
+			}
 			zend_error_noreturn(E_COMPILE_ERROR,
 				"Type parameter %s cannot be a member of a composite type "
 				"argument (composite arguments must be concrete in this version)",
 				ZSTR_VAL(name));
+		}
+		{
+			zend_string *method_param = zend_active_method_type_param(name);
+			if (method_param) {
+				if (in_bound) {
+					return zend_string_copy(method_param); /* methods have no packs */
+				}
+				zend_error_noreturn(E_COMPILE_ERROR,
+					"Type parameter %s cannot be a member of a composite type "
+					"argument (composite arguments must be concrete in this version)",
+					ZSTR_VAL(name));
+			}
 		}
 		uint8_t type_code = zend_lookup_builtin_type_by_name(name);
 		if (type_code != 0) {
@@ -7949,13 +7981,13 @@ static void zend_generic_dnf_sort_dedupe(zend_string **elems, uint32_t n)
 	}
 }
 
-static zend_string *zend_generic_dnf_intersection_name(zend_ast *ast)
+static zend_string *zend_generic_dnf_intersection_name(zend_ast *ast, bool in_bound)
 {
 	const zend_ast_list *list = zend_ast_get_list(ast);
 	ZEND_ASSERT(list->children >= 2);
 	zend_string **elems = emalloc(list->children * sizeof(zend_string *));
 	for (uint32_t i = 0; i < list->children; i++) {
-		elems[i] = zend_generic_dnf_member_name(list->child[i], /* in_intersection */ true);
+		elems[i] = zend_generic_dnf_member_name(list->child[i], /* in_intersection */ true, in_bound);
 	}
 	zend_generic_dnf_sort_dedupe(elems, list->children);
 	smart_str tmp = {0};
@@ -7974,12 +8006,12 @@ static zend_string *zend_generic_dnf_intersection_name(zend_ast *ast)
  * sorted case-insensitively and deduplicated, intersections parenthesized
  * inside unions ("a|(b&c)"), pure intersections bare ("a&b"). The sort makes
  * the spelling an identity: Foo<A|B> and Foo<B|A> are one instantiation. */
-static void zend_append_generic_dnf_arg(smart_str *buf, zend_ast *ast)
+static void zend_append_generic_dnf_arg(smart_str *buf, zend_ast *ast, bool in_bound)
 {
 	const zend_ast_list *list = zend_ast_get_list(ast);
 
 	if (ast->kind == ZEND_AST_TYPE_INTERSECTION) {
-		zend_string *inter = zend_generic_dnf_intersection_name(ast);
+		zend_string *inter = zend_generic_dnf_intersection_name(ast, in_bound);
 		smart_str_append(buf, inter);
 		zend_string_release(inter);
 		return;
@@ -7989,7 +8021,7 @@ static void zend_append_generic_dnf_arg(smart_str *buf, zend_ast *ast)
 	for (uint32_t i = 0; i < list->children; i++) {
 		zend_ast *child = list->child[i];
 		if (child->kind == ZEND_AST_TYPE_INTERSECTION) {
-			zend_string *inner = zend_generic_dnf_intersection_name(child);
+			zend_string *inner = zend_generic_dnf_intersection_name(child, in_bound);
 			smart_str tmp = {0};
 			smart_str_appendc(&tmp, '(');
 			smart_str_append(&tmp, inner);
@@ -7997,7 +8029,7 @@ static void zend_append_generic_dnf_arg(smart_str *buf, zend_ast *ast)
 			zend_string_release(inner);
 			elems[i] = smart_str_extract(&tmp);
 		} else {
-			elems[i] = zend_generic_dnf_member_name(child, /* in_intersection */ false);
+			elems[i] = zend_generic_dnf_member_name(child, /* in_intersection */ false, in_bound);
 		}
 	}
 	zend_generic_dnf_sort_dedupe(elems, list->children);
@@ -8022,7 +8054,7 @@ static void zend_append_generic_arg(smart_str *buf, zend_ast *ast, bool allow_pa
 {
 	if (ast->kind == ZEND_AST_TYPE_UNION || ast->kind == ZEND_AST_TYPE_INTERSECTION) {
 		/* Composite (DNF) argument: canonicalized, concrete-only. */
-		zend_append_generic_dnf_arg(buf, ast);
+		zend_append_generic_dnf_arg(buf, ast, /* in_bound */ false);
 		return;
 	}
 	if (ast->kind == ZEND_AST_TYPE) {
@@ -10973,7 +11005,8 @@ ZEND_API uint32_t zend_generic_variance_attr(zend_ast *ident)
  * are permitted (interfaces); NULL forbids them (classes reach here with
  * their non-interface ce, methods with NULL). */
 static zend_generic_params *zend_compile_generic_params_list(
-		const zend_ast *params_ast, bool allow_pack, zend_class_entry *variance_ce)
+		const zend_ast *params_ast, bool allow_pack, zend_class_entry *variance_ce,
+		zend_class_entry *attach_ce, zend_op_array *attach_op)
 {
 	const zend_ast_list *list = zend_ast_get_list((zend_ast *) params_ast);
 	zend_generic_params *generic_params;
@@ -11038,28 +11071,46 @@ static zend_generic_params *zend_compile_generic_params_list(
 		generic_params->params[i].name = zend_new_interned_string(zend_string_copy(param_name));
 		generic_params->params[i].bound_kind =
 			param_ast->attr & (ZEND_GENERIC_BOUND_MASK | ZEND_GENERIC_VARIANCE_MASK);
-		if (bound_ast) {
-			/* 'T: <type>' -- the bound is canonicalized with the same
-			 * machinery as type arguments (FQ names, canonical scalars,
-			 * sorted deduped composites), stored as its canonical string. */
-			zend_string *bound_name;
-			if (bound_ast->kind == ZEND_AST_TYPE_UNION
-					|| bound_ast->kind == ZEND_AST_TYPE_INTERSECTION) {
-				smart_str buf = {0};
-				zend_append_generic_dnf_arg(&buf, bound_ast);
-				bound_name = smart_str_extract(&buf);
-			} else {
-				bound_name = zend_generic_dnf_member_name(bound_ast,
-					/* in_intersection */ false);
-				if (zend_string_equals_literal_ci(bound_name, "null")) {
-					zend_error_noreturn(E_COMPILE_ERROR,
-						"Type null cannot be used as a generic bound on its own");
-				}
-			}
-			generic_params->params[i].bound_name = zend_new_interned_string(bound_name);
-		} else {
-			generic_params->params[i].bound_name = NULL;
+		generic_params->params[i].bound_name = NULL;
+	}
+
+	/* Attach BEFORE compiling bounds: a bound may reference the declaring
+	 * template's (or method's) own parameters ('T: Comparable<T>',
+	 * 'V: Box<K>', 'U: Comparable<U>'), which the resolution machinery
+	 * recognizes through the attached generic_params. */
+	if (attach_ce) {
+		attach_ce->ce_flags2 |= ZEND_ACC2_GENERIC_TEMPLATE;
+		attach_ce->generic_params = generic_params;
+	} else if (attach_op) {
+		attach_op->generic_params = generic_params;
+		attach_op->fn_flags2 |= ZEND_ACC2_GENERIC_METHOD_TEMPLATE;
+	}
+
+	for (uint32_t i = 0; i < list->children; i++) {
+		zend_ast *bound_ast = list->child[i]->child[1];
+		if (!bound_ast) {
+			continue;
 		}
+		/* 'T: <type>' -- the bound is canonicalized with the same machinery
+		 * as type arguments (FQ names, canonical scalars, sorted deduped
+		 * composites), stored as its canonical string. Parameter mentions
+		 * stay symbolic ("Comparable<T>") and substitute per instantiation
+		 * at stamp time, like deferred inheritance references. */
+		zend_string *bound_name;
+		if (bound_ast->kind == ZEND_AST_TYPE_UNION
+				|| bound_ast->kind == ZEND_AST_TYPE_INTERSECTION) {
+			smart_str buf = {0};
+			zend_append_generic_dnf_arg(&buf, bound_ast, /* in_bound */ true);
+			bound_name = smart_str_extract(&buf);
+		} else {
+			bound_name = zend_generic_dnf_member_name(bound_ast,
+				/* in_intersection */ false, /* in_bound */ true);
+			if (zend_string_equals_literal_ci(bound_name, "null")) {
+				zend_error_noreturn(E_COMPILE_ERROR,
+					"Type null cannot be used as a generic bound on its own");
+			}
+		}
+		generic_params->params[i].bound_name = zend_new_interned_string(bound_name);
 	}
 
 	return generic_params;
@@ -11067,8 +11118,7 @@ static zend_generic_params *zend_compile_generic_params_list(
 
 static void zend_compile_generic_params(zend_class_entry *ce, const zend_ast *params_ast)
 {
-	ce->generic_params = zend_compile_generic_params_list(params_ast, /* allow_pack */ true, ce);
-	ce->ce_flags2 |= ZEND_ACC2_GENERIC_TEMPLATE;
+	zend_compile_generic_params_list(params_ast, /* allow_pack */ true, ce, ce, NULL);
 }
 
 /* Generic METHOD prototype ("function map<U>(...)"): method-level type
@@ -11082,8 +11132,8 @@ static void zend_compile_method_generic_params(
 			"Generic type parameters are only supported on methods");
 	}
 
-	zend_generic_params *gp =
-		zend_compile_generic_params_list(params_ast, /* allow_pack */ false, NULL);
+	zend_generic_params *gp = zend_compile_generic_params_list(
+		params_ast, /* allow_pack */ false, NULL, NULL, op_array);
 
 	/* A method parameter shadowing an enclosing class parameter would make
 	 * the two substitution passes ambiguous. */
@@ -11102,8 +11152,6 @@ static void zend_compile_method_generic_params(
 		}
 	}
 
-	op_array->generic_params = gp;
-	op_array->fn_flags2 |= ZEND_ACC2_GENERIC_METHOD_TEMPLATE;
 }
 
 static zend_class_entry *zend_compile_class_decl(znode *result, const zend_ast *ast, bool toplevel) /* {{{ */

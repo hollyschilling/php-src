@@ -1246,6 +1246,81 @@ static int zend_generics_arg_satisfies_bound_type(
 	return 1; /* pure-mask argument, already subset-checked above */
 }
 
+/* Substitute template parameters in a BOUND string ('Comparable<T>',
+ * 'K', 'comparable<t>|x'). Unlike composite references, a bound may be a
+ * bare name or DNF at top level, so the label walk starts at position 0
+ * with no base-name skip: a label directly followed by '<' is a base name;
+ * a qualified label is never a parameter; anything else is matched against
+ * the template's parameters and replaced by the binding argument's
+ * canonical rendering. Returns an owned string. */
+static void zend_generics_append_binding_arg(smart_str *buf, const zend_type arg);
+
+static zend_string *zend_generics_substitute_bound_ex(
+		const zend_string *bound,
+		const zend_generic_params *gp1, const zend_generic_binding *b1,
+		const zend_generic_params *gp2, const zend_generic_binding *b2)
+{
+	smart_str buf = {0};
+	const char *p = ZSTR_VAL(bound), *end = p + ZSTR_LEN(bound);
+
+	while (p < end) {
+		char c = *p;
+		if (c == ',' || c == '<' || c == '>'
+				|| c == '|' || c == '&' || c == '(' || c == ')') {
+			smart_str_appendc(&buf, c);
+			p++;
+			continue;
+		}
+		const char *label = p;
+		bool qualified = false;
+		while (p < end && *p != ',' && *p != '<' && *p != '>'
+				&& *p != '|' && *p != '&' && *p != '(' && *p != ')') {
+			if (*p == '\\') {
+				qualified = true;
+			}
+			p++;
+		}
+		if ((p < end && *p == '<') || qualified) {
+			smart_str_appendl(&buf, label, p - label);
+			continue;
+		}
+		const zend_generic_params *gp = gp1;
+		const zend_generic_binding *binding = b1;
+		uint32_t idx = (uint32_t) -1;
+		for (int space = 0; space < 2 && idx == (uint32_t) -1; space++) {
+			gp = space ? gp2 : gp1;
+			binding = space ? b2 : b1;
+			if (!gp || !binding) {
+				continue;
+			}
+			for (uint32_t i = 0; i < gp->num_params; i++) {
+				if (zend_binary_strcasecmp(label, p - label,
+						ZSTR_VAL(gp->params[i].name), ZSTR_LEN(gp->params[i].name)) == 0) {
+					idx = i;
+					break;
+				}
+			}
+		}
+		if (idx == (uint32_t) -1) {
+			smart_str_appendl(&buf, label, p - label);
+			continue;
+		}
+		uint32_t arg_start, arg_count;
+		zend_generics_param_arg_slice(gp, binding->num_args, idx, &arg_start, &arg_count);
+		ZEND_ASSERT(arg_count == 1 && "pack mentions in bounds are compile-time rejected");
+		zend_generics_append_binding_arg(&buf, binding->args[arg_start]);
+	}
+	return smart_str_extract(&buf);
+}
+
+static zend_always_inline zend_string *zend_generics_substitute_bound(
+		const zend_string *bound, const zend_class_entry *template_ce,
+		const zend_generic_binding *binding)
+{
+	return zend_generics_substitute_bound_ex(bound,
+		template_ce->generic_params, binding, NULL, NULL);
+}
+
 /* Parse a canonical bound string into a transient zend_type. Class-name refs
  * inside it are owned and must be released with
  * zend_generics_arg_release_names. */
@@ -1279,12 +1354,19 @@ static bool zend_generics_check_bounds(
 			continue;
 		}
 
+		/* Generic bounds ('T: Comparable<T>', 'V: Box<K>') substitute this
+		 * instantiation's own arguments before checking; concrete bounds
+		 * pass through the walk verbatim. */
+		zend_string *bound_src =
+			zend_generics_substitute_bound(param->bound_name, template_ce, binding);
+
 		zend_type bound_type;
-		if (!zend_generics_parse_bound_type(param->bound_name, &bound_type)) {
+		if (!zend_generics_parse_bound_type(bound_src, &bound_type)) {
 			zend_throw_error(NULL,
 				"Cannot stamp %s: malformed bound %s of type parameter %s",
-				ZSTR_VAL(display_name), ZSTR_VAL(param->bound_name),
+				ZSTR_VAL(display_name), ZSTR_VAL(bound_src),
 				ZSTR_VAL(param->name));
+			zend_string_release(bound_src);
 			return false;
 		}
 
@@ -1304,7 +1386,7 @@ static bool zend_generics_check_bounds(
 				zend_string *ts = zend_type_to_string(arg);
 				zend_throw_error(NULL,
 					"%s does not satisfy the bound %s of type parameter %s on %s",
-					ZSTR_VAL(ts), ZSTR_VAL(param->bound_name),
+					ZSTR_VAL(ts), ZSTR_VAL(bound_src),
 					ZSTR_VAL(param->name), ZSTR_VAL(template_ce->name));
 				zend_string_release(ts);
 				failed = true;
@@ -1312,6 +1394,7 @@ static bool zend_generics_check_bounds(
 			}
 		}
 		zend_generics_arg_release_names(bound_type);
+		zend_string_release(bound_src);
 		if (failed) {
 			return false;
 		}
@@ -2790,30 +2873,42 @@ ZEND_API zend_function *zend_generics_get_method_instantiation(
 		if (!param->bound_name) {
 			continue;
 		}
+		/* Generic bounds substitute the call's own arguments (method space)
+		 * and, secondarily, the receiver instantiation's (class space). */
+		zend_string *bound_src = zend_generics_substitute_bound_ex(
+			param->bound_name, mgp, binding,
+			(ce->ce_flags2 & ZEND_ACC2_GENERIC_INSTANCE)
+				? ce->generic_binding->template_ce->generic_params : NULL,
+			(ce->ce_flags2 & ZEND_ACC2_GENERIC_INSTANCE)
+				? ce->generic_binding : NULL);
 		zend_type bound_type;
-		if (!zend_generics_parse_bound_type(param->bound_name, &bound_type)) {
+		if (!zend_generics_parse_bound_type(bound_src, &bound_type)) {
 			zend_throw_error(NULL,
 				"Cannot bind %s::%s(): malformed bound %s of type parameter %s",
 				ZSTR_VAL(ce->name), ZSTR_VAL(method_name),
-				ZSTR_VAL(param->bound_name), ZSTR_VAL(param->name));
+				ZSTR_VAL(bound_src), ZSTR_VAL(param->name));
+			zend_string_release(bound_src);
 			goto fail;
 		}
 		int r = zend_generics_arg_satisfies_bound_type(binding->args[i], bound_type,
 			/* lookup_flags */ 0, method_name, param, /* quiet */ false);
 		zend_generics_arg_release_names(bound_type);
 		if (r < 0) {
+			zend_string_release(bound_src);
 			goto fail;
 		}
 		if (r == 0) {
 			zend_string *ts = zend_type_to_string(binding->args[i]);
 			zend_throw_error(NULL,
 				"%s does not satisfy the bound %s of type parameter %s on %s::%s()",
-				ZSTR_VAL(ts), ZSTR_VAL(param->bound_name),
+				ZSTR_VAL(ts), ZSTR_VAL(bound_src),
 				ZSTR_VAL(param->name), ZSTR_VAL(ce->name),
 				ZSTR_VAL(base->common.function_name));
 			zend_string_release(ts);
+			zend_string_release(bound_src);
 			goto fail;
 		}
+		zend_string_release(bound_src);
 	}
 
 	/* Clone the method header; opcodes stay shared with the base. */
