@@ -71,6 +71,8 @@ ZEND_API void zend_generics_arg_release_names(zend_type arg);
  * self-references compose polarity, foreign-nested mentions are invariant
  * positions in this version. Throws E_COMPILE_ERROR on violation. */
 ZEND_API void zend_generics_check_variance_positions(const zend_class_entry *ce);
+ZEND_API bool zend_generics_check_variance_deep(
+		const zend_class_entry *ce, bool use_autoload);
 
 /* Runtime variance edge: does `instance_ce` implement `iface_ce` through a
  * variant instantiation of the same interface template? Called from the

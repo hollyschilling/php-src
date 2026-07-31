@@ -2581,7 +2581,8 @@ release_built_args:
 		return NULL;
 	}
 
-	if (!zend_generics_check_bounds(template_ce, binding, name, use_autoload)) {
+	if (!zend_generics_check_variance_deep(template_ce, use_autoload)
+			|| !zend_generics_check_bounds(template_ce, binding, name, use_autoload)) {
 		/* Interning is a no-op at runtime under opcache, so the arg names
 		 * are real refs; the binding won't outlive this failure. */
 		for (uint32_t i = 0; i < num_args; i++) {
@@ -2714,30 +2715,36 @@ static int zend_generics_compose_polarity(int pol, uint32_t variance)
 	return 0;
 }
 
-static ZEND_COLD ZEND_NORETURN void zend_generics_variance_error(
-		const zend_class_entry *ce, const zend_generic_param *param, int pol,
-		bool foreign, const char *kind, const zend_string *member)
+/* Positional checks run twice: at compile time for everything the compiler
+ * can decide locally (bare labels, self-references), and once more at the
+ * template's first instantiation for positions inside FOREIGN generic
+ * references, whose declared variance is only reliably resolvable then
+ * (same moment bounds resolve). ctx->deep selects the second pass; it
+ * throws instead of raising a compile error. */
+typedef struct {
+	const zend_class_entry *ce;
+	bool deep;
+	bool use_autoload;
+} zend_generics_variance_ctx;
+
+static ZEND_COLD bool zend_generics_variance_error(
+		const zend_generics_variance_ctx *ctx, const zend_generic_param *param,
+		int pol, const char *kind, const zend_string *member)
 {
 	const char *vword = (param->bound_kind & ZEND_GENERIC_VARIANCE_OUT)
 		? "Covariant" : "Contravariant";
-	if (foreign) {
-		zend_error_noreturn(E_COMPILE_ERROR,
-			"%s type parameter %s of %s may not appear inside arguments of "
-			"another generic reference in this version (%s of %s)",
-			vword, ZSTR_VAL(param->name), ZSTR_VAL(ce->name), kind,
-			member ? ZSTR_VAL(member) : "?");
-	}
-	if (pol == 0) {
-		zend_error_noreturn(E_COMPILE_ERROR,
-			"%s type parameter %s of %s may not appear in an invariant "
-			"position (%s of %s)",
-			vword, ZSTR_VAL(param->name), ZSTR_VAL(ce->name), kind,
-			member ? ZSTR_VAL(member) : "?");
+	const char *pword = (pol == 0) ? "invariant" : (pol > 0 ? "output" : "input");
+	if (ctx->deep) {
+		zend_throw_error(NULL,
+			"%s type parameter %s of %s may not appear in an %s position (%s of %s)",
+			vword, ZSTR_VAL(param->name), ZSTR_VAL(ctx->ce->name), pword,
+			kind, member ? ZSTR_VAL(member) : "?");
+		return false;
 	}
 	zend_error_noreturn(E_COMPILE_ERROR,
 		"%s type parameter %s of %s may not appear in an %s position (%s of %s)",
-		vword, ZSTR_VAL(param->name), ZSTR_VAL(ce->name),
-		pol > 0 ? "output" : "input", kind, member ? ZSTR_VAL(member) : "?");
+		vword, ZSTR_VAL(param->name), ZSTR_VAL(ctx->ce->name), pword,
+		kind, member ? ZSTR_VAL(member) : "?");
 }
 
 /* Does the raw slice mention any VARIANT parameter as a bare label? Used for
@@ -2777,15 +2784,44 @@ static const zend_generic_param *zend_generics_slice_mentions_variant(
 	return NULL;
 }
 
-static void zend_generics_check_slice_polarity(
-		const zend_class_entry *ce, const char *s, size_t len, int pol,
+static bool zend_generics_check_slice_polarity(
+		const zend_generics_variance_ctx *ctx, const char *s, size_t len, int pol,
 		const char *kind, const zend_string *member);
 
-/* One member of a slice: a bare label, or a nested reference base<args>. */
-static void zend_generics_check_member_polarity(
-		const zend_class_entry *ce, const char *s, size_t len, int pol,
+/* Compose polarity through the arguments of a generic reference whose
+ * per-parameter variance is given by fgp (NULL: all slots invariant). */
+static bool zend_generics_check_ref_args_polarity(
+		const zend_generics_variance_ctx *ctx, const zend_generic_params *fgp,
+		const char *arg, const char *end, int pol,
 		const char *kind, const zend_string *member)
 {
+	uint32_t d = 0, idx = 0;
+	const char *as = arg;
+	for (const char *p = arg; p <= end; p++) {
+		if (p == end || (*p == ',' && d == 0)) {
+			uint32_t v = (fgp && idx < fgp->num_params)
+				? zend_generics_param_variance(fgp, idx) : 0;
+			if (!zend_generics_check_slice_polarity(ctx, as, p - as,
+					zend_generics_compose_polarity(pol, v), kind, member)) {
+				return false;
+			}
+			idx++;
+			as = p + 1;
+		} else if (*p == '<' || *p == '(') {
+			d++;
+		} else if (*p == '>' || *p == ')') {
+			if (d) d--;
+		}
+	}
+	return true;
+}
+
+/* One member of a slice: a bare label, or a nested reference base<args>. */
+static bool zend_generics_check_member_polarity(
+		const zend_generics_variance_ctx *ctx, const char *s, size_t len, int pol,
+		const char *kind, const zend_string *member)
+{
+	const zend_class_entry *ce = ctx->ce;
 	/* strip one level of parens ("(a&b)") */
 	while (len >= 2 && s[0] == '(' && s[len - 1] == ')') {
 		s++;
@@ -2798,44 +2834,44 @@ static void zend_generics_check_member_polarity(
 	}
 	(void) depth;
 	if (lt) {
-		/* nested reference */
+		const char *arg = lt + 1;
+		const char *end = s + len - 1; /* before closing '>' */
 		if (zend_binary_strcasecmp(s, lt - s, ZSTR_VAL(ce->name), ZSTR_LEN(ce->name)) == 0) {
 			/* self-reference: compose polarity through own variance */
-			const zend_generic_params *gp = ce->generic_params;
-			/* split args of the nested list */
-			const char *arg = lt + 1;
-			const char *end = s + len - 1; /* before closing '>' */
-			uint32_t d = 0, idx = 0;
-			const char *as = arg;
-			for (const char *p = arg; p <= end; p++) {
-				if (p == end || (*p == ',' && d == 0)) {
-					if (idx < gp->num_params) {
-						zend_generics_check_slice_polarity(ce, as, p - as,
-							zend_generics_compose_polarity(pol,
-								zend_generics_param_variance(gp, idx)),
-							kind, member);
-					}
-					idx++;
-					as = p + 1;
-				} else if (*p == '<' || *p == '(') {
-					d++;
-				} else if (*p == '>' || *p == ')') {
-					if (d) d--;
-				}
-			}
-			return;
+			return zend_generics_check_ref_args_polarity(ctx, ce->generic_params,
+				arg, end, pol, kind, member);
 		}
-		/* foreign reference: conservative rule */
-		const zend_generic_param *vp = zend_generics_slice_mentions_variant(ce, lt + 1, len - (lt + 1 - s));
-		if (vp) {
-			zend_generics_variance_error(ce, vp, pol, /* foreign */ true, kind, member);
+		/* Foreign reference: compose through the foreign template's declared
+		 * variance. Resolvable only in the deep (first-instantiation) pass;
+		 * the compile-time pass defers, and slices without variant mentions
+		 * need no verification at all. */
+		if (!ctx->deep) {
+			return true;
 		}
-		return;
+		if (!zend_generics_slice_mentions_variant(ce, arg, end - arg)) {
+			return true;
+		}
+		zend_string *base = zend_string_init(s, lt - s, 0);
+		zend_class_entry *fce = zend_lookup_class_ex(base, NULL,
+			ctx->use_autoload ? 0 : ZEND_FETCH_CLASS_NO_AUTOLOAD);
+		if (!fce) {
+			zend_throw_error(NULL,
+				"Cannot verify variance of %s: class %s (in %s of %s) was not found",
+				ZSTR_VAL(ce->name), ZSTR_VAL(base), kind,
+				member ? ZSTR_VAL(member) : "?");
+			zend_string_release(base);
+			return false;
+		}
+		zend_string_release(base);
+		const zend_generic_params *fgp =
+			(fce->ce_flags2 & ZEND_ACC2_GENERIC_TEMPLATE) ? fce->generic_params : NULL;
+		return zend_generics_check_ref_args_polarity(ctx, fgp, arg, end, pol,
+			kind, member);
 	}
 	/* bare label */
 	const zend_generic_params *gp = ce->generic_params;
 	if (memchr(s, '\\', len)) {
-		return; /* qualified: never a parameter */
+		return true; /* qualified: never a parameter */
 	}
 	for (uint32_t i = 0; i < gp->num_params; i++) {
 		uint32_t v = zend_generics_param_variance(gp, i);
@@ -2844,17 +2880,19 @@ static void zend_generics_check_member_polarity(
 			if ((pol > 0 && !(v & ZEND_GENERIC_VARIANCE_OUT))
 					|| (pol < 0 && !(v & ZEND_GENERIC_VARIANCE_IN))
 					|| pol == 0) {
-				zend_generics_variance_error(ce, &gp->params[i], pol, false, kind, member);
+				return zend_generics_variance_error(ctx, &gp->params[i], pol,
+					kind, member);
 			}
-			return;
+			return true;
 		}
 	}
+	return true;
 }
 
 /* Split a slice on top-level '|' / '&' (DNF members share the position's
  * polarity) and check each member. */
-static void zend_generics_check_slice_polarity(
-		const zend_class_entry *ce, const char *s, size_t len, int pol,
+static bool zend_generics_check_slice_polarity(
+		const zend_generics_variance_ctx *ctx, const char *s, size_t len, int pol,
 		const char *kind, const zend_string *member)
 {
 	/* skip a "..." spread prefix (packs are never variant) */
@@ -2866,8 +2904,9 @@ static void zend_generics_check_slice_polarity(
 	const char *ms = s;
 	for (const char *p = s; p <= s + len; p++) {
 		if (p == s + len || ((*p == '|' || *p == '&') && d == 0)) {
-			if (p > ms) {
-				zend_generics_check_member_polarity(ce, ms, p - ms, pol, kind, member);
+			if (p > ms
+					&& !zend_generics_check_member_polarity(ctx, ms, p - ms, pol, kind, member)) {
+				return false;
 			}
 			ms = p + 1;
 		} else if (*p == '<' || *p == '(') {
@@ -2876,28 +2915,33 @@ static void zend_generics_check_slice_polarity(
 			if (d) d--;
 		}
 	}
+	return true;
 }
 
-static void zend_generics_check_type_polarity(
-		const zend_class_entry *ce, zend_type type, int pol,
+static bool zend_generics_check_type_polarity(
+		const zend_generics_variance_ctx *ctx, zend_type type, int pol,
 		const char *kind, const zend_string *member)
 {
 	if (ZEND_TYPE_HAS_LIST(type)) {
 		const zend_type *lt;
 		ZEND_TYPE_LIST_FOREACH(ZEND_TYPE_LIST(type), lt) {
-			zend_generics_check_type_polarity(ce, *lt, pol, kind, member);
+			if (!zend_generics_check_type_polarity(ctx, *lt, pol, kind, member)) {
+				return false;
+			}
 		} ZEND_TYPE_LIST_FOREACH_END();
-		return;
+		return true;
 	}
 	if (ZEND_TYPE_HAS_NAME(type)) {
 		zend_string *name = ZEND_TYPE_NAME(type);
-		zend_generics_check_slice_polarity(ce, ZSTR_VAL(name), ZSTR_LEN(name),
-			pol, kind, member);
+		return zend_generics_check_slice_polarity(ctx, ZSTR_VAL(name),
+			ZSTR_LEN(name), pol, kind, member);
 	}
+	return true;
 }
 
-ZEND_API void zend_generics_check_variance_positions(const zend_class_entry *ce)
+static bool zend_generics_check_variance_walk(const zend_generics_variance_ctx *ctx)
 {
+	const zend_class_entry *ce = ctx->ce;
 	const zend_generic_params *gp = ce->generic_params;
 	ZEND_ASSERT(gp && (ce->ce_flags & ZEND_ACC_INTERFACE));
 
@@ -2911,22 +2955,26 @@ ZEND_API void zend_generics_check_variance_positions(const zend_class_entry *ce)
 			continue;
 		}
 		const zend_op_array *op = &fn->op_array;
-		if (op->fn_flags & ZEND_ACC_HAS_RETURN_TYPE) {
-			zend_generics_check_type_polarity(ce, op->arg_info[-1].type, +1,
-				"return type", op->function_name);
+		if ((op->fn_flags & ZEND_ACC_HAS_RETURN_TYPE)
+				&& !zend_generics_check_type_polarity(ctx, op->arg_info[-1].type, +1,
+					"return type", op->function_name)) {
+			return false;
 		}
 		uint32_t n = op->num_args + ((op->fn_flags & ZEND_ACC_VARIADIC) ? 1 : 0);
 		for (uint32_t i = 0; i < n; i++) {
 			int pol = ZEND_ARG_SEND_MODE(&op->arg_info[i]) ? 0 : -1;
-			zend_generics_check_type_polarity(ce, op->arg_info[i].type, pol,
-				"parameter type", op->function_name);
+			if (!zend_generics_check_type_polarity(ctx, op->arg_info[i].type, pol,
+					"parameter type", op->function_name)) {
+				return false;
+			}
 		}
 	} ZEND_HASH_FOREACH_END();
 
 	zend_class_constant *c;
 	ZEND_HASH_MAP_FOREACH_STR_KEY_PTR(&ce->constants_table, key, c) {
-		if (ZEND_TYPE_IS_SET(c->type)) {
-			zend_generics_check_type_polarity(ce, c->type, +1, "constant", key);
+		if (ZEND_TYPE_IS_SET(c->type)
+				&& !zend_generics_check_type_polarity(ctx, c->type, +1, "constant", key)) {
+			return false;
 		}
 	} ZEND_HASH_FOREACH_END();
 
@@ -2942,18 +2990,58 @@ ZEND_API void zend_generics_check_variance_positions(const zend_class_entry *ce)
 			if (has_get && !has_set) pol = +1;
 			else if (has_set && !has_get) pol = -1;
 		}
-		zend_generics_check_type_polarity(ce, prop->type, pol, "property", key);
+		if (!zend_generics_check_type_polarity(ctx, prop->type, pol, "property", key)) {
+			return false;
+		}
 	} ZEND_HASH_FOREACH_END();
 
-	/* Deferred inheritance references: conservative foreign rule. */
+	/* Deferred inheritance references re-expose the extended template's
+	 * members, so their arguments sit at output polarity composed through
+	 * that template's variance. */
 	for (uint32_t i = 0; i < gp->num_deferred_interfaces; i++) {
 		zend_string *ref = gp->deferred_interfaces[i];
-		const zend_generic_param *vp =
-			zend_generics_slice_mentions_variant(ce, ZSTR_VAL(ref), ZSTR_LEN(ref));
-		if (vp) {
-			zend_generics_variance_error(ce, vp, 0, true, "extended interface", ref);
+		if (!zend_generics_check_slice_polarity(ctx, ZSTR_VAL(ref), ZSTR_LEN(ref),
+				+1, "extended interface", ref)) {
+			return false;
 		}
 	}
+	return true;
+}
+
+ZEND_API void zend_generics_check_variance_positions(const zend_class_entry *ce)
+{
+	zend_generics_variance_ctx ctx = { ce, /* deep */ false, false };
+	zend_generics_check_variance_walk(&ctx);
+}
+
+/* First-instantiation pass: verifies the positions that sit inside foreign
+ * generic references, now that those templates can be resolved. Passes are
+ * cached per template for the request; failures throw and are not cached. */
+ZEND_API bool zend_generics_check_variance_deep(
+		const zend_class_entry *ce, bool use_autoload)
+{
+	if (!(ce->ce_flags2 & ZEND_ACC2_GENERIC_VARIANT)) {
+		return true;
+	}
+	zend_string *key = zend_strpprintf(0, "%p:decl", (void *) ce);
+	if (EG(generics_variance_cache)
+			&& zend_hash_exists(EG(generics_variance_cache), key)) {
+		zend_string_release(key);
+		return true;
+	}
+	zend_generics_variance_ctx ctx = { ce, /* deep */ true, use_autoload };
+	bool ok = zend_generics_check_variance_walk(&ctx);
+	if (ok) {
+		if (!EG(generics_variance_cache)) {
+			ALLOC_HASHTABLE(EG(generics_variance_cache));
+			zend_hash_init(EG(generics_variance_cache), 16, NULL, NULL, 0);
+		}
+		zval zv;
+		ZVAL_TRUE(&zv);
+		zend_hash_add(EG(generics_variance_cache), key, &zv);
+	}
+	zend_string_release(key);
+	return ok;
 }
 
 static bool zend_generics_arg_types_identical(zend_type a, zend_type b)

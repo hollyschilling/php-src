@@ -11299,7 +11299,10 @@ static zend_class_entry *zend_compile_class_decl(znode *result, const zend_ast *
 
 	if (ce->ce_flags2 & ZEND_ACC2_GENERIC_VARIANT) {
 		/* Every member is compiled; enforce the positional discipline that
-		 * makes the declared variance sound. */
+		 * makes the declared variance sound. Positions inside foreign generic
+		 * references are deferred to the template's first instantiation,
+		 * where the foreign template's variance is resolvable (see
+		 * zend_generics_check_variance_deep). */
 		zend_generics_check_variance_positions(ce);
 	}
 
