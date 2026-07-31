@@ -30,6 +30,7 @@
 #include "zend_virtual_cwd.h"
 #include "zend_smart_str.h"
 #include "zend_smart_string.h"
+#include "zend_extension_methods.h"
 #include "zend_cpuinfo.h"
 #include "zend_attributes.h"
 #include "zend_observer.h"

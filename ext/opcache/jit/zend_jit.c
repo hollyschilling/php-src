@@ -3303,6 +3303,14 @@ int zend_jit_op_array(zend_op_array *op_array, zend_script *script)
 		return FAILURE;
 	}
 
+	if (UNEXPECTED(op_array->fn_flags2 & ZEND_ACC2_SCALAR_RECEIVER)) {
+		/* Scalar extension methods stay interpreted: generated code must
+		 * never observe the non-object receiver handoff in This, and the
+		 * bodies are never-cached anyway. */
+		ZEND_SET_FUNC_INFO(op_array, NULL);
+		return SUCCESS;
+	}
+
 	if (JIT_G(trigger) == ZEND_JIT_ON_FIRST_EXEC) {
 		zend_jit_op_array_extension *jit_extension;
 		zend_op *opline = op_array->opcodes;

@@ -195,6 +195,23 @@ static void zend_persist_attributes_calc(HashTable *attributes)
 	}
 }
 
+static void zend_persist_extension_imports_calc(HashTable *imports)
+{
+	if (!zend_shared_alloc_get_xlat_entry(imports)
+	 && (ZCG(current_persistent_script)->corrupted
+	  || !zend_accel_in_shm(imports))) {
+		zval *v;
+
+		zend_shared_alloc_register_xlat_entry(imports, imports);
+		ADD_SIZE(sizeof(HashTable));
+		zend_hash_persist_calc(imports);
+
+		ZEND_HASH_PACKED_FOREACH_VAL(imports, v) {
+			ADD_INTERNED_STRING(Z_STR_P(v));
+		} ZEND_HASH_FOREACH_END();
+	}
+}
+
 static void zend_persist_type_calc(zend_type *type)
 {
 	if (ZEND_TYPE_HAS_LIST(*type)) {
@@ -320,6 +337,10 @@ static void zend_persist_op_array_calc_ex(zend_op_array *op_array)
 
 	if (op_array->attributes) {
 		zend_persist_attributes_calc(op_array->attributes);
+	}
+
+	if (op_array->extension_imports) {
+		zend_persist_extension_imports_calc(op_array->extension_imports);
 	}
 
 	if (op_array->try_catch_array) {
