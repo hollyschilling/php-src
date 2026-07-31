@@ -8023,13 +8023,15 @@ static zend_string *zend_generic_dnf_member_name(zend_ast *ast, bool in_intersec
 	if (ast->kind == ZEND_AST_GENERIC_TYPE) {
 		smart_str tmp = {0};
 		bool uses = false;
-		/* In bound and param-allowed argument contexts the template's own
-		 * parameters may appear at any nesting depth ('Comparable<T>',
-		 * 'Box<T|null>'); they stay symbolic. */
+		bool uses_method = false;
+		/* In bound and param-allowed argument contexts the declaring
+		 * template's (and method's) own parameters may appear at any nesting
+		 * depth ('Comparable<T>', 'Box<T|null>'); they stay symbolic. */
 		zend_append_generic_type_ref(&tmp, ast, /* allow_params */ allow_params,
 			/* allow_nested_params */ allow_params, /* allow_spread */ false,
-			allow_params ? &uses : NULL, NULL);
-		if (uses && uses_params) {
+			allow_params ? &uses : NULL,
+			allow_params ? &uses_method : NULL);
+		if ((uses || uses_method) && uses_params) {
 			*uses_params = true;
 		}
 		return smart_str_extract(&tmp);
@@ -8059,11 +8061,20 @@ static zend_string *zend_generic_dnf_member_name(zend_ast *ast, bool in_intersec
 				"argument (composite arguments must be concrete in this version)",
 				ZSTR_VAL(name));
 		}
-		if (zend_active_method_type_param(name)) {
-			zend_error_noreturn(E_COMPILE_ERROR,
-				"Type parameter %s cannot be a member of a composite type "
-				"argument (composite arguments must be concrete in this version)",
-				ZSTR_VAL(name));
+		{
+			zend_string *method_param = zend_active_method_type_param(name);
+			if (method_param) {
+				if (allow_params) {
+					if (uses_params) {
+						*uses_params = true;
+					}
+					return zend_string_copy(method_param); /* methods have no packs */
+				}
+				zend_error_noreturn(E_COMPILE_ERROR,
+					"Type parameter %s cannot be a member of a composite type "
+					"argument (composite arguments must be concrete in this version)",
+					ZSTR_VAL(name));
+			}
 		}
 		uint8_t type_code = zend_lookup_builtin_type_by_name(name);
 		if (type_code != 0) {
