@@ -160,6 +160,7 @@ void init_executor(void) /* {{{ */
 	EG(extension_autoload_attempted) = NULL;
 	EG(extension_method_registry) = NULL;
 	EG(generics_stamping) = NULL;
+	EG(generics_method_cache) = NULL;
 	EG(generics_variance_cache) = NULL;
 	EG(generics_type_names) = NULL;
 
@@ -524,6 +525,11 @@ void shutdown_executor(void) /* {{{ */
 			EG(extension_autoload_attempted) = NULL;
 		}
 		zend_extension_methods_request_shutdown();
+		if (EG(generics_method_cache)) {
+			zend_hash_destroy(EG(generics_method_cache));
+			FREE_HASHTABLE(EG(generics_method_cache));
+			EG(generics_method_cache) = NULL;
+		}
 		if (EG(generics_stamping)) {
 			zend_hash_destroy(EG(generics_stamping));
 			FREE_HASHTABLE(EG(generics_stamping));
@@ -1853,6 +1859,22 @@ check_fetch_type:
 			return ce;
 		case ZEND_FETCH_CLASS_TYPE_PARAM: {
 			uint32_t param_idx = fetch_type >> ZEND_FETCH_CLASS_TYPE_PARAM_SHIFT;
+			zend_type arg;
+			if (fetch_type & ZEND_FETCH_CLASS_TYPE_PARAM_METHOD) {
+				/* Method-space parameter (function map<U>): resolved against
+				 * the executing method instantiation's binding. */
+				const zend_execute_data *ex = EG(current_execute_data);
+				const zend_function *func = ex ? ex->func : NULL;
+				if (UNEXPECTED(!func || !ZEND_USER_CODE(func->common.type)
+						|| !func->op_array.generic_binding)) {
+					zend_throw_or_error(fetch_type, NULL,
+						"Cannot resolve a method type parameter when no generic method binding is in scope");
+					return NULL;
+				}
+				ZEND_ASSERT(param_idx < func->op_array.generic_binding->num_args);
+				arg = func->op_array.generic_binding->args[param_idx];
+				goto have_type_param;
+			}
 			scope = zend_get_executed_scope();
 			if (UNEXPECTED(!scope || !scope->generic_binding)) {
 				zend_throw_or_error(fetch_type, NULL,
@@ -1861,7 +1883,8 @@ check_fetch_type:
 			}
 			param_idx = zend_generics_binding_arg_index(scope, param_idx);
 			ZEND_ASSERT(param_idx < scope->generic_binding->num_args);
-			zend_type arg = scope->generic_binding->args[param_idx];
+			arg = scope->generic_binding->args[param_idx];
+have_type_param:;
 			if (UNEXPECTED(!ZEND_TYPE_HAS_NAME(arg) || ZEND_TYPE_PURE_MASK(arg) != 0)) {
 				zend_string *type_str = zend_type_to_string(arg);
 				zend_throw_or_error(fetch_type, NULL,
@@ -1930,17 +1953,34 @@ zend_class_entry *zend_fetch_class_with_scope(
 	return ce;
 }
 
+static zend_always_inline void zend_lang_module_keep_array(zend_array *arr)
+{
+	if (arr && !(GC_FLAGS(arr) & IS_ARRAY_IMMUTABLE)) {
+		GC_ADDREF(arr);
+	}
+}
+
+static zend_always_inline void zend_lang_module_drop_array(zend_array *arr)
+{
+	if (arr && !(GC_FLAGS(arr) & IS_ARRAY_IMMUTABLE)) {
+		zend_array_release(arr);
+	}
+}
+
 static void zend_lang_module_dtor(zval *zv)
 {
 	zend_lang_module *m = Z_PTR_P(zv);
 	zend_string_release_ex(m->fqmn, 0);
-	if (m->exports && !(GC_FLAGS(m->exports) & IS_ARRAY_IMMUTABLE)) {
-		zend_array_release(m->exports);
-	}
+	zend_lang_module_drop_array(m->exports);
+	zend_lang_module_drop_array(m->extensions);
 	efree(m);
 }
 
-ZEND_API zend_result zend_lang_module_register(zend_string *fqmn, zend_array *exports)
+/* The register opcode carries a single const array `payload` packing the two
+ * surfaces a definition installs: payload[0] is the export map (alias -> FQCN),
+ * payload[1] the list of exported named-extension FQNs. Keeping both in one
+ * operand leaves the ZEND_REGISTER_MODULE opcode a plain (CONST, CONST). */
+ZEND_API zend_result zend_lang_module_register(zend_string *fqmn, zend_array *payload)
 {
 	zend_lang_module *m;
 
@@ -1952,12 +1992,15 @@ ZEND_API zend_result zend_lang_module_register(zend_string *fqmn, zend_array *ex
 		return FAILURE;
 	}
 
+	zval *exports_zv = zend_hash_index_find(payload, 0);
+	zval *extensions_zv = zend_hash_index_find(payload, 1);
+
 	m = emalloc(sizeof(zend_lang_module));
 	m->fqmn = zend_string_copy(fqmn);
-	m->exports = exports;
-	if (exports && !(GC_FLAGS(exports) & IS_ARRAY_IMMUTABLE)) {
-		GC_ADDREF(exports);
-	}
+	m->exports = exports_zv ? Z_ARR_P(exports_zv) : NULL;
+	m->extensions = extensions_zv ? Z_ARR_P(extensions_zv) : NULL;
+	zend_lang_module_keep_array(m->exports);
+	zend_lang_module_keep_array(m->extensions);
 	zend_hash_add_new_ptr(EG(lang_modules), m->fqmn, m);
 	return SUCCESS;
 }
@@ -2016,22 +2059,23 @@ static zend_never_inline zend_class_entry *zend_fetch_class_via_module(const zen
 zend_class_entry *zend_fetch_class_by_name(zend_string *class_name, zend_string *key, uint32_t fetch_type) /* {{{ */
 {
 	if (UNEXPECTED(ZSTR_LEN(class_name) > 0 && ZSTR_VAL(class_name)[0] == '\0')) {
+		if (ZSTR_LEN(class_name) > 1 && ZSTR_VAL(class_name)[1] == '\x01') {
+			/* Method-symbol marker ("\0\x01" SYM): a class reference whose
+			 * arguments mention METHOD-level type parameters; substitute
+			 * against the executing method instantiation, then resolve. */
+			zend_string *resolved = zend_generics_resolve_type_symbol(
+				ZSTR_VAL(class_name) + 2, ZSTR_LEN(class_name) - 2);
+			if (!resolved) {
+				return NULL;
+			}
+			zend_class_entry *ce = zend_lookup_class_ex(resolved, NULL, fetch_type);
+			if (!ce) {
+				report_class_fetch_error(resolved, fetch_type);
+			}
+			zend_string_release(resolved);
+			return ce;
+		}
 		return zend_fetch_class_via_module(class_name, fetch_type);
-	if (UNEXPECTED(ZSTR_LEN(class_name) > 1 && ZSTR_VAL(class_name)[0] == '\0'
-			&& ZSTR_VAL(class_name)[1] == '\x01')) {
-		/* Symbolic generic marker ("\0\x01" SYM): substitute against the
-		 * executing scope's binding, then resolve. */
-		zend_string *resolved = zend_generics_resolve_type_symbol(
-			ZSTR_VAL(class_name) + 2, ZSTR_LEN(class_name) - 2);
-		if (!resolved) {
-			return NULL;
-		}
-		zend_class_entry *marked_ce = zend_lookup_class_ex(resolved, NULL, fetch_type);
-		if (!marked_ce) {
-			report_class_fetch_error(resolved, fetch_type);
-		}
-		zend_string_release(resolved);
-		return marked_ce;
 	}
 
 	zend_class_entry *ce = zend_lookup_class_ex(class_name, key, fetch_type);

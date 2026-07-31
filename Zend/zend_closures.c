@@ -789,6 +789,13 @@ static void zend_create_closure_ex(zval *res, zend_function *func, zend_class_en
 			 * closure's own signature copy. */
 			zend_generics_substitute_closure_signature(&closure->func.op_array, scope);
 		}
+		if (UNEXPECTED(closure->func.op_array.generic_params != NULL
+				&& closure->func.op_array.generic_binding == NULL)) {
+			/* Closure nested in a generic METHOD: substitute the creating
+			 * instantiation's method-space arguments and adopt its binding
+			 * for body references. */
+			zend_generics_substitute_closure_method_signature(&closure->func.op_array);
+		}
 
 		/* For fake closures, we want to reuse the static variables of the original function. */
 		HashTable *ht = ZEND_MAP_PTR_GET(func->op_array.static_variables_ptr);
