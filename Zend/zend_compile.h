@@ -117,6 +117,9 @@ typedef struct _zend_file_context {
 	HashTable *imports;
 	HashTable *imports_function;
 	HashTable *imports_const;
+	/* Current `use extension` import set; snapshotted (by pointer) into each
+	 * op_array created after this point (copy-on-write per import statement). */
+	HashTable *extension_imports;
 
 	HashTable seen_symbols;
 } zend_file_context;
@@ -417,6 +420,10 @@ typedef struct _zend_oparray_context {
 /*                                                        |     |     |     */
 /* Function forbids dynamic calls                         |     |     |     */
 #define ZEND_ACC2_FORBID_DYN_CALLS       (1 << 0)  /*     |  X  |     |     */
+/*                                                        |     |     |     */
+/* Scalar extension method: its frame's This slot         |     |     |     */
+/* briefly carries a non-object receiver.                 |     |     |     */
+#define ZEND_ACC2_SCALAR_RECEIVER        (1 << 1)  /*     |  X  |     |     */
 
 #define ZEND_ACC_PPP_MASK  (ZEND_ACC_PUBLIC | ZEND_ACC_PROTECTED | ZEND_ACC_PRIVATE)
 #define ZEND_ACC_PPP_SET_MASK  (ZEND_ACC_PUBLIC_SET | ZEND_ACC_PROTECTED_SET | ZEND_ACC_PRIVATE_SET)
@@ -575,6 +582,11 @@ struct _zend_op_array {
 	/* Functions that are declared dynamically are stored here and
 	 * referenced by index from opcodes. */
 	zend_op_array **dynamic_func_defs;
+
+	/* Named extensions imported via `use extension` as of this op_array's
+	 * compile position (packed list of lc names, shared between the file's
+	 * op_arrays; persisted by opcache). NULL if none. */
+	HashTable *extension_imports;
 
 	void *reserved[ZEND_MAX_RESERVED_RESOURCES];
 };
@@ -1220,9 +1232,10 @@ static zend_always_inline bool zend_check_arg_send_type(const zend_function *zf,
 #define ZEND_PARENTHESIZED_ARROW_FUNC 1
 
 /* For "use" AST nodes and the seen symbol table */
-#define ZEND_SYMBOL_CLASS    (1<<0)
-#define ZEND_SYMBOL_FUNCTION (1<<1)
-#define ZEND_SYMBOL_CONST    (1<<2)
+#define ZEND_SYMBOL_CLASS     (1<<0)
+#define ZEND_SYMBOL_FUNCTION  (1<<1)
+#define ZEND_SYMBOL_CONST     (1<<2)
+#define ZEND_SYMBOL_EXTENSION (1<<3)
 
 /* All increment opcodes are even (decrement are odd) */
 #define ZEND_IS_INCREMENT(opcode) (((opcode) & 1) == 0)
