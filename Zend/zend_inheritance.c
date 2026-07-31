@@ -1187,6 +1187,25 @@ static inheritance_status do_inheritance_check_on_method(
 			ZEND_FN_SCOPE_NAME(parent), ZSTR_VAL(child->common.function_name), ZEND_FN_SCOPE_NAME(child));
 	}
 
+	/* Effect variance: along any subtyping edge -- implements, interface
+	 * extends interface, trait abstract requirements -- `mutating` may be
+	 * removed, never added. An uncolored requirement is a guarantee callers
+	 * rely on; a colored one is permission an implementation need not use.
+	 * Constructors are exempt: their mutating role is unreachable through
+	 * dispatch. */
+	if ((flags & ZEND_INHERITANCE_CHECK_PROTO)
+	 && UNEXPECTED((child->common.fn_flags2 & ZEND_ACC2_MUTATING)
+		&& !(parent->common.fn_flags2 & ZEND_ACC2_MUTATING)
+		&& !(child_flags & ZEND_ACC_CTOR))) {
+		if (flags & ZEND_INHERITANCE_CHECK_SILENT) {
+			return INHERITANCE_ERROR;
+		}
+		zend_error_at_noreturn(E_COMPILE_ERROR, func_filename(child), func_lineno(child),
+			"Mutating method %s::%s() cannot satisfy the non-mutating requirement %s::%s()",
+			ZEND_FN_SCOPE_NAME(child), ZSTR_VAL(child->common.function_name),
+			ZEND_FN_SCOPE_NAME(parent), ZSTR_VAL(child->common.function_name));
+	}
+
 	if ((flags & ZEND_INHERITANCE_SET_CHILD_CHANGED)
 	 && (parent_flags & (ZEND_ACC_PRIVATE|ZEND_ACC_CHANGED))) {
 		SEPARATE_METHOD();
@@ -2368,6 +2387,19 @@ static void zend_add_trait_method(zend_class_entry *ce, zend_string *name, zend_
 	zend_function *existing_fn = NULL;
 	zend_function *new_fn;
 
+	if (UNEXPECTED((fn->common.fn_flags2 & ZEND_ACC2_MUTATING)
+	 && !(fn->common.fn_flags & ZEND_ACC_ABSTRACT)
+	 && !(ce->ce_flags2 & ZEND_ACC2_VALUE_CLASS))) {
+		/* On a struct consumer the marker gives the receiver exclusive,
+		 * written-back binding. On a class (or an interface's default-less
+		 * requirement carrier) writes to $this persist anyway -- reference
+		 * semantics make every method effectively mutating -- so the marker
+		 * is meaningless rather than wrong: strip it from this consumer's
+		 * copy so no mutating call machinery engages. The trait stays usable
+		 * by both kinds of consumer. */
+		fn->common.fn_flags2 &= ~ZEND_ACC2_MUTATING;
+	}
+
 	if ((existing_fn = zend_hash_find_ptr(&ce->function_table, key)) != NULL) {
 		/* if it is the same function with the same visibility and has not been assigned a class scope yet, regardless
 		 * of where it is coming from there is no conflict and we do not need to add it again */
@@ -2998,6 +3030,14 @@ static void zend_do_traits_property_binding(zend_class_entry *ce, zend_class_ent
 						new_fn->op_array.fn_flags &= ~ZEND_ACC_IMMUTABLE;
 						new_fn->common.fn_flags |= ZEND_ACC_TRAIT_CLONE;
 						new_fn->common.prop_info = new_prop;
+						if (j == ZEND_PROPERTY_HOOK_SET
+						 && (ce->ce_flags2 & ZEND_ACC2_VALUE_CLASS)) {
+							/* A struct's set hook is implicitly mutating; the
+							 * flag lives on the consumer's copy because the
+							 * same trait may serve classes. See
+							 * zend_compile_property_hooks(). */
+							new_fn->common.fn_flags2 |= ZEND_ACC2_MUTATING;
+						}
 						function_add_ref(new_fn);
 
 						zend_fixup_trait_method(new_fn, ce);
@@ -3034,12 +3074,56 @@ static void zend_verify_abstract_class_function(const zend_function *fn, zend_ab
 }
 /* }}} */
 
+/* The struct member bans are enforced at compile time for members declared in
+ * the struct body, which gives them an exact line number. This is the second
+ * tier: it runs after linking, so it also covers members flattened in from
+ * traits. Members contributed by interfaces (prototypes, hooked properties)
+ * keep their own ce and are not the struct's to answer for. */
+static void zend_verify_value_class(const zend_class_entry *ce) /* {{{ */
+{
+	const zend_property_info *prop_info;
+	const zend_function *func;
+
+	ZEND_HASH_MAP_FOREACH_PTR(&ce->properties_info, prop_info) {
+		if (prop_info->ce != ce) {
+			continue;
+		}
+		if (prop_info->flags & ZEND_ACC_STATIC) {
+			zend_error_noreturn(E_COMPILE_ERROR, "Struct %s cannot include static properties",
+				ZSTR_VAL(ce->name));
+		}
+		if (!ZEND_TYPE_IS_SET(prop_info->type)) {
+			zend_error_noreturn(E_COMPILE_ERROR, "Struct property %s::$%s must have type",
+				ZSTR_VAL(ce->name), ZSTR_VAL(prop_info->name));
+		}
+	} ZEND_HASH_FOREACH_END();
+
+	/* The function table is keyed by lowercased name, which is what
+	 * zend_is_value_class_forbidden_magic_method() expects; report the
+	 * declared spelling. */
+	zend_string *lcname;
+	ZEND_HASH_MAP_FOREACH_STR_KEY_PTR(&ce->function_table, lcname, func) {
+		if (func->common.scope != ce || lcname == NULL) {
+			continue;
+		}
+		if (zend_is_value_class_forbidden_magic_method(lcname)) {
+			zend_error_noreturn(E_COMPILE_ERROR, "Struct %s cannot include magic method %s()",
+				ZSTR_VAL(ce->name), ZSTR_VAL(func->common.function_name));
+		}
+	} ZEND_HASH_FOREACH_END();
+
+	/* Effect variance for mutating methods is enforced on every subtyping
+	 * edge in do_inheritance_check_on_method(). */
+}
+/* }}} */
+
 void zend_verify_abstract_class(zend_class_entry *ce) /* {{{ */
 {
 	const zend_function *func;
 	zend_abstract_info ai;
 	bool is_explicit_abstract = (ce->ce_flags & ZEND_ACC_EXPLICIT_ABSTRACT_CLASS) != 0;
-	bool can_be_abstract = (ce->ce_flags & (ZEND_ACC_ENUM|ZEND_ACC_ANON_CLASS)) == 0;
+	bool can_be_abstract = (ce->ce_flags & (ZEND_ACC_ENUM|ZEND_ACC_ANON_CLASS)) == 0
+		&& !(ce->ce_flags2 & ZEND_ACC2_VALUE_CLASS);
 	memset(&ai, 0, sizeof(ai));
 
 	ZEND_HASH_MAP_FOREACH_PTR(&ce->function_table, func) {
@@ -3703,6 +3787,9 @@ ZEND_API zend_class_entry *zend_do_link_class(zend_class_entry *ce, zend_string 
 		}
 		if (ce->ce_flags & ZEND_ACC_ENUM) {
 			zend_verify_enum(ce);
+		}
+		if (ce->ce_flags2 & ZEND_ACC2_VALUE_CLASS) {
+			zend_verify_value_class(ce);
 		}
 		if (ce->num_hooked_prop_variance_checks) {
 			const zend_property_info *prop_info;
