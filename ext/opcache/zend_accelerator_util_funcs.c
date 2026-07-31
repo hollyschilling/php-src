@@ -343,7 +343,11 @@ static void zend_accel_do_delayed_early_binding(
 				zend_class_entry *parent_ce = !(orig_ce->ce_flags & ZEND_ACC_LINKED)
 					? zend_hash_find_ex_ptr(EG(class_table), early_binding->lc_parent_name, 1)
 					: NULL;
-				if (parent_ce || (orig_ce->ce_flags & ZEND_ACC_LINKED)) {
+				if ((parent_ce || (orig_ce->ce_flags & ZEND_ACC_LINKED))
+				 /* Refuse to early-bind module-gated inheritance; the runtime
+				  * link path reports the violation properly. */
+				 && !(parent_ce && !(orig_ce->ce_flags & ZEND_ACC_LINKED)
+					  && zend_module_inheritance_denied(orig_ce, parent_ce, orig_ce->parent_name))) {
 					ce = zend_try_early_bind(orig_ce, parent_ce, early_binding->lcname, zv);
 				} else if (ZSTR_LEN(early_binding->lc_parent_name) == 0) {
 					/* Parentless class: use the same binding path as the VM handler */

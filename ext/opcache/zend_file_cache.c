@@ -535,6 +535,7 @@ static void zend_file_cache_serialize_op_array(zend_op_array            *op_arra
 			SERIALIZE_PTR(op_array->vars);
 			SERIALIZE_STR(op_array->function_name);
 			SERIALIZE_STR(op_array->filename);
+			SERIALIZE_STR(op_array->module_name);
 			SERIALIZE_PTR(op_array->live_range);
 			SERIALIZE_PTR(op_array->scope);
 			SERIALIZE_STR(op_array->doc_comment);
@@ -716,6 +717,7 @@ static void zend_file_cache_serialize_op_array(zend_op_array            *op_arra
 
 		SERIALIZE_STR(op_array->function_name);
 		SERIALIZE_STR(op_array->filename);
+		SERIALIZE_STR(op_array->module_name);
 		SERIALIZE_PTR(op_array->live_range);
 		SERIALIZE_PTR(op_array->scope);
 		SERIALIZE_STR(op_array->doc_comment);
@@ -819,6 +821,7 @@ static void zend_file_cache_serialize_class(zval                     *zv,
 	UNSERIALIZE_PTR(ce);
 
 	SERIALIZE_STR(ce->name);
+	SERIALIZE_STR(ce->module_name);
 	if (ce->parent) {
 		if (!(ce->ce_flags & ZEND_ACC_LINKED)) {
 			SERIALIZE_STR(ce->parent_name);
@@ -1473,6 +1476,7 @@ static void zend_file_cache_unserialize_op_array(zend_op_array           *op_arr
 		UNSERIALIZE_PTR(op_array->vars);
 		UNSERIALIZE_STR(op_array->function_name);
 		UNSERIALIZE_STR(op_array->filename);
+		UNSERIALIZE_STR(op_array->module_name);
 		UNSERIALIZE_PTR(op_array->live_range);
 		UNSERIALIZE_PTR(op_array->scope);
 		UNSERIALIZE_STR(op_array->doc_comment);
@@ -1619,6 +1623,7 @@ static void zend_file_cache_unserialize_op_array(zend_op_array           *op_arr
 
 		UNSERIALIZE_STR(op_array->function_name);
 		UNSERIALIZE_STR(op_array->filename);
+		UNSERIALIZE_STR(op_array->module_name);
 		UNSERIALIZE_PTR(op_array->live_range);
 		UNSERIALIZE_STR(op_array->doc_comment);
 		UNSERIALIZE_ATTRIBUTES(op_array->attributes);
@@ -1709,6 +1714,7 @@ static void zend_file_cache_unserialize_class(zval                    *zv,
 	ce = Z_PTR_P(zv);
 
 	UNSERIALIZE_STR(ce->name);
+	UNSERIALIZE_STR(ce->module_name);
 	if (!(ce->ce_flags & ZEND_ACC_ANON_CLASS)) {
 		if (!script->corrupted) {
 			zend_accel_get_class_name_map_ptr(ce->name);

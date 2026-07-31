@@ -321,6 +321,10 @@ static void zend_persist_op_array_calc_ex(zend_op_array *op_array)
 		ADD_STRING(op_array->filename);
 	}
 
+	if (op_array->module_name) {
+		ADD_INTERNED_STRING(op_array->module_name);
+	}
+
 	if (op_array->arg_info) {
 		zend_arg_info *arg_info = op_array->arg_info;
 		uint32_t num_args = op_array->num_args;
@@ -507,6 +511,9 @@ void zend_persist_class_entry_calc(zend_class_entry *ce)
 			ADD_INTERNED_STRING(ce->name);
 			if (ce->parent_name && !(ce->ce_flags & ZEND_ACC_LINKED)) {
 				ADD_INTERNED_STRING(ce->parent_name);
+			}
+			if (ce->module_name) {
+				ADD_INTERNED_STRING(ce->module_name);
 			}
 		}
 

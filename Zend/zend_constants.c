@@ -253,6 +253,9 @@ ZEND_API zend_constant *_zend_get_special_const(const char *name, size_t len) /*
 
 ZEND_API bool zend_verify_const_access(const zend_class_constant *c, const zend_class_entry *scope) /* {{{ */
 {
+	if (UNEXPECTED(ZEND_CLASS_CONST_FLAGS(c) & ZEND_ACC_MODULE_INTERNAL)) {
+		return c->ce == scope || zend_check_module_internal_access(c->ce, scope);
+	}
 	if (ZEND_CLASS_CONST_FLAGS(c) & ZEND_ACC_PUBLIC) {
 		return 1;
 	} else if (ZEND_CLASS_CONST_FLAGS(c) & ZEND_ACC_PRIVATE) {

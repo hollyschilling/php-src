@@ -385,6 +385,12 @@ static void zend_reset_import_tables(void) /* {{{ */
 		FC(imports_const) = NULL;
 	}
 
+	if (FC(module_imports)) {
+		zend_hash_destroy(FC(module_imports));
+		efree(FC(module_imports));
+		FC(module_imports) = NULL;
+	}
+
 	zend_hash_clean(&FC(seen_symbols));
 }
 /* }}} */
@@ -407,7 +413,9 @@ void zend_file_context_begin(zend_file_context *prev_context) /* {{{ */
 	FC(imports_const) = NULL;
 	FC(extension_imports) = NULL;
 	FC(surface_grants) = NULL;
+	FC(module_imports) = NULL;
 	FC(current_namespace) = NULL;
+	FC(module_name) = NULL;
 	FC(in_namespace) = 0;
 	FC(has_bracketed_namespaces) = 0;
 	FC(declarables).ticks = 0;
@@ -418,6 +426,9 @@ void zend_file_context_begin(zend_file_context *prev_context) /* {{{ */
 void zend_file_context_end(const zend_file_context *prev_context) /* {{{ */
 {
 	zend_end_namespace();
+	if (FC(module_name)) {
+		zend_string_release_ex(FC(module_name), 0);
+	}
 	zend_hash_destroy(&FC(seen_symbols));
 	if (FC(extension_imports)) {
 		zend_hash_release(FC(extension_imports));
@@ -907,6 +918,8 @@ static const char *zend_modifier_token_to_string(uint32_t token)
 			return "protected(set)";
 		case T_PRIVATE_SET:
 			return "private(set)";
+		case T_INTERNAL:
+			return "internal";
 		default: ZEND_UNREACHABLE();
 	}
 }
@@ -959,6 +972,11 @@ uint32_t zend_modifier_token_to_flag(zend_modifier_target target, uint32_t token
 		case T_PRIVATE_SET:
 			if (target == ZEND_MODIFIER_TARGET_PROPERTY || target == ZEND_MODIFIER_TARGET_CPP) {
 				return ZEND_ACC_PRIVATE_SET;
+			}
+			break;
+		case T_INTERNAL:
+			if (target != ZEND_MODIFIER_TARGET_PROPERTY_HOOK) {
+				return ZEND_ACC_MODULE_INTERNAL;
 			}
 			break;
 	}
@@ -1150,6 +1168,12 @@ uint32_t zend_add_member_modifier(uint32_t flags, uint32_t new_flag, zend_modifi
 			"Multiple access type modifiers are not allowed", 0);
 		return 0;
 	}
+	if ((new_flags & ZEND_ACC_MODULE_INTERNAL)
+	 && (new_flags & (ZEND_ACC_PPP_MASK|ZEND_ACC_PPP_SET_MASK))) {
+		zend_throw_exception(zend_ce_compile_error,
+			"Cannot combine the internal modifier with another access type modifier", 0);
+		return 0;
+	}
 	if ((new_flags & ZEND_ACC_ABSTRACT) && (new_flags & ZEND_ACC_FINAL)) {
 		if (target == ZEND_MODIFIER_TARGET_METHOD) {
 			zend_throw_exception(zend_ce_compile_error,
@@ -1199,6 +1223,11 @@ static zend_string *zend_resolve_non_class_name(
 ) {
 	const char *compound;
 	*is_fully_qualified = false;
+
+	if (UNEXPECTED(type == ZEND_NAME_MODULE)) {
+		zend_error_noreturn(E_COMPILE_ERROR,
+			"Module-qualified names can only refer to classes");
+	}
 
 	if (ZSTR_VAL(name)[0] == '\\') {
 		/* Remove \ prefix (only relevant if this is a string rather than a label) */
@@ -1263,9 +1292,61 @@ static zend_string *zend_resolve_const_name(zend_string *name, uint32_t type, bo
 		name, type, is_fully_qualified, true, FC(imports_const));
 }
 
+/* Resolve "Prefix:>Member" against the file's module imports. Returns the
+ * plain canonical FQCN; optionally hands back the imported module. */
+static zend_string *zend_resolve_module_qualified_name(const zend_string *name, zend_lang_module **module_out)
+{
+	const char *sep = zend_memnstr(ZSTR_VAL(name), ":>", 2, ZSTR_VAL(name) + ZSTR_LEN(name));
+	zend_lang_module *m = NULL;
+
+	ZEND_ASSERT(sep != NULL);
+	if (FC(module_imports)) {
+		m = zend_hash_str_find_ptr(FC(module_imports), ZSTR_VAL(name), sep - ZSTR_VAL(name));
+	}
+	if (!m) {
+		zend_error_noreturn(E_COMPILE_ERROR,
+			"No module imported with name \"%.*s\" (missing 'use module'?)",
+			(int) (sep - ZSTR_VAL(name)), ZSTR_VAL(name));
+	}
+
+	const char *member = sep + 2;
+	size_t member_len = ZSTR_VAL(name) + ZSTR_LEN(name) - member;
+	zval *zv = zend_hash_str_find(m->exports, member, member_len);
+	if (!zv) {
+		zend_error_noreturn(E_COMPILE_ERROR,
+			"Module %s has no exported member %.*s",
+			ZSTR_VAL(m->fqmn), (int) member_len, member);
+	}
+	if (module_out) {
+		*module_out = m;
+	}
+	return zend_string_copy(Z_STR_P(zv));
+}
+
+/* Build the provenance-marked class reference: "\0" FQMN "\0" FQCN.
+ * Consumes fqcn. */
+static zend_string *zend_mark_module_provenance(const zend_lang_module *m, zend_string *fqcn)
+{
+	zend_string *marked = zend_string_alloc(1 + ZSTR_LEN(m->fqmn) + 1 + ZSTR_LEN(fqcn), 0);
+	char *p = ZSTR_VAL(marked);
+
+	*p++ = '\0';
+	memcpy(p, ZSTR_VAL(m->fqmn), ZSTR_LEN(m->fqmn));
+	p += ZSTR_LEN(m->fqmn);
+	*p++ = '\0';
+	memcpy(p, ZSTR_VAL(fqcn), ZSTR_LEN(fqcn));
+	p[ZSTR_LEN(fqcn)] = '\0';
+	zend_string_release_ex(fqcn, 0);
+	return marked;
+}
+
 static zend_string *zend_resolve_class_name(zend_string *name, uint32_t type) /* {{{ */
 {
 	const char *compound;
+
+	if (type == ZEND_NAME_MODULE) {
+		return zend_resolve_module_qualified_name(name, NULL);
+	}
 
 	if (ZEND_FETCH_CLASS_DEFAULT != zend_get_class_fetch_type(name)) {
 		if (type == ZEND_NAME_FQ) {
@@ -1882,6 +1963,13 @@ static zend_string *zend_resolve_const_class_name_reference(zend_ast *ast, const
 			"Cannot use \"%s\" as %s, as it is reserved",
 			ZSTR_VAL(class_name), type);
 	}
+	if (UNEXPECTED(ast->attr == ZEND_NAME_MODULE)) {
+		/* extends/implements/trait use through a module import carries
+		 * provenance so linking can distinguish it from a bare reference. */
+		zend_lang_module *m;
+		zend_string *fqcn = zend_resolve_module_qualified_name(class_name, &m);
+		return zend_mark_module_provenance(m, fqcn);
+	}
 	return zend_resolve_class_name(class_name, ast->attr);
 }
 
@@ -2019,6 +2107,12 @@ static bool zend_try_ct_eval_class_const(zval *zv, zend_string *class_name, zend
 	 * op_array's grants. */
 	if (cc->ce->surface_members
 	 && zend_surfaces_member_set(cc->ce, 'c', name)) {
+		return false;
+	}
+
+	/* Module-internal constants are never substituted at compile time; the
+	 * module check happens at runtime in zend_verify_const_access(). */
+	if (ZEND_CLASS_CONST_FLAGS(cc) & ZEND_ACC_MODULE_INTERNAL) {
 		return false;
 	}
 
@@ -2199,6 +2293,7 @@ ZEND_API void zend_initialize_class_data(zend_class_entry *ce, bool nullify_hand
 	zend_hash_init(&ce->function_table, 8, NULL, ZEND_FUNCTION_DTOR, persistent_hashes);
 
 	ce->doc_comment = NULL;
+	ce->module_name = NULL;
 
 	ZEND_MAP_PTR_INIT(ce->static_members_table, NULL);
 	ZEND_MAP_PTR_INIT(ce->mutable_data, NULL);
@@ -3020,7 +3115,19 @@ static void zend_compile_class_ref(znode *result, zend_ast *name_ast, uint32_t f
 	fetch_type = zend_get_class_fetch_type(zend_ast_get_str(name_ast));
 	if (ZEND_FETCH_CLASS_DEFAULT == fetch_type) {
 		result->op_type = IS_CONST;
-		ZVAL_STR(&result->u.constant, zend_resolve_class_name_ast(name_ast));
+		if (UNEXPECTED(name_ast->attr == ZEND_NAME_MODULE)) {
+			zend_lang_module *m;
+			zend_string *fqcn = zend_resolve_module_qualified_name(zend_ast_get_str(name_ast), &m);
+			/* Observation sites (instanceof) resolve outside the gate funnel
+			 * and must carry the plain FQCN; acquisition sites carry the
+			 * provenance marker. */
+			if (!(fetch_flags & (ZEND_FETCH_CLASS_NO_AUTOLOAD|ZEND_FETCH_CLASS_SILENT))) {
+				fqcn = zend_mark_module_provenance(m, fqcn);
+			}
+			ZVAL_STR(&result->u.constant, fqcn);
+		} else {
+			ZVAL_STR(&result->u.constant, zend_resolve_class_name_ast(name_ast));
+		}
 	} else {
 		zend_ensure_valid_class_fetch_type(fetch_type);
 		result->op_type = IS_UNUSED;
@@ -8205,7 +8312,7 @@ static void zend_compile_params(zend_ast *ast, zend_ast *return_type_ast, uint32
 		}
 	}
 
-	const uint32_t promotion_flags = ZEND_ACC_PPP_MASK | ZEND_ACC_PPP_SET_MASK | ZEND_ACC_READONLY | ZEND_ACC_FINAL;
+	const uint32_t promotion_flags = ZEND_ACC_PPP_MASK | ZEND_ACC_PPP_SET_MASK | ZEND_ACC_READONLY | ZEND_ACC_FINAL | ZEND_ACC_MODULE_INTERNAL;
 	for (i = 0; i < list->children; ++i) {
 		zend_ast *param_ast = list->child[i];
 		zend_ast *type_ast = param_ast->child[0];
@@ -8762,7 +8869,7 @@ static zend_string *zend_begin_method_decl(zend_op_array *op_array, zend_string 
 	}
 
 	if (in_interface) {
-		if (!(fn_flags & ZEND_ACC_PUBLIC)) {
+		if (!(fn_flags & ZEND_ACC_PUBLIC) || (fn_flags & ZEND_ACC_MODULE_INTERNAL)) {
 			zend_error_noreturn(E_COMPILE_ERROR, "Access type for interface method "
 				"%s::%s() must be public", ZSTR_VAL(ce->name), ZSTR_VAL(name));
 		}
@@ -9553,8 +9660,8 @@ static void zend_compile_prop_decl(zend_ast *ast, zend_ast *type_ast, uint32_t f
 		if (flags & ZEND_ACC_FINAL) {
 			zend_error_noreturn(E_COMPILE_ERROR, "Property in interface cannot be final");
 		}
-		if (flags & (ZEND_ACC_PROTECTED|ZEND_ACC_PRIVATE)) {
-			zend_error_noreturn(E_COMPILE_ERROR, "Property in interface cannot be protected or private");
+		if (flags & (ZEND_ACC_PROTECTED|ZEND_ACC_PRIVATE|ZEND_ACC_MODULE_INTERNAL)) {
+			zend_error_noreturn(E_COMPILE_ERROR, "Property in interface cannot be protected, private or internal");
 		}
 		if (flags & ZEND_ACC_ABSTRACT) {
 			zend_error_noreturn(E_COMPILE_ERROR,
@@ -10192,6 +10299,10 @@ static zend_class_entry *zend_compile_class_decl(znode *result, const zend_ast *
 		ce->doc_comment = zend_string_copy(decl->doc_comment);
 	}
 
+	if (FC(module_name)) {
+		ce->module_name = zend_string_copy(FC(module_name));
+	}
+
 	if (UNEXPECTED((decl->flags & ZEND_ACC_ANON_CLASS))) {
 		/* Serialization is not supported for anonymous classes */
 		ce->ce_flags |= ZEND_ACC_NOT_SERIALIZABLE;
@@ -10250,7 +10361,10 @@ static zend_class_entry *zend_compile_class_decl(znode *result, const zend_ast *
 					ce->parent_name, NULL, ZEND_FETCH_CLASS_NO_AUTOLOAD);
 
 				if (parent_ce
-				 && !zend_compile_ignore_class(parent_ce, ce->info.user.filename)) {
+				 && !zend_compile_ignore_class(parent_ce, ce->info.user.filename)
+				 /* Refuse to early-bind gated inheritance; the runtime link
+				  * path reports the module violation properly. */
+				 && !zend_module_inheritance_denied(ce, parent_ce, ce->parent_name)) {
 					if (zend_try_early_bind(ce, parent_ce, lcname, NULL)) {
 						zend_string_release(lcname);
 						return ce;
@@ -10830,6 +10944,151 @@ static void zend_compile_const_decl(zend_ast *ast) /* {{{ */
 	CG(active_op_array)->fn_flags |= ZEND_ACC_PTR_OPS;
 }
 /* }}}*/
+
+static void zend_compile_module_decl(const zend_ast *ast) /* {{{ */
+{
+	zend_string *name = zend_ast_get_str(ast->child[0]);
+
+	if (FC(module_name)) {
+		zend_error_noreturn(E_COMPILE_ERROR,
+			"Module membership was already declared as %s", ZSTR_VAL(FC(module_name)));
+	}
+
+	FC(module_name) = zend_new_interned_string(zend_string_copy(name));
+
+	/* The file's main op_array was initialized before this declaration was
+	 * seen; functions declared later pick the module up at init time. */
+	if (CG(active_op_array) && !CG(active_op_array)->module_name) {
+		CG(active_op_array)->module_name = zend_string_copy(FC(module_name));
+	}
+}
+/* }}} */
+
+static zend_string *zend_lang_module_local_name(const zend_string *fqmn) /* {{{ */
+{
+	const char *p = zend_memrchr(ZSTR_VAL(fqmn), '\\', ZSTR_LEN(fqmn));
+	if (p) {
+		return zend_string_init(p + 1, ZSTR_VAL(fqmn) + ZSTR_LEN(fqmn) - (p + 1), 0);
+	}
+	return zend_string_copy((zend_string *) fqmn);
+}
+/* }}} */
+
+static void zend_compile_module_def(const zend_ast *ast) /* {{{ */
+{
+	zend_string *local = zend_ast_get_str(ast->child[0]);
+	const zend_ast_list *list = zend_ast_get_list(ast->child[1]);
+	uint32_t i;
+
+	if (memchr(ZSTR_VAL(local), '\\', ZSTR_LEN(local))) {
+		zend_error_noreturn(E_COMPILE_ERROR,
+			"Module definition name must be a single identifier; "
+			"the enclosing namespace supplies the prefix of the FQMN");
+	}
+
+	zend_string *fqmn = zend_new_interned_string(zend_prefix_with_ns(local));
+	zend_array *exports = zend_new_array(list->children);
+
+	for (i = 0; i < list->children; i++) {
+		const zend_ast *export_ast = list->child[i];
+		zend_ast *name_ast = export_ast->child[0];
+		zend_ast *alias_ast = export_ast->child[1];
+		zend_string *fqcn;
+		zend_string *alias;
+		zval zv;
+
+		/* Export entries use use-statement semantics: written names are
+		 * absolute, independent of the current namespace. */
+		if (name_ast->attr == ZEND_NAME_FQ) {
+			fqcn = zend_resolve_class_name(zend_ast_get_str(name_ast), ZEND_NAME_FQ);
+		} else if (name_ast->attr == ZEND_NAME_NOT_FQ) {
+			fqcn = zend_string_copy(zend_ast_get_str(name_ast));
+		} else {
+			zend_error_noreturn(E_COMPILE_ERROR,
+				"Export entries must use plain, absolute class names");
+		}
+		fqcn = zend_new_interned_string(fqcn);
+
+		if (alias_ast) {
+			alias = zend_string_copy(zend_ast_get_str(alias_ast));
+		} else {
+			alias = zend_lang_module_local_name(fqcn);
+		}
+		alias = zend_new_interned_string(alias);
+
+		ZVAL_STR(&zv, fqcn);
+		if (!zend_hash_add(exports, alias, &zv)) {
+			zend_error_noreturn(E_COMPILE_ERROR,
+				"Module %s exports two members named %s; use 'as' to disambiguate",
+				ZSTR_VAL(fqmn), ZSTR_VAL(alias));
+		}
+		zend_string_release_ex(alias, 0);
+	}
+
+	zval fqmn_zv, exports_zv;
+	ZVAL_STR(&fqmn_zv, fqmn);
+	ZVAL_ARR(&exports_zv, exports);
+
+	zend_op *opline = get_next_op();
+	opline->opcode = ZEND_REGISTER_MODULE;
+	opline->op1_type = IS_CONST;
+	opline->op1.constant = zend_add_literal(&fqmn_zv);
+	opline->op2_type = IS_CONST;
+	opline->op2.constant = zend_add_literal(&exports_zv);
+	opline->result_type = IS_UNUSED;
+}
+/* }}} */
+
+static void zend_compile_use_module(const zend_ast *ast) /* {{{ */
+{
+	zend_string *fqmn = zend_ast_get_str(ast->child[0]);
+	zend_ast *alias_ast = ast->child[1];
+	zend_string *prefix;
+
+	if (FC(module_name) && zend_string_equals(FC(module_name), fqmn)) {
+		zend_error_noreturn(E_COMPILE_ERROR,
+			"Cannot import module %s from inside itself", ZSTR_VAL(fqmn));
+	}
+
+	zend_lang_module *m = zend_lang_module_get(fqmn);
+	if (!m && Z_TYPE(EG(lang_module_loader)) != IS_UNDEF) {
+		zval retval, arg;
+		ZVAL_STR_COPY(&arg, fqmn);
+		ZVAL_UNDEF(&retval);
+		if (call_user_function(NULL, NULL, &EG(lang_module_loader), &retval, 1, &arg) == SUCCESS) {
+			zval_ptr_dtor(&retval);
+		}
+		zval_ptr_dtor(&arg);
+		if (EG(exception)) {
+			zend_exception_error(EG(exception), E_ERROR);
+			return;
+		}
+		m = zend_lang_module_get(fqmn);
+	}
+	if (!m) {
+		zend_error_noreturn(E_COMPILE_ERROR,
+			"Module %s is not defined; load its definition file before this file "
+			"or register a loader with module_loader_register()", ZSTR_VAL(fqmn));
+	}
+
+	if (alias_ast) {
+		prefix = zend_string_copy(zend_ast_get_str(alias_ast));
+	} else {
+		prefix = zend_lang_module_local_name(fqmn);
+	}
+
+	if (!FC(module_imports)) {
+		FC(module_imports) = emalloc(sizeof(HashTable));
+		zend_hash_init(FC(module_imports), 8, NULL, NULL, 0);
+	}
+	if (!zend_hash_add_ptr(FC(module_imports), prefix, m)) {
+		zend_error_noreturn(E_COMPILE_ERROR,
+			"Cannot use module %s as %s because a module with that name is already imported",
+			ZSTR_VAL(fqmn), ZSTR_VAL(prefix));
+	}
+	zend_string_release_ex(prefix, 0);
+}
+/* }}} */
 
 static void zend_compile_namespace(const zend_ast *ast) /* {{{ */
 {
@@ -12883,6 +13142,15 @@ static void zend_compile_stmt(zend_ast *ast) /* {{{ */
 			break;
 		case ZEND_AST_NAMESPACE:
 			zend_compile_namespace(ast);
+			break;
+		case ZEND_AST_MODULE_DECL:
+			zend_compile_module_decl(ast);
+			break;
+		case ZEND_AST_MODULE_DEF:
+			zend_compile_module_def(ast);
+			break;
+		case ZEND_AST_USE_MODULE:
+			zend_compile_use_module(ast);
 			break;
 		case ZEND_AST_HALT_COMPILER:
 			zend_compile_halt_compiler(ast);
