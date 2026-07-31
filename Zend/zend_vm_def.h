@@ -3996,12 +3996,17 @@ ZEND_VM_HOT_OBJ_HANDLER(112, ZEND_INIT_METHOD_CALL, CONST|TMP|UNUSED|THIS|CV, CO
 		FREE_OP2();
 	}
 
-	if (UNEXPECTED(fbc->common.fn_flags2 & ZEND_ACC2_MUTATING)) {
+	if (UNEXPECTED(fbc->common.fn_flags2 & ZEND_ACC2_MUTATING)
+	 && (obj->ce->ce_flags2 & ZEND_ACC2_VALUE_CLASS)) {
 		/* A mutating callee writes its receiver in place, so the receiver
 		 * must be a slot this call site can lend exclusively. Separate a
 		 * variable receiver before the frame takes its reference; $this
 		 * chains stay borrowed (already exclusive in a mutating frame, and
-		 * the outermost frame's escape check covers the whole chain). */
+		 * the outermost frame's escape check covers the whole chain).
+		 * On a plain class receiver (possible only through interface- or
+		 * class-targeted mutating extension methods) the marker is inert:
+		 * reference semantics make every method effectively mutating, the
+		 * same rule traits apply to class consumers. */
 		if (OP1_TYPE == IS_CV) {
 			obj = zend_value_class_separate_container(object);
 		} else if (OP1_TYPE == IS_UNUSED) {
@@ -4167,8 +4172,10 @@ ZEND_VM_HANDLER(113, ZEND_INIT_STATIC_METHOD_CALL, UNUSED|CLASS_FETCH|CONST|VAR,
 	if (!(fbc->common.fn_flags & ZEND_ACC_STATIC)) {
 		if (Z_TYPE(EX(This)) == IS_OBJECT && instanceof_function(Z_OBJCE(EX(This)), ce)) {
 			if (UNEXPECTED(fbc->common.fn_flags2 & ZEND_ACC2_MUTATING)
+			 && (Z_OBJCE(EX(This))->ce_flags2 & ZEND_ACC2_VALUE_CLASS)
 			 && UNEXPECTED(!(EX(func)->common.fn_flags2 & ZEND_ACC2_MUTATING))) {
-				/* self::m() binds $this: same rule as $this->m(). */
+				/* self::m() binds $this: same rule as $this->m(). Inert on
+				 * plain class receivers (mutating extension methods). */
 				zend_throw_error(NULL,
 					"Cannot call mutating method %s::%s() on $this in a non-mutating method",
 					ZSTR_VAL(Z_OBJ(EX(This))->ce->name), ZSTR_VAL(fbc->common.function_name));
@@ -9409,6 +9416,20 @@ ZEND_VM_HANDLER(157, ZEND_FETCH_CLASS_NAME, CV|TMP|UNUSED|CLASS_FETCH, ANY)
 			ZVAL_STR_COPY(EX_VAR(opline->result.var), called_scope->name);
 			break;
 		case ZEND_FETCH_CLASS_TYPE_PARAM: {
+			zend_type type_arg;
+			if (opline->op1.num & ZEND_FETCH_CLASS_TYPE_PARAM_METHOD) {
+				/* Method-space parameter (U::class in function map<U>). */
+				const zend_op_array *fn = &EX(func)->op_array;
+				if (UNEXPECTED(EX(func)->type != ZEND_USER_FUNCTION || !fn->generic_binding)) {
+					SAVE_OPLINE();
+					zend_throw_error(NULL,
+						"Cannot resolve a method type parameter when no generic method binding is in scope");
+					ZVAL_UNDEF(EX_VAR(opline->result.var));
+					HANDLE_EXCEPTION();
+				}
+				type_arg = fn->generic_binding->args[
+					opline->op1.num >> ZEND_FETCH_CLASS_TYPE_PARAM_SHIFT];
+			} else {
 			if (UNEXPECTED(!scope->generic_binding)) {
 				SAVE_OPLINE();
 				zend_throw_error(NULL,
@@ -9418,7 +9439,8 @@ ZEND_VM_HANDLER(157, ZEND_FETCH_CLASS_NAME, CV|TMP|UNUSED|CLASS_FETCH, ANY)
 			}
 			uint32_t param_idx = zend_generics_binding_arg_index(
 				scope, fetch_type >> ZEND_FETCH_CLASS_TYPE_PARAM_SHIFT);
-			zend_type type_arg = scope->generic_binding->args[param_idx];
+			type_arg = scope->generic_binding->args[param_idx];
+			}
 			if (ZEND_TYPE_HAS_NAME(type_arg) && ZEND_TYPE_PURE_MASK(type_arg) == 0) {
 				ZVAL_STR_COPY(EX_VAR(opline->result.var), ZEND_TYPE_NAME(type_arg));
 			} else {
