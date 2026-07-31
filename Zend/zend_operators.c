@@ -21,6 +21,7 @@
 
 #include "zend.h"
 #include "zend_operators.h"
+#include "zend_generics.h"
 #include "zend_variables.h"
 #include "zend_globals.h"
 #include "zend_list.h"
@@ -2556,7 +2557,9 @@ ZEND_API bool ZEND_FASTCALL zend_class_implements_interface(const zend_class_ent
 			}
 		}
 	}
-	return 0;
+	/* Variance edge between instantiations of one variant interface
+	 * template; cheap flag tests on the failing path. */
+	return zend_generics_variant_implements(class_ce, interface_ce);
 }
 /* }}} */
 
@@ -2574,7 +2577,7 @@ ZEND_API bool ZEND_FASTCALL instanceof_function_slow(const zend_class_entry *ins
 				}
 			}
 		}
-		return 0;
+		return zend_generics_variant_implements(instance_ce, ce);
 	} else {
 		while (1) {
 			instance_ce = instance_ce->parent;

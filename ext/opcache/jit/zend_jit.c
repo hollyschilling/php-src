@@ -19,6 +19,7 @@
 #include "php_version.h"
 #include <ZendAccelerator.h>
 #include "zend_shared_alloc.h"
+#include "zend_generics.h"
 #include "Zend/zend_execute.h"
 #include "Zend/zend_vm.h"
 #include "Zend/zend_exceptions.h"
@@ -96,6 +97,10 @@ static zend_vm_opcode_handler_t zend_jit_loop_hot_counter_handler = NULL;
 static zend_vm_opcode_handler_t zend_jit_func_trace_counter_handler = NULL;
 static zend_vm_opcode_handler_t zend_jit_ret_trace_counter_handler = NULL;
 static zend_vm_opcode_handler_t zend_jit_loop_trace_counter_handler = NULL;
+/* Generic-family (template/clone shared-opcode) trace entry points: check the
+ * EXECUTING clone's extension for a compiled trace before counting. */
+static zend_vm_opcode_handler_t zend_jit_generic_func_trace_dispatch_handler = NULL;
+static zend_vm_opcode_handler_t zend_jit_generic_loop_trace_dispatch_handler = NULL;
 
 #if ZEND_VM_KIND == ZEND_VM_KIND_CALL || ZEND_VM_KIND == ZEND_VM_KIND_TAILCALL
 static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_CCONV zend_runtime_jit(ZEND_OPCODE_HANDLER_ARGS);
@@ -3318,6 +3323,46 @@ int zend_jit_op_array(zend_op_array *op_array, zend_script *script)
 		return SUCCESS;
 	}
 
+	if (UNEXPECTED((op_array->scope
+			&& (op_array->scope->ce_flags2
+				& (ZEND_ACC2_GENERIC_TEMPLATE|ZEND_ACC2_GENERIC_INSTANCE)))
+		|| (op_array->fn_flags2 & ZEND_ACC2_GENERIC_CONTEXT))
+	 && JIT_G(trigger) != ZEND_JIT_ON_HOT_TRACE) {
+		/* Function-mode JIT compiles ONE machine body from ONE signature and
+		 * installs it into the opcodes SHARED by every stamped instantiation
+		 * clone (or every per-creation closure copy), bypassing the clones'
+		 * substituted arg_info (a check compiled from the template rejects
+		 * everything: "must be of type T"). Keep these bodies interpreted;
+		 * hot-trace mode compiles per trace and dispatches per clone. */
+		ZEND_SET_FUNC_INFO(op_array, NULL);
+		return SUCCESS;
+	}
+
+	if (UNEXPECTED(op_array->scope
+			&& (op_array->scope->ce_flags2
+				& (ZEND_ACC2_GENERIC_TEMPLATE|ZEND_ACC2_GENERIC_INSTANCE)))
+	 && (CG(compiler_options) & ZEND_COMPILE_PRELOAD)
+	 && JIT_G(trigger) == ZEND_JIT_ON_HOT_TRACE) {
+		/* Preloaded generic families stay interpreted for now: the preload
+		 * optimize/persist/fix-up pipeline re-syncs instance method headers
+		 * from the template AFTER extensions would be attached, leaving
+		 * stale identity behind the shared dispatch handlers. Runtime
+		 * stamping (the common case) gets per-clone tracing. */
+		ZEND_SET_FUNC_INFO(op_array, NULL);
+		return SUCCESS;
+	}
+
+	if (UNEXPECTED(op_array->fn_flags2 & ZEND_ACC2_GENERIC_CONTEXT)
+	 && JIT_G(trigger) == ZEND_JIT_ON_HOT_TRACE) {
+		/* Closures declared in generic templates: per-creation copies carry
+		 * per-binding signatures but share these opcodes. With no trace
+		 * extension the recorder treats them as unknown callees (the
+		 * !jit_extension closure escape) and records THROUGH their bodies
+		 * with runtime-correct checks. */
+		ZEND_SET_FUNC_INFO(op_array, NULL);
+		return SUCCESS;
+	}
+
 	if (JIT_G(trigger) == ZEND_JIT_ON_FIRST_EXEC) {
 		zend_jit_op_array_extension *jit_extension;
 		zend_op *opline = op_array->opcodes;
@@ -3430,6 +3475,18 @@ int zend_jit_script(zend_script *script)
 			}
 		}
 	} else if (JIT_G(trigger) == ZEND_JIT_ON_SCRIPT_LOAD) {
+		for (i = 0; i < call_graph.op_arrays_count; i++) {
+			const zend_op_array *op_array = call_graph.op_arrays[i];
+			if ((op_array->scope
+				&& (op_array->scope->ce_flags2
+					& (ZEND_ACC2_GENERIC_TEMPLATE|ZEND_ACC2_GENERIC_INSTANCE)))
+			 || (op_array->fn_flags2 & ZEND_ACC2_GENERIC_CONTEXT)) {
+				/* Same exclusion as zend_jit_op_array: one machine body from
+				 * the template's signature would serve every clone through
+				 * the shared opcodes, bypassing substituted arg_info. */
+				ZEND_SET_FUNC_INFO((zend_op_array *) op_array, NULL);
+			}
+		}
 		for (i = 0; i < call_graph.op_arrays_count; i++) {
 			info = ZEND_FUNC_INFO(call_graph.op_arrays[i]);
 			if (info) {
@@ -3602,6 +3659,8 @@ static void zend_jit_init_handlers(void)
 		zend_jit_func_trace_counter_handler = (zend_vm_opcode_handler_t)zend_jit_stub_handlers[jit_stub_hybrid_func_trace_counter];
 		zend_jit_ret_trace_counter_handler = (zend_vm_opcode_handler_t)zend_jit_stub_handlers[jit_stub_hybrid_ret_trace_counter];
 		zend_jit_loop_trace_counter_handler = (zend_vm_opcode_handler_t)zend_jit_stub_handlers[jit_stub_hybrid_loop_trace_counter];
+		zend_jit_generic_func_trace_dispatch_handler = (zend_vm_opcode_handler_t)zend_jit_stub_handlers[jit_stub_hybrid_generic_func_trace_dispatch];
+		zend_jit_generic_loop_trace_dispatch_handler = (zend_vm_opcode_handler_t)zend_jit_stub_handlers[jit_stub_hybrid_generic_loop_trace_dispatch];
 #else
 		zend_jit_runtime_jit_handler = zend_runtime_jit;
 		zend_jit_profile_jit_handler = zend_jit_profile_helper;
@@ -3610,6 +3669,8 @@ static void zend_jit_init_handlers(void)
 		zend_jit_func_trace_counter_handler = zend_jit_func_trace_helper;
 		zend_jit_ret_trace_counter_handler = zend_jit_ret_trace_helper;
 		zend_jit_loop_trace_counter_handler = zend_jit_loop_trace_helper;
+		zend_jit_generic_func_trace_dispatch_handler = zend_jit_generic_func_trace_dispatch_helper;
+		zend_jit_generic_loop_trace_dispatch_handler = zend_jit_generic_loop_trace_dispatch_helper;
 #endif
 }
 
@@ -3868,6 +3929,13 @@ void zend_jit_startup(void *buf, size_t size, bool reattached)
 	}
 
 	zend_jit_trace_startup(reattached);
+
+	if (JIT_G(trigger) == ZEND_JIT_ON_HOT_TRACE) {
+		/* Stamped generic clones need their own trace extension (counters,
+		 * type sources, compiled-code slots); the stamper calls back here
+		 * for every clone it creates. */
+		zend_generics_jit_clone_hook = zend_jit_trace_clone_extension;
+	}
 
 	zend_jit_unprotect();
 	/* save JIT buffer pos */

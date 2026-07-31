@@ -38,6 +38,11 @@
 #define ZEND_FUNC_JIT_ON_HOT_COUNTERS      (1<<15) /* used by JIT */
 #define ZEND_FUNC_JIT_ON_HOT_TRACE         (1<<16) /* used by JIT */
 #define ZEND_FUNC_JITED                    (1<<17) /* used by JIT */
+#define ZEND_FUNC_GENERIC_TRACE            (1<<18) /* used by tracing JIT:
+	generic-family op_array (template or stamped clone); the trace extension
+	is allocated with per-clone compiled-code slots appended after trace_info,
+	entered through the generic dispatch handlers instead of patched opline
+	handlers (opcodes are shared between all clones of a template) */
 
 typedef struct _zend_func_info zend_func_info;
 typedef struct _zend_call_info zend_call_info;
