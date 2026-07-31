@@ -465,51 +465,301 @@ static bool zend_generics_type_uses_params(
 		ZEND_TYPE_NAME(type), template_ce->generic_params);
 }
 
+/* Append one class-shaped member to a rebuilt list, deduping plain names
+ * case-insensitively. Sub-lists (intersections inside a union) are kept as
+ * given. Ownership per take_refs: addref names when taking refs. */
+static void zend_generics_list_append(
+		zend_type *elems, uint32_t *n, zend_type m, bool take_refs)
+{
+	if (ZEND_TYPE_HAS_NAME(m)) {
+		for (uint32_t i = 0; i < *n; i++) {
+			if (ZEND_TYPE_HAS_NAME(elems[i])
+					&& zend_string_equals_ci(ZEND_TYPE_NAME(elems[i]), ZEND_TYPE_NAME(m))) {
+				return; /* duplicate member after substitution */
+			}
+		}
+		if (take_refs) {
+			zend_string_addref(ZEND_TYPE_NAME(m));
+		}
+	}
+	elems[(*n)++] = m;
+}
+
+/* Deep-copy an intersection sub-list into the arena. */
+static zend_type zend_generics_copy_sublist(zend_type src, bool take_refs)
+{
+	zend_type copy = src;
+	zend_generics_type_copy_ctor(&copy, take_refs);
+	return copy;
+}
+
+/* Rebuild a union/intersection type with this instantiation's arguments:
+ * bare parameter members splice the argument in (builtin members fold into
+ * the union's mask, a union argument's members splice, an intersection
+ * argument nests), symbolic composite members ("Vec<T>") rewrite at the
+ * string level, concrete members copy. Members dedupe after substitution.
+ * Shape violations (a builtin or union argument inside an intersection)
+ * throw; zend_generics_validate_substitution() runs the same rules before
+ * any clone exists, so mid-clone failures cannot leak partial CEs. */
+static bool zend_generics_substitute_list(
+		zend_type *type, const zend_class_entry *template_ce,
+		const zend_generic_binding *binding, const zend_string *display_name,
+		bool take_refs)
+{
+	const zend_type_list *old_list = ZEND_TYPE_LIST(*type);
+	bool is_inter = ZEND_TYPE_IS_INTERSECTION(*type);
+	uint32_t mask = ZEND_TYPE_FULL_MASK(*type) & _ZEND_TYPE_MAY_BE_MASK;
+	uint32_t kind_bits = ZEND_TYPE_FULL_MASK(*type)
+		& ~(_ZEND_TYPE_MAY_BE_MASK | _ZEND_TYPE_ARENA_BIT);
+	uint32_t cap = (old_list->num_types + 1) * (ZEND_GENERICS_MAX_ARGS + 1);
+	zend_type *elems = do_alloca(cap * sizeof(zend_type), use_heap);
+	uint32_t n = 0;
+	const zend_type *m;
+
+	ZEND_TYPE_LIST_FOREACH(old_list, m) {
+		if (ZEND_TYPE_HAS_LIST(*m)) {
+			/* nested intersection inside a union */
+			zend_type sub = *m;
+			if (zend_generics_type_uses_params(sub, template_ce)) {
+				if (!zend_generics_substitute_list(&sub, template_ce, binding,
+						display_name, take_refs)) {
+					goto fail;
+				}
+			} else {
+				sub = zend_generics_copy_sublist(*m, take_refs);
+			}
+			elems[n++] = sub;
+			continue;
+		}
+		zend_string *name = ZEND_TYPE_NAME(*m);
+		uint32_t idx = zend_generics_param_index(template_ce, name);
+		if (idx != (uint32_t) -1) {
+			uint32_t arg_start, arg_count;
+			zend_generics_param_arg_slice(template_ce->generic_params,
+				binding->num_args, idx, &arg_start, &arg_count);
+			ZEND_ASSERT(arg_count == 1 && "packs cannot appear in type positions");
+			const zend_type arg = binding->args[arg_start];
+			uint32_t arg_mask = ZEND_TYPE_PURE_MASK(arg);
+
+			if (is_inter) {
+				/* intersections take class-shaped arguments only */
+				if (arg_mask != 0 || (!ZEND_TYPE_HAS_NAME(arg)
+						&& !(ZEND_TYPE_HAS_LIST(arg) && ZEND_TYPE_IS_INTERSECTION(arg)))) {
+					zend_string *ts = zend_type_to_string(arg);
+					zend_throw_error(NULL,
+						"Cannot stamp %s: type argument %s for parameter %s "
+						"cannot be used inside an intersection type",
+						ZSTR_VAL(display_name), ZSTR_VAL(ts),
+						ZSTR_VAL(template_ce->generic_params->params[idx].name));
+					zend_string_release(ts);
+					goto fail;
+				}
+				if (ZEND_TYPE_HAS_NAME(arg)) {
+					zend_generics_list_append(elems, &n,
+						(zend_type) ZEND_TYPE_INIT_CLASS(ZEND_TYPE_NAME(arg), 0, 0),
+						take_refs);
+				} else {
+					const zend_type *ai;
+					ZEND_TYPE_LIST_FOREACH(ZEND_TYPE_LIST(arg), ai) {
+						zend_generics_list_append(elems, &n,
+							(zend_type) ZEND_TYPE_INIT_CLASS(ZEND_TYPE_NAME(*ai), 0, 0),
+							take_refs);
+					} ZEND_TYPE_LIST_FOREACH_END();
+				}
+				continue;
+			}
+
+			/* union member */
+			mask |= arg_mask;
+			if (ZEND_TYPE_HAS_NAME(arg)) {
+				zend_generics_list_append(elems, &n,
+					(zend_type) ZEND_TYPE_INIT_CLASS(ZEND_TYPE_NAME(arg), 0, 0),
+					take_refs);
+			} else if (ZEND_TYPE_HAS_LIST(arg)) {
+				if (ZEND_TYPE_IS_INTERSECTION(arg)) {
+					elems[n++] = zend_generics_copy_sublist(arg, take_refs);
+				} else {
+					const zend_type *ai;
+					ZEND_TYPE_LIST_FOREACH(ZEND_TYPE_LIST(arg), ai) {
+						if (ZEND_TYPE_HAS_LIST(*ai)) {
+							elems[n++] = zend_generics_copy_sublist(*ai, take_refs);
+						} else {
+							zend_generics_list_append(elems, &n,
+								(zend_type) ZEND_TYPE_INIT_CLASS(ZEND_TYPE_NAME(*ai), 0, 0),
+								take_refs);
+						}
+					} ZEND_TYPE_LIST_FOREACH_END();
+				}
+			}
+			/* pure-mask argument: folded above */
+			continue;
+		}
+		if (zend_generics_name_mentions_params(name, template_ce->generic_params)) {
+			zend_string *sub = zend_generics_request_type_name(
+				zend_generics_substitute_deferred_ref(name, template_ce, binding));
+			if (!take_refs) {
+				sub = zend_generics_binding_own_name(
+					(zend_generic_binding *) binding, sub);
+			}
+			zend_type nm = (zend_type) ZEND_TYPE_INIT_CLASS(sub, 0, 0);
+			/* ownership handled above; avoid the append addref for take_refs
+			 * (the substituted ref is already ours) */
+			for (uint32_t i = 0; i < n; i++) {
+				if (ZEND_TYPE_HAS_NAME(elems[i])
+						&& zend_string_equals_ci(ZEND_TYPE_NAME(elems[i]), sub)) {
+					if (take_refs) {
+						zend_string_release(sub);
+					}
+					nm.ptr = NULL;
+					break;
+				}
+			}
+			if (nm.ptr) {
+				elems[n++] = nm;
+			}
+			continue;
+		}
+		zend_generics_list_append(elems, &n,
+			(zend_type) ZEND_TYPE_INIT_CLASS(name, 0, 0), take_refs);
+	} ZEND_TYPE_LIST_FOREACH_END();
+
+	ZEND_ASSERT(n <= cap);
+	if (n == 0) {
+		ZEND_ASSERT(!is_inter && mask != 0);
+		type->ptr = NULL;
+		ZEND_TYPE_FULL_MASK(*type) = mask;
+	} else if (n == 1 && !ZEND_TYPE_HAS_LIST(elems[0])) {
+		type->ptr = ZEND_TYPE_NAME(elems[0]);
+		ZEND_TYPE_FULL_MASK(*type) = _ZEND_TYPE_NAME_BIT | mask;
+	} else {
+		zend_type_list *nl = zend_arena_alloc(&CG(arena), ZEND_TYPE_LIST_SIZE(n));
+		nl->num_types = n;
+		memcpy(nl->types, elems, n * sizeof(zend_type));
+		type->ptr = nl;
+		ZEND_TYPE_FULL_MASK(*type) = kind_bits | _ZEND_TYPE_ARENA_BIT | mask;
+	}
+	free_alloca(elems, use_heap);
+	return true;
+
+fail:
+	if (take_refs) {
+		for (uint32_t i = 0; i < n; i++) {
+			zend_generics_arg_release_names(elems[i]);
+		}
+	}
+	free_alloca(elems, use_heap);
+	return false;
+}
+
+/* Dry-run of the argument-dependent shape rules over one declared type:
+ * a builtin, name+builtin, or union argument may not land inside an
+ * intersection. Throws the same diagnostics substitution would. */
+static bool zend_generics_validate_type_substitution(
+		zend_type type, const zend_class_entry *template_ce,
+		const zend_generic_binding *binding, const zend_string *display_name)
+{
+	if (!ZEND_TYPE_HAS_LIST(type)) {
+		return true;
+	}
+	bool is_inter = ZEND_TYPE_IS_INTERSECTION(type);
+	const zend_type *m;
+	ZEND_TYPE_LIST_FOREACH(ZEND_TYPE_LIST(type), m) {
+		if (ZEND_TYPE_HAS_LIST(*m)) {
+			if (!zend_generics_validate_type_substitution(*m, template_ce,
+					binding, display_name)) {
+				return false;
+			}
+			continue;
+		}
+		if (!is_inter || !ZEND_TYPE_HAS_NAME(*m)) {
+			continue;
+		}
+		uint32_t idx = zend_generics_param_index(template_ce, ZEND_TYPE_NAME(*m));
+		if (idx == (uint32_t) -1) {
+			continue;
+		}
+		uint32_t arg_start, arg_count;
+		zend_generics_param_arg_slice(template_ce->generic_params,
+			binding->num_args, idx, &arg_start, &arg_count);
+		const zend_type arg = binding->args[arg_start];
+		if (ZEND_TYPE_PURE_MASK(arg) != 0 || (!ZEND_TYPE_HAS_NAME(arg)
+				&& !(ZEND_TYPE_HAS_LIST(arg) && ZEND_TYPE_IS_INTERSECTION(arg)))) {
+			zend_string *ts = zend_type_to_string(arg);
+			zend_throw_error(NULL,
+				"Cannot stamp %s: type argument %s for parameter %s "
+				"cannot be used inside an intersection type",
+				ZSTR_VAL(display_name), ZSTR_VAL(ts),
+				ZSTR_VAL(template_ce->generic_params->params[idx].name));
+			zend_string_release(ts);
+			return false;
+		}
+	} ZEND_TYPE_LIST_FOREACH_END();
+	return true;
+}
+
+/* Walk every declared type of the template (methods, properties, constants)
+ * BEFORE building the clone, so substitution cannot fail mid-stamp and
+ * abandon a partially-built class entry. */
+static bool zend_generics_validate_substitution(
+		const zend_class_entry *template_ce, const zend_generic_binding *binding,
+		const zend_string *display_name)
+{
+	zend_function *fn;
+	ZEND_HASH_MAP_FOREACH_PTR(&template_ce->function_table, fn) {
+		if (fn->type != ZEND_USER_FUNCTION || !fn->op_array.arg_info) {
+			continue;
+		}
+		const zend_op_array *op = &fn->op_array;
+		uint32_t total = op->num_args;
+		const zend_arg_info *base = op->arg_info;
+		if (op->fn_flags & ZEND_ACC_HAS_RETURN_TYPE) {
+			base--;
+			total++;
+		}
+		if (op->fn_flags & ZEND_ACC_VARIADIC) {
+			total++;
+		}
+		for (uint32_t i = 0; i < total; i++) {
+			if (!zend_generics_validate_type_substitution(base[i].type,
+					template_ce, binding, display_name)) {
+				return false;
+			}
+		}
+	} ZEND_HASH_FOREACH_END();
+
+	zend_property_info *prop;
+	ZEND_HASH_MAP_FOREACH_PTR(&template_ce->properties_info, prop) {
+		if (!zend_generics_validate_type_substitution(prop->type,
+				template_ce, binding, display_name)) {
+			return false;
+		}
+	} ZEND_HASH_FOREACH_END();
+
+	zend_class_constant *c;
+	ZEND_HASH_MAP_FOREACH_PTR(&template_ce->constants_table, c) {
+		if (!zend_generics_validate_type_substitution(c->type,
+				template_ce, binding, display_name)) {
+			return false;
+		}
+	} ZEND_HASH_FOREACH_END();
+	return true;
+}
+
 /* Copy `type` with substitution applied, owning all strings. Throws (and
- * returns false) if a scalar argument would land inside a composite type. */
+ * returns false) on argument-dependent shape violations; the pre-clone
+ * validation pass makes such failures unreachable during stamping. */
 static bool zend_generics_substitute_type(
 		zend_type *type, const zend_class_entry *template_ce,
 		const zend_generic_binding *binding, const zend_string *display_name,
 		bool take_refs)
 {
 	if (ZEND_TYPE_HAS_LIST(*type)) {
-		zend_generics_type_copy_ctor(type, take_refs);
-		zend_type *list_type;
-		ZEND_TYPE_LIST_FOREACH_MUTABLE(ZEND_TYPE_LIST(*type), list_type) {
-			if (ZEND_TYPE_HAS_NAME(*list_type)) {
-				if (zend_generics_name_mentions_params(
-						ZEND_TYPE_NAME(*list_type), template_ce->generic_params)) {
-					/* Rejected at declaration; backstop only. */
-					zend_throw_error(NULL,
-						"Cannot stamp %s: parameterized type %s is not supported "
-						"inside a composite type",
-						ZSTR_VAL(display_name), ZSTR_VAL(ZEND_TYPE_NAME(*list_type)));
-					return false;
-				}
-				uint32_t idx = zend_generics_param_index(template_ce, ZEND_TYPE_NAME(*list_type));
-				if (idx != (uint32_t) -1) {
-					uint32_t arg_start, arg_count;
-					zend_generics_param_arg_slice(template_ce->generic_params,
-						binding->num_args, idx, &arg_start, &arg_count);
-					ZEND_ASSERT(arg_count == 1 && "packs cannot appear in type positions");
-					if (!ZEND_TYPE_HAS_NAME(binding->args[arg_start])) {
-						zend_throw_error(NULL,
-							"Cannot stamp %s: scalar type argument for parameter %s "
-							"is used inside a composite type",
-							ZSTR_VAL(display_name),
-							ZSTR_VAL(template_ce->generic_params->params[idx].name));
-						return false;
-					}
-					if (take_refs) {
-						zend_string_release(ZEND_TYPE_NAME(*list_type));
-						list_type->ptr = zend_string_copy(ZEND_TYPE_NAME(binding->args[arg_start]));
-					} else {
-						list_type->ptr = ZEND_TYPE_NAME(binding->args[arg_start]);
-					}
-				}
-			}
-		} ZEND_TYPE_LIST_FOREACH_END();
-		return true;
+		if (!zend_generics_type_uses_params(*type, template_ce)) {
+			zend_generics_type_copy_ctor(type, take_refs);
+			return true;
+		}
+		return zend_generics_substitute_list(type, template_ce, binding,
+			display_name, take_refs);
 	}
 	if (!zend_generics_substitute_single(type, template_ce, binding, take_refs)) {
 		zend_generics_type_copy_ctor(type, take_refs);
@@ -1629,6 +1879,148 @@ static zend_string *zend_generics_rewrite_composite(
 	return smart_str_extract(&buf);
 }
 
+/* ---- Post-substitution canonicalization ------------------------------
+ * Compile-time canonicalization sorts DNF members, but label substitution
+ * replaces members in place: "vec<null|t>" with T=Foo becomes
+ * "vec<null|Foo>", while the directly-written spelling is "vec<Foo|null>".
+ * Both must be ONE class-table key, so every substituted name is re-sorted
+ * (and deduped: T=Foo turns "t|foo" into a duplicate) member-wise,
+ * recursively through nested argument lists. */
+
+static int zend_generics_canon_cmp(const void *a, const void *b)
+{
+	zend_string *sa = *(zend_string *const *) a;
+	zend_string *sb = *(zend_string *const *) b;
+	return zend_binary_strcasecmp(ZSTR_VAL(sa), ZSTR_LEN(sa), ZSTR_VAL(sb), ZSTR_LEN(sb));
+}
+
+static zend_string *zend_generics_canonicalize_slice(const char *s, size_t len);
+
+/* One argument slice: canonicalize nested lists first, then sort/dedupe its
+ * own top-level DNF members. Returns an owned string. */
+static zend_string *zend_generics_canonicalize_arg(const char *s, size_t len)
+{
+	if (!memchr(s, '|', len) && !memchr(s, '&', len)) {
+		return zend_generics_canonicalize_slice(s, len);
+	}
+	/* split top-level '|' (depth across <> and parens) */
+	zend_string *members[ZEND_GENERICS_MAX_ARGS];
+	uint32_t n = 0;
+	uint32_t depth = 0;
+	const char *end = s + len, *start = s;
+	bool top_union = false;
+	for (const char *p = s; p < end; p++) {
+		if (*p == '<' || *p == '(') depth++;
+		else if (*p == '>' || *p == ')') { if (depth) depth--; }
+		else if (*p == '|' && depth == 0) top_union = true;
+	}
+	const char sep = top_union ? '|' : '&';
+	depth = 0;
+	for (const char *p = s; ; p++) {
+		if (p == end || (*p == sep && depth == 0)) {
+			size_t mlen = p - start;
+			const char *m = start;
+			zend_string *canon;
+			if (top_union && mlen >= 2 && m[0] == '(' && m[mlen - 1] == ')') {
+				zend_string *inner = zend_generics_canonicalize_arg(m + 1, mlen - 2);
+				canon = zend_strpprintf(0, "(%s)", ZSTR_VAL(inner));
+				zend_string_release(inner);
+			} else if (!top_union) {
+				/* intersection member: plain (possibly nested) name */
+				canon = zend_generics_canonicalize_slice(m, mlen);
+			} else {
+				canon = zend_generics_canonicalize_arg(m, mlen);
+			}
+			bool dup = false;
+			for (uint32_t i = 0; i < n; i++) {
+				if (zend_string_equals_ci(members[i], canon)) {
+					dup = true;
+					break;
+				}
+			}
+			if (dup || n >= ZEND_GENERICS_MAX_ARGS) {
+				zend_string_release(canon);
+			} else {
+				members[n++] = canon;
+			}
+			if (p == end) break;
+			start = p + 1;
+		} else if (*p == '<' || *p == '(') {
+			depth++;
+		} else if (*p == '>' || *p == ')') {
+			if (depth) depth--;
+		}
+	}
+	if (n == 1) {
+		/* post-substitution duplicates collapsed to a single member: the
+		 * canonical spelling drops the composite (and its parens) */
+		zend_string *only = members[0];
+		if (ZSTR_LEN(only) >= 2 && ZSTR_VAL(only)[0] == '('
+				&& ZSTR_VAL(only)[ZSTR_LEN(only) - 1] == ')') {
+			zend_string *inner = zend_string_init(ZSTR_VAL(only) + 1, ZSTR_LEN(only) - 2, 0);
+			zend_string_release(only);
+			return inner;
+		}
+		return only;
+	}
+	qsort(members, n, sizeof(zend_string *), zend_generics_canon_cmp);
+	smart_str buf = {0};
+	for (uint32_t i = 0; i < n; i++) {
+		if (i) smart_str_appendc(&buf, sep);
+		smart_str_append(&buf, members[i]);
+		zend_string_release(members[i]);
+	}
+	return smart_str_extract(&buf);
+}
+
+/* Whole slice: copy verbatim, rewriting each <...> argument list through
+ * zend_generics_canonicalize_arg. */
+static zend_string *zend_generics_canonicalize_slice(const char *s, size_t len)
+{
+	const char *lt = memchr(s, '<', len);
+	if (!lt) {
+		return zend_string_init(s, len, 0);
+	}
+	smart_str buf = {0};
+	smart_str_appendl(&buf, s, lt - s + 1); /* base name + '<' */
+	const char *end = s + len;
+	const char *p = lt + 1, *start = p;
+	uint32_t depth = 0;
+	for (; ; p++) {
+		if (p >= end) break;
+		if ((*p == ',' || *p == '>') && depth == 0) {
+			zend_string *arg = zend_generics_canonicalize_arg(start, p - start);
+			smart_str_append(&buf, arg);
+			zend_string_release(arg);
+			smart_str_appendc(&buf, *p);
+			if (*p == '>') {
+				p++;
+				/* trailing text after the list (should not occur) */
+				if (p < end) smart_str_appendl(&buf, p, end - p);
+				break;
+			}
+			start = p + 1;
+		} else if (*p == '<' || *p == '(') {
+			depth++;
+		} else if (*p == '>' || *p == ')') {
+			depth--;
+		}
+	}
+	return smart_str_extract(&buf);
+}
+
+/* Canonicalize a substituted mangled name; consumes the input ref. */
+static zend_string *zend_generics_canonicalize_name(zend_string *name)
+{
+	if (!memchr(ZSTR_VAL(name), '|', ZSTR_LEN(name))
+			&& !memchr(ZSTR_VAL(name), '&', ZSTR_LEN(name))) {
+		return name;
+	}
+	zend_string *canon = zend_generics_canonicalize_slice(ZSTR_VAL(name), ZSTR_LEN(name));
+	zend_string_release(name);
+	return canon;
+}
+
 /* Substitute this instantiation's type arguments into a deferred inheritance
  * reference such as "App\Collection<T>" or "App\Merger<...Ts>" (bare args
  * only there, so substitution depth cannot grow across eager stamp chains),
@@ -1638,8 +2030,12 @@ static zend_string *zend_generics_substitute_deferred_ref(
 		zend_string *ref, const zend_class_entry *template_ce,
 		const zend_generic_binding *binding)
 {
-	return zend_generics_rewrite_composite(ZSTR_VAL(ref), ZSTR_LEN(ref),
-		template_ce->generic_params, binding, NULL, NULL);
+	/* Re-canonicalize after substitution: replacing a member label can
+	 * violate the sorted-member identity ("vec<null|t>" with T=Foo must
+	 * become "Vec<Foo|null>", not "Vec<null|Foo>") or create duplicates. */
+	return zend_generics_canonicalize_name(
+		zend_generics_rewrite_composite(ZSTR_VAL(ref), ZSTR_LEN(ref),
+			template_ce->generic_params, binding, NULL, NULL));
 }
 
 static bool zend_generics_ce_implements_ptr(
@@ -2045,6 +2441,13 @@ release_built_args:
 	if (!zend_generics_check_bounds(template_ce, binding, name, use_autoload)) {
 		/* Interning is a no-op at runtime under opcache, so the arg names
 		 * are real refs; the binding won't outlive this failure. */
+		for (uint32_t i = 0; i < num_args; i++) {
+			zend_generics_arg_release_names(binding->args[i]);
+		}
+		return NULL;
+	}
+
+	if (!zend_generics_validate_substitution(template_ce, binding, name)) {
 		for (uint32_t i = 0; i < num_args; i++) {
 			zend_generics_arg_release_names(binding->args[i]);
 		}
