@@ -765,6 +765,13 @@ static bool zend_call_get_hook(
 		return false;
 	}
 
+	/* The bracket also implements value-class get-hook semantics with no
+	 * eager copy: the addref makes the receiver shared, so a hook that
+	 * writes $this lazily separates into the hook frame (which owns and
+	 * releases the copy -- top frames honor RELEASE_THIS), the write is
+	 * discarded, and the bracket's release balances the refcount it added
+	 * to the untouched original. A read never mutates a value, and a
+	 * read-only hook -- the common case -- allocates nothing. */
 	GC_ADDREF(zobj);
 	zend_call_known_instance_method_with_0_params(get, zobj, rv);
 	OBJ_RELEASE(zobj);
@@ -793,10 +800,16 @@ try_again:
 		if (prop_info && UNEXPECTED(prop_info->flags & (ZEND_ACC_READONLY|ZEND_ACC_PPP_SET_MASK))
 		 && (type == BP_VAR_W || type == BP_VAR_RW || type == BP_VAR_UNSET)
 		 && ((prop_info->flags & ZEND_ACC_READONLY) || !zend_asymmetric_property_has_set_access(prop_info))) {
-			if (Z_TYPE_P(retval) == IS_OBJECT) {
+			if (Z_TYPE_P(retval) == IS_OBJECT
+			 && EXPECTED(!(Z_OBJCE_P(retval)->ce_flags2 & ZEND_ACC2_VALUE_CLASS))) {
 				/* For objects, W/RW/UNSET fetch modes might not actually modify object.
 				 * Similar as with magic __get() allow them, but return the value as a copy
-				 * to make sure no actual modification is possible. */
+				 * to make sure no actual modification is possible.
+				 *
+				 * Value-class (struct) instances are excluded: they are
+				 * values, so a nested write through the property modifies the
+				 * property's value -- exactly as for arrays -- and must fail
+				 * the same way. */
 				ZVAL_COPY(rv, retval);
 				retval = rv;
 				goto exit;
@@ -1254,9 +1267,24 @@ found:;
 			goto exit;
 		}
 
-		GC_ADDREF(zobj);
-		zend_call_known_instance_method_with_1_params(set, zobj, NULL, value);
-		OBJ_RELEASE(zobj);
+		if (UNEXPECTED(zobj->ce->ce_flags2 & ZEND_ACC2_VALUE_CLASS)) {
+			/* Value-class set hook: dispatch only ever reaches here after the
+			 * write site's caller-side separation, so the receiver is held
+			 * exclusively. Bind $this borrowed -- no addref -- so writes to the
+			 * backing store and sibling properties land in place and persist,
+			 * exactly as in the constructor. Inflating the refcount would make
+			 * the hook separate and silently discard its writes. The container
+			 * already keeps the instance alive across the call.
+			 *
+			 * $this may escape: like every mutating context except `new`-borne
+			 * construction, the escapee becomes an ordinary shared value,
+			 * separated from the receiver at the next write. */
+			zend_call_known_instance_method_with_1_params(set, zobj, NULL, value);
+		} else {
+			GC_ADDREF(zobj);
+			zend_call_known_instance_method_with_1_params(set, zobj, NULL, value);
+			OBJ_RELEASE(zobj);
+		}
 
 		variable_ptr = value;
 		goto exit;
@@ -1596,6 +1624,14 @@ ZEND_API void zend_std_unset_property(zend_object *zobj, zend_string *name, void
 	uintptr_t property_offset;
 	const zend_property_info *prop_info = NULL;
 	uint32_t *guard = NULL;
+
+	if (UNEXPECTED(zobj->ce->ce_flags2 & ZEND_ACC2_VALUE_CLASS)) {
+		/* A struct is a fixed, total shape; there is no absent state for a
+		 * slot to take (and no __unset to simulate one). */
+		zend_throw_error(NULL, "Cannot unset struct property %s::$%s",
+			ZSTR_VAL(zobj->ce->name), ZSTR_VAL(name));
+		return;
+	}
 
 	property_offset = zend_get_property_offset(zobj->ce, name, (zobj->ce->__unset != NULL), cache_slot, &prop_info, true);
 
@@ -2036,6 +2072,11 @@ exit:
 		zend_abstract_method_call(fbc);
 		fbc = NULL;
 	}
+	/* Mutating callees (struct constructors and `mutating` methods) resolve
+	 * normally here: ZEND_INIT_METHOD_CALL validates and separates the
+	 * receiver after resolution, and every route that cannot lend a writable
+	 * receiver (callables, dynamic calls, first-class callables) enforces its
+	 * own ban post-resolution. */
 	if (UNEXPECTED(!key)) {
 		ZSTR_ALLOCA_FREE(lc_method_name, use_heap);
 	}

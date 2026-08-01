@@ -56,9 +56,15 @@ ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_CCONV zend_jit_leave_func_helper_tai
 		}
 
 		zend_vm_stack_free_extra_args_ex(call_info, execute_data);
+		/* RELEASE_THIS and CLOSURE are independent for value-class receivers;
+		 * see zend_jit_leave_nested_func_helper. */
 		if (UNEXPECTED(call_info & ZEND_CALL_RELEASE_THIS)) {
 			OBJ_RELEASE(Z_OBJ(execute_data->This));
-		} else if (UNEXPECTED(call_info & ZEND_CALL_CLOSURE)) {
+		} else if ((call_info & ZEND_CALL_HAS_THIS)
+			 && UNEXPECTED(EX(func)->common.fn_flags2 & ZEND_ACC2_MUTATING)) {
+			zend_check_value_class_this_escape(execute_data);
+		}
+		if (UNEXPECTED(call_info & ZEND_CALL_CLOSURE)) {
 			OBJ_RELEASE(ZEND_CLOSURE_OBJECT(EX(func)));
 		}
 		if (UNEXPECTED(call_info & ZEND_CALL_HAS_EXTRA_NAMED_PARAMS)) {
@@ -90,6 +96,13 @@ ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_CCONV zend_jit_leave_func_helper_tai
 		if (UNEXPECTED(call_info & ZEND_CALL_HAS_EXTRA_NAMED_PARAMS)) {
 			zend_free_extra_named_params(EX(extra_named_params));
 		}
+		/* Top frames: see zend_jit_leave_top_func_helper. */
+		if (UNEXPECTED(call_info & ZEND_CALL_RELEASE_THIS)) {
+			OBJ_RELEASE(Z_OBJ(execute_data->This));
+		} else if ((call_info & ZEND_CALL_HAS_THIS)
+			 && UNEXPECTED(EX(func)->common.fn_flags2 & ZEND_ACC2_MUTATING)) {
+			zend_check_value_class_this_escape(execute_data);
+		}
 		if (UNEXPECTED(call_info & ZEND_CALL_CLOSURE)) {
 			OBJ_RELEASE(ZEND_CLOSURE_OBJECT(EX(func)));
 		}
@@ -107,9 +120,17 @@ ZEND_OPCODE_HANDLER_RET ZEND_FASTCALL zend_jit_leave_nested_func_helper(ZEND_OPC
 	}
 
 	zend_vm_stack_free_extra_args_ex(call_info, execute_data);
+	/* RELEASE_THIS and CLOSURE are independent: a closure bound to a value
+	 * class owns its (separated) $this while the closure object still needs
+	 * releasing. A borrowed $this without RELEASE_THIS may be a value-class
+	 * constructor's, which must pass the escape check. */
 	if (UNEXPECTED(call_info & ZEND_CALL_RELEASE_THIS)) {
 		OBJ_RELEASE(Z_OBJ(execute_data->This));
-	} else if (UNEXPECTED(call_info & ZEND_CALL_CLOSURE)) {
+	} else if ((call_info & ZEND_CALL_HAS_THIS)
+		 && UNEXPECTED(EX(func)->common.fn_flags2 & ZEND_ACC2_MUTATING)) {
+		zend_check_value_class_this_escape(execute_data);
+	}
+	if (UNEXPECTED(call_info & ZEND_CALL_CLOSURE)) {
 		OBJ_RELEASE(ZEND_CLOSURE_OBJECT(EX(func)));
 	}
 	if (UNEXPECTED(call_info & ZEND_CALL_HAS_EXTRA_NAMED_PARAMS)) {
@@ -151,6 +172,16 @@ ZEND_OPCODE_HANDLER_RET ZEND_FASTCALL zend_jit_leave_top_func_helper(ZEND_OPCODE
 	}
 	if (UNEXPECTED(call_info & ZEND_CALL_HAS_EXTRA_NAMED_PARAMS)) {
 		zend_free_extra_named_params(EX(extra_named_params));
+	}
+	/* See zend_jit_leave_nested_func_helper: top frames (zend_call_function)
+	 * bind $this borrowed, so RELEASE_THIS here means value-class separation
+	 * took ownership mid-call; HAS_THIS without it may be a value-class
+	 * constructor needing its escape check. */
+	if (UNEXPECTED(call_info & ZEND_CALL_RELEASE_THIS)) {
+		OBJ_RELEASE(Z_OBJ(execute_data->This));
+	} else if ((call_info & ZEND_CALL_HAS_THIS)
+		 && UNEXPECTED(EX(func)->common.fn_flags2 & ZEND_ACC2_MUTATING)) {
+		zend_check_value_class_this_escape(execute_data);
 	}
 	if (UNEXPECTED(call_info & ZEND_CALL_CLOSURE)) {
 		OBJ_RELEASE(ZEND_CLOSURE_OBJECT(EX(func)));
@@ -657,6 +688,12 @@ static int zend_jit_trace_record_fake_init_call_ex(zend_execute_data *call, zend
 			}
 		}
 
+		if (UNEXPECTED((call->func->common.fn_flags2 & ZEND_ACC2_MUTATING)
+		 && !(call->func->common.fn_flags & ZEND_ACC_CTOR))) {
+			/* A pending mutating method call: not traceable yet (see the
+			 * INIT_CALL recording site). Refuse the trace. */
+			return -1;
+		}
 		if (!func
 		 || (func->common.fn_flags & ZEND_ACC_CALL_VIA_TRAMPOLINE)
 		 || (func->common.fn_flags & ZEND_ACC_NEVER_CACHE)
@@ -1259,6 +1296,16 @@ zend_jit_trace_stop ZEND_FASTCALL zend_jit_trace_execute(zend_execute_data  *ex,
 					}
 				}
 
+				if (UNEXPECTED((EX(call)->func->common.fn_flags2 & ZEND_ACC2_MUTATING)
+				 && !(EX(call)->func->common.fn_flags & ZEND_ACC_CTOR))) {
+					/* A mutating method call: neither specialization nor the
+					 * despecialized TSSA call bookkeeping model its borrowed
+					 * receiver yet. End the trace before the call; the site
+					 * runs interpreted. (Constructor frames come from NEW,
+					 * whose borrowed binding the JIT already handles.) */
+					stop = ZEND_JIT_TRACE_STOP_INTERPRETER;
+					break;
+				}
 				if (!func
 				 || (func->common.fn_flags & ZEND_ACC_CALL_VIA_TRAMPOLINE)
 				 || (func->common.fn_flags & ZEND_ACC_NEVER_CACHE)

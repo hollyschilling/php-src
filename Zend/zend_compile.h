@@ -340,10 +340,14 @@ typedef struct _zend_oparray_context {
 /* Class cannot be serialized or unserialized             |     |     |     */
 #define ZEND_ACC_NOT_SERIALIZABLE        (1 << 29) /*  X  |     |     |     */
 /*                                                        |     |     |     */
-/* Class Flags 2 (ce_flags2) (unused: 0-31)               |     |     |     */
+/* Class Flags 2 (ce_flags2) (unused: 1-31)               |     |     |     */
 /* =========================                              |     |     |     */
 /*                                                        |     |     |     */
-/* #define ZEND_ACC2_EXAMPLE             (1 << 0)      X  |     |     |     */
+/* Value class: instances have value semantics. Assignment  |     |     |   */
+/* shares, and the write-path handlers separate a shared    |     |     |   */
+/* instance before mutating it (copy-on-write, as for       |     |     |   */
+/* arrays). Declared in userland with the `struct` keyword. |     |     |   */
+#define ZEND_ACC2_VALUE_CLASS            (1 << 0) /*   X  |     |     |     */
 /*                                                        |     |     |     */
 /* Function Flags (unused: 30)                            |     |     |     */
 /* ==============                                         |     |     |     */
@@ -412,11 +416,20 @@ typedef struct _zend_oparray_context {
 /* op_array uses strict mode types                        |     |     |     */
 #define ZEND_ACC_STRICT_TYPES            (1U << 31) /*    |  X  |     |     */
 /*                                                        |     |     |     */
-/* Function Flags 2 (fn_flags2) (unused: 1-31)            |     |     |     */
+/* Function Flags 2 (fn_flags2) (unused: 2-31)            |     |     |     */
 /* ============================                           |     |     |     */
 /*                                                        |     |     |     */
 /* Function forbids dynamic calls                         |     |     |     */
 #define ZEND_ACC2_FORBID_DYN_CALLS       (1 << 0)  /*     |  X  |     |     */
+/*                                                        |     |     |     */
+/* Mutating value-class callee: binds $this borrowed and    |     |     |   */
+/* exclusive, writes persist in the caller's slot, and the  |     |     |   */
+/* frame is escape-checked at exit. Set today only on a     |     |     |   */
+/* value class's constructor (object creation lends the     |     |     |   */
+/* fresh slot); the `mutating` method modifier will set it  |     |     |   */
+/* from the declaration. Implies a value-class scope, so    |     |     |   */
+/* call sites need no separate ce_flags2 test.              |     |     |   */
+#define ZEND_ACC2_MUTATING               (1 << 2)  /*     |  X  |     |     */
 
 #define ZEND_ACC_PPP_MASK  (ZEND_ACC_PUBLIC | ZEND_ACC_PROTECTED | ZEND_ACC_PRIVATE)
 #define ZEND_ACC_PPP_SET_MASK  (ZEND_ACC_PUBLIC_SET | ZEND_ACC_PROTECTED_SET | ZEND_ACC_PRIVATE_SET)
@@ -932,6 +945,8 @@ zend_ast *zend_ast_append_str(zend_ast *left, zend_ast *right);
 zend_ast *zend_negate_num_string(zend_ast *ast);
 uint32_t zend_add_class_modifier(uint32_t flags, uint32_t new_flag);
 uint32_t zend_add_anonymous_class_modifier(uint32_t flags, uint32_t new_flag);
+bool zend_validate_struct_modifiers(uint32_t flags);
+ZEND_COLD void zend_unexpected_class_modifiers(uint32_t flags, const char *decl_kind);
 uint32_t zend_add_member_modifier(uint32_t flags, uint32_t new_flag, zend_modifier_target target);
 
 uint32_t zend_modifier_token_to_flag(zend_modifier_target target, uint32_t flags);
@@ -1218,6 +1233,24 @@ static zend_always_inline bool zend_check_arg_send_type(const zend_function *zf,
 
 /* Used to disallow pipes with arrow functions that lead to confusing parse trees. */
 #define ZEND_PARENTHESIZED_ARROW_FUNC 1
+
+/* Marks a ZEND_AST_CLASS decl declared with the `struct` keyword. The marker
+ * cannot travel in zend_ast_decl.flags, which is OR'd wholesale into ce_flags;
+ * it becomes ZEND_ACC2_VALUE_CLASS in ce_flags2 at compile time. */
+#define ZEND_CLASS_IS_VALUE_CLASS 1
+
+/* Marks a ZEND_AST_METHOD decl carrying the postfix `mutating` receiver
+ * marker. Travels on the decl attr because fn_flags has no free bits
+ * (bit 31 is ZEND_ACC_STRICT_TYPES); it becomes ZEND_ACC2_MUTATING in
+ * fn_flags2 at compile time. */
+#define ZEND_FN_IS_MUTATING (1 << 1)
+
+/* extended_value of ZEND_FETCH_THIS when its result is the container of a
+ * property write (BP_VAR_W/RW/UNSET). Only then may the handler produce an
+ * INDIRECT into the frame's This slot for a value-class receiver: property
+ * write consumers dereference INDIRECT, argument sends and other IS_VAR
+ * consumers do not. */
+#define ZEND_FETCH_THIS_WRITE 1
 
 /* For "use" AST nodes and the seen symbol table */
 #define ZEND_SYMBOL_CLASS    (1<<0)

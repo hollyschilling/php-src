@@ -1575,6 +1575,21 @@ OPTIONAL_WHITESPACE_OR_COMMENTS ({WHITESPACE}|{MULTI_LINE_COMMENT}|{SINGLE_LINE_
 	RETURN_TOKEN_WITH_IDENT(T_ENUM);
 }
 
+/*
+ * As for enum: the struct keyword must be followed by whitespace and another
+ * identifier, so that struct remains usable as a class, function, constant,
+ * method and property name.
+ */
+<ST_IN_SCRIPTING>"struct"{WHITESPACE_OR_COMMENTS}("extends"|"implements") {
+	yyless(6);
+	RETURN_TOKEN_WITH_STR(T_STRING, 0);
+}
+
+<ST_IN_SCRIPTING>"struct"{WHITESPACE_OR_COMMENTS}[a-zA-Z_\x80-\xff] {
+	yyless(6);
+	RETURN_TOKEN_WITH_IDENT(T_STRUCT);
+}
+
 <ST_IN_SCRIPTING>"extends" {
 	RETURN_TOKEN_WITH_IDENT(T_EXTENDS);
 }

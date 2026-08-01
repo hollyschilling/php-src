@@ -155,6 +155,60 @@ static zend_function* ZEND_FASTCALL zend_jit_find_method_helper(zend_object *obj
 		zend_init_func_run_time_cache(&fbc->op_array);
 	}
 
+	if (UNEXPECTED(fbc->common.fn_flags2 & ZEND_ACC2_MUTATING)) {
+		/* VM parity for ZEND_INIT_METHOD_CALL's receiver validation. The
+		 * emitted code rebinds $this from *obj_ptr after this call, so
+		 * separating the caller's slot here gives the frame the same
+		 * exclusive receiver the interpreter would bind. Mutating callees
+		 * never enter the inline cache, so this resolver is their only
+		 * JIT route. */
+		if (opline->op1_type == IS_CV && EXPECTED(obj == *obj_ptr)) {
+			zval *container = EX_VAR(opline->op1.var);
+			ZVAL_DEREF(container);
+			if (EXPECTED(Z_TYPE_P(container) == IS_OBJECT)
+			 && EXPECTED(Z_OBJ_P(container) == obj)) {
+				*obj_ptr = zend_value_class_separate_container(container);
+				return fbc;
+			}
+		} else if ((opline->op1_type & (IS_VAR|IS_TMP_VAR)) && EXPECTED(obj == *obj_ptr)) {
+			zval *op1 = EX_VAR(opline->op1.var);
+
+			if (Z_TYPE_P(op1) == IS_INDIRECT) {
+				/* Scoped borrow (ZEND_FETCH_OBJ_RECEIVER): separate the value
+				 * in the caller's slot. The emitted INDIRECT deref already
+				 * addref'd the object for the frame, so the separation must
+				 * read the slot's count alone: drop that reference around it,
+				 * then restore it on the ORIGINAL either way --
+				 * zend_jit_find_method_tmp_helper swaps the accounting when
+				 * *obj_ptr changed (addref new, delref old), and the restored
+				 * reference is what its delref consumes; when nothing was
+				 * separated it simply remains the frame's reference. */
+				zval *slot = Z_INDIRECT_P(op1);
+
+				if (EXPECTED(Z_TYPE_P(slot) == IS_OBJECT)
+				 && EXPECTED(Z_OBJ_P(slot) == obj)) {
+					GC_DELREF(obj);
+					*obj_ptr = zend_value_class_separate_container(slot);
+					GC_ADDREF(obj);
+					return fbc;
+				}
+			}
+		} else if (opline->op1_type == IS_UNUSED) {
+			if (EXPECTED(EX(func)->common.fn_flags2 & ZEND_ACC2_MUTATING)) {
+				/* Nested $this chain: stays borrowed. */
+				return fbc;
+			}
+			zend_throw_error(NULL,
+				"Cannot call mutating method %s::%s() on $this in a non-mutating method",
+				ZSTR_VAL(obj->ce->name), ZSTR_VAL(fbc->common.function_name));
+			return NULL;
+		}
+		zend_throw_error(NULL,
+			"Cannot call mutating method %s::%s() on this receiver; assign it to a variable first",
+			ZSTR_VAL(obj->ce->name), ZSTR_VAL(fbc->common.function_name));
+		return NULL;
+	}
+
 	if (UNEXPECTED(obj != *obj_ptr)) {
 		return fbc;
 	}
@@ -233,6 +287,7 @@ static zend_function* ZEND_FASTCALL zend_jit_find_static_method_helper(zend_exec
 			return NULL;
 		}
 		if (EXPECTED(!(fbc->common.fn_flags & (ZEND_ACC_CALL_VIA_TRAMPOLINE|ZEND_ACC_NEVER_CACHE))) &&
+			EXPECTED(!(fbc->common.fn_flags2 & ZEND_ACC2_MUTATING)) &&
 			EXPECTED(!(fbc->common.scope->ce_flags & ZEND_ACC_TRAIT))) {
 			CACHE_POLYMORPHIC_PTR(opline->result.num, ce, fbc);
 		}
@@ -252,6 +307,21 @@ static zend_function* ZEND_FASTCALL zend_jit_find_static_method_helper(zend_exec
 		if (EXPECTED(fbc->type == ZEND_USER_FUNCTION) && UNEXPECTED(!RUN_TIME_CACHE(&fbc->op_array))) {
 			zend_init_func_run_time_cache(&fbc->op_array);
 		}
+	}
+
+	/* VM parity for ZEND_INIT_STATIC_METHOD_CALL's $this rule: a mutating
+	 * callee that would bind the frame's $this requires a mutating caller
+	 * (the borrow convention). Receivers that do not bind $this fall through
+	 * to the ordinary non-static-call error. */
+	if (UNEXPECTED(fbc->common.fn_flags2 & ZEND_ACC2_MUTATING)
+	 && !(fbc->common.fn_flags & ZEND_ACC_STATIC)
+	 && Z_TYPE(EX(This)) == IS_OBJECT
+	 && instanceof_function(Z_OBJCE(EX(This)), ce)
+	 && UNEXPECTED(!(EX(func)->common.fn_flags2 & ZEND_ACC2_MUTATING))) {
+		zend_throw_error(NULL,
+			"Cannot call mutating method %s::%s() on $this in a non-mutating method",
+			ZSTR_VAL(Z_OBJ(EX(This))->ce->name), ZSTR_VAL(fbc->common.function_name));
+		return NULL;
 	}
 
 	return fbc;
@@ -2316,6 +2386,18 @@ static void ZEND_FASTCALL zend_jit_fetch_obj_w_slow(zend_object *zobj)
 		return;
 	}
 
+	if (UNEXPECTED((opline->extended_value & ZEND_FETCH_OBJ_FLAGS) == ZEND_FETCH_REF)
+	 && UNEXPECTED(zobj->ce->ce_flags2 & ZEND_ACC2_VALUE_CLASS)) {
+		/* The VM's FETCH_OBJ_W runs zend_handle_fetch_obj_flags on this path;
+		 * this cold-cache helper skips the flags entirely, so the struct
+		 * interior-reference ban must be repeated here or a REF-flagged fetch
+		 * through a cold cache slot hands out a real slot pointer. */
+		zend_throw_error(NULL, "Cannot take reference to struct property %s::$%s",
+			ZSTR_VAL(zobj->ce->name), ZSTR_VAL(name));
+		ZVAL_ERROR(result);
+		return;
+	}
+
 	ZVAL_INDIRECT(result, retval);
 
 	/* Support for typed properties */
@@ -2364,6 +2446,17 @@ static void ZEND_FASTCALL zend_jit_check_array_promotion(zval *val, zend_propert
 
 static void ZEND_FASTCALL zend_jit_create_typed_ref(zval *val, zend_property_info *prop, zval *result)
 {
+	if (UNEXPECTED(prop->ce->ce_flags2 & ZEND_ACC2_VALUE_CLASS)) {
+		/* References into a struct's interior are banned; mirror the VM's
+		 * ZEND_FETCH_REF handling (zend_handle_fetch_obj_flags). Both JIT
+		 * FETCH_OBJ_W ref-emission sites route through this helper, and a
+		 * struct property always has a prop_info, so this is the single
+		 * chokepoint. Call sites sync EX(opline) before calling. */
+		zend_throw_error(NULL, "Cannot take reference to struct property %s::$%s",
+			ZSTR_VAL(prop->ce->name), ZSTR_VAL(prop->name));
+		ZVAL_ERROR(result);
+		return;
+	}
 	if (!Z_ISREF_P(val)) {
 		ZVAL_NEW_REF(val, val);
 		ZEND_REF_ADD_TYPE_SOURCE(Z_REF_P(val), prop);
@@ -2688,6 +2781,23 @@ static void ZEND_FASTCALL zend_jit_invalid_property_incdec(zval *container, cons
 	if (opline->op1_type == IS_VAR) {
 		zval_ptr_dtor_nogc(EX_VAR(opline->op1.var));
 	}
+}
+
+/* Value-class (struct) copy-on-write, from JIT-compiled object-write fast
+ * paths. Emitted before the property address is computed, so every downstream
+ * path (inline store, typed-prop helper, slow-path helper) operates on the
+ * separated instance. Cannot throw (struct __clone is banned), so call sites
+ * need no exception check. Returns the object to operate on. */
+static zend_object* ZEND_FASTCALL zend_jit_value_class_separate(zval *container)
+{
+	return zend_value_class_separate_container(container);
+}
+
+/* Leave-time check for JIT-compiled value-class constructors: mirrors the
+ * HAS_THIS-without-RELEASE_THIS branch of the VM's leave paths. */
+static void ZEND_FASTCALL zend_jit_value_class_this_escape(zend_execute_data *execute_data)
+{
+	zend_check_value_class_this_escape(execute_data);
 }
 
 static void ZEND_FASTCALL zend_jit_invalid_property_assign(zval *container, const char *property_name)

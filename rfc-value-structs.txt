@@ -1,0 +1,411 @@
+====== PHP RFC: Structs ======
+  * Version: 0.20
+  * Date: 2026-07-14
+  * Author: Holly Schilling, holly.a.schilling@outlook.com
+  * Status: Draft
+  * Implementation: tbd
+  * Discussion thread: tbd
+  * Voting thread: tbd
+
+===== Introduction =====
+
+PHP has value semantics and it has typed, named shapes — but never in the same construct. Arrays are values: assignment copies, callees cannot mutate a caller's array, and twenty years of copy-on-write engineering make those copies cheap. But arrays are shapeless — no declared fields, no types, no name for ''instanceof'' or a parameter list. Objects are the opposite: named, typed, fixed shape — and always handles, so every consumer of a ''Point'' shares mutations with every other holder, and defensive ''clone'' calls litter code that wanted a value.
+
+This RFC proposes **structs**: named, typed, fixed-shape **values**. A struct is declared like a class, but instances copy on assignment the way arrays do:
+
+<code php>
+struct Point {
+    public function __construct(
+        public float $x,
+        public float $y,
+    ) {}
+}
+
+$a = new Point(1.0, 2.0);
+$b = $a;            // $b is a copy
+$b->x = 5.0;
+var_dump($a->x);    // float(1.0) — $a unaffected
+</code>
+
+A struct is **a class-like construct with value semantics**: properties (including hooks), constants, a constructor, methods, interfaces, and traits — everything a class has, minus exactly the features that contradict values. Each exclusion is a consequence, not a scoping choice. No ''extends'', because a hierarchy is a relationship between handles: struct behavior is composed with traits and its contracts declared with interfaces. No identity, because "same instance" is meaningless when any assignment may copy: ''==='' compares contents. No references into the interior and no state-simulating or lifecycle magic methods, because a slot inside a value has no stable name, a total, declared shape leaves nothing for ''<nowiki>__get</nowiki>'' to simulate, and a copy or lifetime hook would observe the engine's sharing decisions; the pure-read magic methods remain available (see Magic methods).
+
+Methods come in two kinds, and the kind is declared. An **uncolored** method binds ''$this'' by value: its mutations are local to the call, and an intentional update is ''return $this'' — the wither idiom. A method marked **''mutating''** updates its caller's value in place: the call site lends the receiver's own storage slot — a //scoped borrow// that begins at the call and ends with it — after making the value exclusive, so the one copy-on-write rule (see Semantics) is what makes the writes both persistent and safe. ''<nowiki>$this->list->append($item)</nowiki>'' — a struct collection held in a class property, updated in place — works; nothing about it is visible to any other copy of the list. The marker is part of the signature, placed where no other token can appear, and reserves no name (see Mutating methods).
+
+Structs are **shallow** values, matching arrays: a property holding an object copies the //handle//, so the object is shared between copies. A struct whose properties hold only structs and scalars is a value all the way down. ''readonly'' is orthogonal: it freezes the struct's own slots after construction — every copy anyone observes satisfies the constructor's invariants, and a frozen value never physically separates — but it does not reach into a held object's interior (the established shallow-freeze rule).
+
+===== Proposal =====
+
+==== Syntax ====
+
+=== Declaring structs ===
+
+<code php>
+struct Money {
+    const DEFAULT_CURRENCY = 'USD';
+
+    public int $amount = 0;
+    public string $currency = self::DEFAULT_CURRENCY;
+}
+
+struct Span {
+    public function __construct(
+        public readonly int $start,
+        public readonly int $length,
+    ) {}
+}
+</code>
+
+  * ''struct'' is a **contextual keyword**, lexed as ''T_STRUCT'' only when followed by an identifier (the ''enum''/''extension''/''surface'' lookahead technique). ''struct'' remains valid as a class, function, constant, method, and property name.
+  * A struct body may contain: **property declarations** — including **property hooks** (see Property hooks and ''$this'') — **class constants**, **methods** (see Uncolored methods and ''$this''), and at most one ''<nowiki>__construct</nowiki>'' (constructor property promotion is supported and expected to be the common form).
+  * Methods take the usual visibility modifiers and may be ''static'' (no receiver, no special semantics). An instance method is either **uncolored** — mutation of ''$this'' is local to the call — or marked **''mutating''** and updates its receiver in place (see Mutating methods). A ''static'' method cannot be ''mutating'' (no receiver), and no magic method other than ''<nowiki>__construct</nowiki>'' may be (their dispatch routes cannot lend a receiver).
+  * ''implements'' is permitted (see Interfaces). ''use'' of traits is permitted (see Traits). ''extends'' is not: structs are implicitly ''final'' and root — there is no struct hierarchy; behavior is composed, never inherited.
+  * Every property must carry a **declared type** (''mixed'' is permitted). A struct is a shape; an untyped slot is a compile-time error.
+  * Property modifiers: ''public'' and ''private'' are both meaningful — ''private'' composes with methods and hooks for encapsulated values (''protected'' is accepted but, with no hierarchy, equivalent to ''private''). ''readonly'' is permitted per property, and ''readonly struct'' marks every property readonly (mirroring ''readonly class''). Asymmetric visibility (''private(set)'') is permitted.
+  * **Not permitted** (compile-time errors): ''static'' properties, abstract methods, the magic methods incompatible with the value model (see Magic methods), and ''extends''. ''#[AllowDynamicProperties]'' on a struct is likewise a compile-time error. These bans apply to trait-composed members identically (see Traits).
+
+=== Mutating methods ===
+
+A method that updates its receiver declares so in its signature, with the marker **between the parameter list and the return type**:
+
+<code php>
+struct IntList {
+    /** @var int[] */
+    public array $items = [];
+
+    public function append(int $v) mutating: void {
+        $this->items[] = $v;
+    }
+
+    public function count(): int {
+        return count($this->items);
+    }
+}
+</code>
+
+The return type remains as optional as on any method — the colon belongs to the return type, not the marker — so ''function append(int $v) mutating { ... }'' is equally valid.
+
+That position is chosen because it is **unambiguous**: after a parameter list, no identifier can otherwise appear, so ''mutating'' parses contextually — case-insensitively, like every keyword — and **reserves nothing**. Functions, classes, methods, constants, and types named ''mutating'' all continue to work; there is no backward-compatibility surface at all. A misspelling gets a targeted compile-time diagnostic ("expecting ''mutating''"), and the marker in any other position (modifier lists, plain functions, closures) is an ordinary parse error. The declaration-side marker also means every call site reads as a plain method call — no call-site sigil — which is what allows the engine to prepare the receiver //after// resolving the callee (see Mutating methods and the scoped borrow).
+
+''mutating'' is permitted in structs, in traits (validated when the trait flattens into a consumer; a class consuming a trait's //concrete// mutating method is a link-time error, while an //abstract// colored requirement is valid anywhere), and on **interface requirements**, where it declares permission rather than obligation (see the effect-variance rules in Mutating methods and the scoped borrow). ''<nowiki>__construct</nowiki>'' is implicitly mutating — the marker on it is accepted as documentation — and **set hooks are implicitly mutating with no syntax at all**: a setter mutates by definition (see Property hooks and ''$this'').
+
+=== Magic methods ===
+
+Magic methods are classified by the value model, not banned wholesale. The **pure reads** — ''<nowiki>__toString</nowiki>'', ''<nowiki>__invoke</nowiki>'', ''<nowiki>__debugInfo</nowiki>'', ''<nowiki>__call</nowiki>'', and ''<nowiki>__callStatic</nowiki>'' — bind ''$this'' by value like any uncolored method (mutations are local to the call and discarded) and are permitted; ''<nowiki>__toString</nowiki>'' therefore satisfies ''Stringable''. ''<nowiki>__construct</nowiki>'' is the built-in **mutating** member: ''new'' allocates the instance and lends it to the constructor, and an explicit ''<nowiki>$s->__construct(...)</nowiki>'' is simply a named mutating call — legal on any receiver a mutating call accepts, separating a shared value and re-initializing the caller's copy in place. No other magic method may be ''mutating'': ''<nowiki>__invoke</nowiki>'' dispatches through ''$obj()'', ''<nowiki>__toString</nowiki>'' through string casts, ''<nowiki>__call</nowiki>'' through trampolines — routes that never pass the one call site able to lend a receiver, so their pure-read binding is not negotiable.
+
+The rest are excluded as consequences: ''<nowiki>__clone</nowiki>'' and ''<nowiki>__destruct</nowiki>'' are copy/lifetime hooks that would observe copy-on-write separation — the engine creates and destroys copies on its own schedule, so their timing would leak sharing decisions; ''<nowiki>__get</nowiki>''/''<nowiki>__set</nowiki>''/''<nowiki>__isset</nowiki>''/''<nowiki>__unset</nowiki>'' simulate state a total shape does not have (and ''unset()'' of a struct property is itself an error); ''<nowiki>__sleep</nowiki>''/''<nowiki>__wakeup</nowiki>'' are the legacy serialization pair. ''<nowiki>__serialize</nowiki>''/''<nowiki>__unserialize</nowiki>'' are deferred with the serialization wire-format decision — ''<nowiki>__unserialize</nowiki>'' is a mutating initializer and needs the mutating call convention plumbed through the unserializer — and ''<nowiki>__set_state</nowiki>'' is deferred with the ''var_export()'' question (both in Open Issues).
+
+=== Using structs ===
+
+A struct name is an ordinary class-like name: autoloadable, namespaced, usable in parameter, return, property, and union/nullable types, and true for ''instanceof''. Construction uses ''new''. No new expression syntax is introduced.
+
+==== Semantics ====
+
+=== Value semantics ===
+
+The observable rule: **a struct variable behaves like an array variable.** Assignment, argument passing (by value), ''return'', and storing into an array element or an object/struct property all give the destination its **own copy**. No mutation of a struct is ever visible through another variable:
+
+<code php>
+function widen(Span $s): Span {
+    $s->length += 10;   // mutates the local copy only
+    return $s;
+}
+$a = new Span(0, 5);
+$b = widen($a);         // $a->length is still 5
+</code>
+
+Under the hood copies are **copy-on-write** (see Implementation); a struct that is never written after sharing is never physically duplicated. Nested struct writes separate every level of the access path, exactly as ''<nowiki>$arr[0][1] = $v</nowiki>'' does for arrays:
+
+<code php>
+struct Rect { public function __construct(public Point $min, public Point $max) {} }
+$r2 = $r1;
+$r2->max->x = 9.0;      // separates $r2, then $r2->max; $r1 fully unaffected
+</code>
+
+=== Shallow copy and interior mutability ===
+
+Copying a struct copies scalar and struct properties by value and object properties by **handle** — the same rule PHP arrays have always applied to their elements. Two copies of a struct with a ''Logger $logger'' property share the logger; ''<nowiki>$copy->logger->flush()</nowiki>'' is visible everywhere. This matches ''readonly'' properties' established shallow-freeze semantics and C# value types. Deep immutability is explicitly a non-goal (see Rejected Features); a fully-value struct is obtained by composing structs, scalars, and ''readonly''.
+
+=== Mutation and references ===
+
+  * ''<nowiki>$s->prop = $v</nowiki>'' is permitted (subject to ''readonly''/visibility) and affects only ''$s''. Compound assignment (''+='', ''??='') and increment/decrement follow.
+  * **References into a struct are forbidden**: ''<nowiki>$r = &$s->prop</nowiki>'', ''foreach ($s as &$v)'', and passing ''<nowiki>$s->prop</nowiki>'' to a by-ref parameter are runtime ''Error''s. A reference is a second name for a slot; a slot inside a value has no stable identity to name. (Hooked properties established the same ban and its error-message pattern.)
+  * A struct **variable** may still be referenced — ''<nowiki>$r = &$s</nowiki>'', a by-reference parameter (''<nowiki>function move(Point &$p, float $dx)</nowiki>''), or by-ref ''foreach'' over an //array// of structs: the reference names the storage slot, not the value's interior, and behaves exactly as a reference to an array variable does. All names sharing the reference share one value; a write through any of them is visible to all of them (separation still protects unrelated copies of the object). This is the same bargain ''sort($array)'' has always offered. For //functions//, a by-ref parameter remains the caller-visible-update route, as for arrays; for //methods//, ''mutating'' is the first-class form of the same intent, declared on the receiver's own type.
+  * ''unset($s->prop)'' is an ''Error'' (the shape is fixed); ''unset($s)'' is ordinary.
+  * **Writing an undeclared property is a runtime ''Error''** ("Cannot create dynamic property"), enforced by ''ZEND_ACC_NO_DYNAMIC_PROPERTIES'' — the same behavior readonly classes and enums have today, and necessarily a runtime check (''<nowiki>$s->$name = $v</nowiki>''). There is no ''<nowiki>__set</nowiki>'' to intercept the write; the declared shape is total.
+  * **Reading an undeclared property is likewise a runtime ''Error''**, with the same carve-out the existing undefined-property warning has: ''isset()'', ''empty()'', and ''?<nowiki>?</nowiki>'' continue to report ''false''/the default silently. Null-coalescing exists to probe possibly-absent members; plain reads of a typo'd name on a shape have no meaning.
+
+=== Equality and identity ===
+
+Structs have **no identity** — only contents.
+
+  * ''=='' — structural: same struct type and pairwise ''=='' properties (the standard object comparison already does this).
+  * ''==='' — also structural: same struct type and pairwise ''==='' properties. There is no "same instance" notion to compare; two separately-built ''Point(1,2)'' are identical.
+  * ''spl_object_id()''/''spl_object_hash()'' throw ''TypeError'' for structs; ''WeakMap'' keys and ''WeakReference::create()'' reject structs. Each would otherwise leak the engine's CoW sharing as observable behavior.
+  * Relational operators (''<'', ''<='', ...) and ''sort()'' over structs: unspecified in this RFC; they currently fall back to the standard object comparison (Open Issue).
+
+=== $this: one rule ===
+
+Five contexts run user code with ''$this'' bound to a struct: the constructor, uncolored methods, ''mutating'' methods, and a property's ''get'' and ''set'' hooks. One refcount-driven rule generates every behavior, with no per-context special cases:
+
+//Writes to a **shared** ''$this'' separate it into the frame and die with it; writes to an **exclusive** ''$this'' land in place and persist.//
+
+  * **Mutating contexts hold ''$this'' exclusively at entry, because their call sites make it so.** The constructor's instance exists nowhere else yet; a set hook dispatches only from a write site where caller-side separation has already run; and a ''mutating'' method call separates its receiver in the caller's own slot before binding the frame (see Mutating methods and the scoped borrow). Their writes persist — these are the contexts that initialize and update values.
+  * **Uncolored methods** and **''get'' hooks** hold one reference among several, so their first write separates and their changes are discarded at return. These are the contexts that read and derive; their intentional update is ''return $this''.
+
+Exclusivity is never asserted, only //manufactured// — by allocation, by prior separation, or by separating at the call — and then the one rule does the rest. The sections below give each context its details.
+
+=== The constructor, escape, and where escape is simply legal ===
+
+The constructor runs with ''$this'' bound to an instance that is **unshared by definition**, so writes through ''$this'' (including promotion) land in place and persist without any special casing.
+
+''$this'' **escaping** — being stored into a registry, a closure, a global — makes the escapee share the value with the receiver. For every mutating context //except// ''new''-borne construction, that is **allowed and well-defined**: at return, the escapee is an ordinary alias of the receiver's value, exactly as if it had been assigned after the call, and the next write through either name separates them. Enforcement was considered and rejected for these contexts because it cannot be honest there: by method return, the in-place mutations have already landed in the caller's slot, so a throw would condemn side effects it cannot undo. Allowing the escape costs nothing — copy-on-write absorbs it — with one deferred-copy caveat, stated plainly: writes made //after// the escape, in the remainder of the same call, remain visible through the escapee until the call returns. That is the same bargain CoW strikes everywhere (the copy happens at the write boundary, not the assignment), and flagging escapes for stricter hygiene is static-analysis territory, like the get-hook cache rule.
+
+''new''-borne construction is the one exception, because it is the one **transactional** context: if the constructor throws, the instance is discarded — nothing half-initialized is ever observable. So the classic footgun keeps its loud failure: **when a ''new''-invoked constructor returns, the instance's refcount must not have grown; otherwise ''Error'' is thrown**. Registering ''$this'' during construction is a deeply ingrained object pattern that //must// break visibly for values — the silent alternative is a registry holding an alias that detaches on the next write, a bug no one should have to diagnose. Swift prevents the equivalent statically; PHP enforces it with one refcount comparison at return, on this route only. Explicit re-invocation (''<nowiki>$s->__construct(...)</nowiki>'') runs as an ordinary mutating call and follows the method rule: escape allowed.
+
+<code php>
+struct Bad {
+    public function __construct(public int $n) {
+        Registry::add($this);   // Error on return -- only from `new`
+    }
+}
+</code>
+
+=== Uncolored methods and $this ===
+
+''$this'' in an uncolored struct method is bound **by value** — the [[rfc:extension_methods_scalars|scalar extension methods]] receiver rule verbatim: an ordinary by-value local, exactly like a parameter. Every mutation through ''$this'' is local to the call and discarded at return, on every receiver alike — locals, nested properties, temporaries, call results. No lvalue analysis is needed, because the receiver is never an lvalue. In the engine, uncolored struct methods are **ordinary method calls**: the by-value behavior emerges from the write-site separation rule, not from new dispatch machinery.
+
+''return $this'' returns the method's modified copy — wither-style updates with no ceremony:
+
+<code php>
+struct Point {
+    public function __construct(public float $x, public float $y) {}
+
+    public function length(): float {
+        return sqrt($this->x ** 2 + $this->y ** 2);
+    }
+
+    public function moved(float $dx, float $dy): Point {
+        $this->x += $dx;      // mutates the method's private copy
+        $this->y += $dy;
+        return $this;         // returns that copy
+    }
+}
+
+$q = $p->moved(1.0, 0.0);     // $p untouched
+</code>
+
+  * **First-class callables** work; the receiver is captured by value, so each invocation operates on a copy of the captured value.
+  * **''Closure::bind()''** to a struct instance is permitted with no special rules: the one rule is //receiver-driven, not frame-driven// — any frame writing to a shared value-class ''$this'' separates — so a bound closure gets method semantics automatically.
+  * ''$this'' **escaping** a method (into a closure, a global, a return value) is harmless at the language level: every escapee holds a value snapshot, courtesy of separation-on-write. It does make non-engine mutation paths reachable, which is why reflection-based writes throw (see Interop).
+
+=== Mutating methods and the scoped borrow ===
+
+A ''mutating'' method updates the value its caller names. The call site — and only the call site — can make that safe, because only it owns the receiver's storage slot. So a mutating call does caller-side what every struct write does caller-side: **after resolving the callee and seeing the ''mutating'' marker, the call site separates the receiver in its own slot and lends the now-exclusive value to the frame** — a //scoped borrow// that begins at the call and ends with it. Writes land in place; every other copy was protected by the separation; the caller's variable holds the updated value at return.
+
+<code php>
+$list = new IntList();
+$list->append(1);            // in place: $list is the sole holder
+$snapshot = $list;
+$list->append(2);            // separates first: $snapshot still has 1 element
+</code>
+
+**Which receivers can lend:**
+
+  * **Variables** — always. A shared value separates first (that //is// copy-on-write); references to a variable deref to the storage cell, so by-ref parameters and by-ref ''foreach'' elements work identically.
+  * **''$this''**, inside another mutating context (a mutating method, the constructor, a set hook) — the chain stays borrowed, already exclusive by construction. In an //uncolored// method or a get hook, ''$this'' is a by-value copy with no slot behind it: calling a mutating method on it is an ''Error'', not a silent discard.
+  * **Properties** — the flagship: ''<nowiki>$this->list->append($item)</nowiki>''. A property read compiled in receiver position hands the call site the //slot// rather than a copy, when the slot is **lendable**: the mutation is a write to the containing object's property, so the slot must be writable from the calling scope (''private(set)'' and ''readonly'' refuse, exactly as a direct write would) and **anchored** — a class container anchors from anywhere (reference semantics above the value boundary); a struct container anchors only while it is itself an exclusively held, writable root, such as ''$this'' inside a mutating frame or a sole-reference variable. An unlendable slot degrades to an ordinary read — pure-read calls through the same syntax never notice — and the mutating call reports the failure.
+  * **Everything else** — call results, arbitrary expressions, dynamic method names, interiors of //shared// structs — is an ''Error'': //"Cannot call mutating method ... on this receiver; assign it to a variable first."// The advice is the fix: materialize the copy, mutate it, store it back — the same idiom arrays have always required, made explicit exactly where value semantics genuinely demands a copy.
+
+Chains follow from the anchor rule: ''<nowiki>$app->svc->list->append(...)</nowiki>'' works when the middles are classes; a chain through a //shared struct// middle refuses (updating it in place would be visible through the sharer — the refusal is the value model working). Inside a struct's own mutating methods, ''$this''-rooted chains are exclusive by construction and simply work.
+
+**Routes that cannot lend a receiver are closed, loudly.** Callables hold their own handle to the receiver — there is no caller slot for a later invocation to separate — so ''call_user_func([$s, 'append'])'', ''Closure::fromCallable'', array-callable invocation, and first-class callables of mutating methods all throw (and ''is_callable'' reports ''false''). Reflection's ''invoke'' passes the receiver as an argument, which shares it, so the exclusivity gate rejects it. These are not arbitrary bans: each is the statement that a mutating method's receiver must be storage the call can prepare, and a callable is precisely a call whose receiver was captured earlier.
+
+**Effect variance: one rule on every edge.** Interfaces (and traits' abstract members) may declare a requirement ''mutating'' — permission, not obligation. The whole system is a single rule, enforced at link time on every subtyping edge (''implements'', interface extending interface, trait abstract requirements): **along an edge, ''mutating'' may be removed, never added.** Spelled out:
+
+  - Class methods are always uncolored (a reference receiver is always writable; the marker would be meaningless).
+  - An **uncolored requirement** is a guarantee, satisfiable only by uncolored implementations — a mutating implementation under it is a link-time error (the constructor is exempt: interfaces may require ''<nowiki>__construct</nowiki>'', which is unreachable through interface dispatch).
+  - A **colored requirement** is permission, satisfiable by anything: a mutating struct method that uses it, an uncolored struct method that declines it, or any class method.
+
+The payoff is that **retrofitting existing interfaces is backward-compatible by construction**: color ''Iterator::next()'' and every existing class implementation — uncolored, by the first rule — continues to satisfy it, unchanged and unrecompiled. Dispatch needs nothing new either: the receiver rules follow the //resolved// callee, and the dominant interface-typed receiver shapes (parameters, properties) are precisely the lendable ones. The honest residue is stated in Interfaces: behind one colored contract, a class implementer's mutations are visible to every alias of the receiver and a struct implementer's only to the caller's copy — the value/reference distinction is polymorphism-visible, exactly as in Swift — and an //unlendable// receiver errors only when the runtime type turns out to be a struct.
+
+**In the engine**, the marker travels as a function flag; mutating callees are excluded from the method inline caches so no cached fast path can bypass receiver validation; and the receiver-position property read compiles to a dedicated opcode that yields the slot for lendable struct values and behaves as a plain read otherwise — measured at parity with the ordinary read for class-typed values, interpreted and JIT-compiled alike. The one added cost anywhere is a single flag test per resolved method call.
+
+=== Property hooks and $this ===
+
+A property's hooks split ''$this'' by access direction — the same split the engine's own access paths have:
+
+  * **''set'' hooks are implicitly ''mutating'' — with no syntax, because a setter mutates by definition.** A set hook only ever dispatches from a write site, and on a struct the caller-side separation has already run by dispatch time — ''$this'' is the exclusively-held instance sitting in the caller's slot. Writes through ''$this'' (the backing store, sibling properties) land in place and **persist**, and the hook may make nested mutating calls (''<nowiki>$this->recompute()</nowiki>'') like any mutating context. ''$this'' may escape a set hook under the general rule (see The constructor, escape, and where escape is simply legal).
+  * **''get'' hooks receive a copy** — the uncolored binding, unchanged. Writes through ''$this'' affect a private copy and are **always discarded** at hook exit, deterministically, shared receiver or not; a nested //mutating// call on ''$this'' is an ''Error''. The honest consequence, stated plainly: lazy-caching get hooks do not persist their cache on a struct. **A read never mutates a value.** The discard is deliberately silent — a diagnostic was considered and rejected (see Rejected Features); this is a static-analysis rule, not an engine rule.
+
+=== Interfaces ===
+
+A struct may declare ''implements''. Every requirement a struct implements is satisfied by an //uncolored// method — the effect-variance rule is **enforced at link time**: a ''mutating'' method cannot satisfy an interface requirement, because interface callers dispatch without knowing the receiver rules (see Mutating methods and the scoped borrow). ''instanceof'' is true; interface-typed parameters, returns, and properties accept the struct; the value crosses those boundaries **as a copy**, like every other boundary.
+
+What this serves well: value-shaped contracts. ''Countable'' and ''JsonSerializable'' are pure reads; ''IteratorAggregate'' works //correctly// (the returned iterator is a separate object — the struct is never mutated); userland reader/calculator interfaces compose naturally.
+
+Interfaces may declare **mutating requirements** (see Mutating methods and the scoped borrow), and this proposal colors the first core interface: **''Iterator::next()'' and ''Iterator::rewind()'' are mutating requirements.** Every existing class implementation is uncolored and continues to satisfy them — the retrofit changes nothing for classes — while a struct may now implement ''Iterator'' with mutating advances, and ''foreach'' works:
+
+<code php>
+struct Range implements Iterator {
+    public function __construct(private int $pos = 0, private int $end = 3) {}
+    public function current(): mixed { return $this->pos; }
+    public function key(): mixed     { return $this->pos; }
+    public function next() mutating: void   { $this->pos++; }
+    public function rewind() mutating: void { $this->pos = 0; }
+    public function valid(): bool    { return $this->pos < $this->end; }
+}
+foreach (new Range() as $v) { /* advances */ }
+</code>
+
+**''foreach'' iterates its own copy of a struct iterator.** The loop machinery holds the iterator in engine-owned storage with no caller slot to lend, so it takes the value route: at loop entry the struct is copied into exclusively-held iterator state, the mutating advances write in place there, and the caller's value is never consumed — iterating ''$it'' twice yields the same sequence twice, deterministically, shared or not. That is value semantics being //more// predictable than references, not a restriction. A manual ''while ($it->valid()) { ...; $it->next(); }'' loop, by contrast, drives the caller's copy through ordinary mutating calls — both idioms compose.
+
+The residue is small and author-visible: a struct may still (legally — variance permits declining permission) implement ''Iterator'' with an //uncolored// ''next()'', which type-checks, discards its writes, and never advances. The colored interface makes the fix declarable and the mistake lintable. ''ArrayAccess'' remains uncolored for now: its write half rides dimension-write syntax whose separation protocol is Future Scope, and coloring it before that protocol exists would advertise capability the engine does not yet deliver.
+
+Identity-keyed use of interface-typed values (''WeakMap'' keys, ''spl_object_id'') continues to **throw** for structs: the failure stays loud, never silent.
+
+=== Traits ===
+
+A struct may ''use'' traits. Structs have no ''extends'' by design, so traits are their **only implementation-reuse mechanism** — composition over inheritance is not a preference here but the entire story. Trait flattening happens at link time, before any instance exists, so the shape remains fixed, total, and typed; it is closed at **link time** rather than lexically, exactly as for classes today.
+
+  * **Uniformity is the rule.** A trait method, once flattened, is indistinguishable from a method declared in the struct body — including its ''$this'' semantics. Writes to ''$this'' are local to the call; ''return $this'' works; the wither idiom composes. A trait written //for structs// needs no special dialect:
+
+<code php>
+trait Movable {
+    public function moved(float $dx, float $dy): static {
+        $this->x += $dx;
+        $this->y += $dy;
+        return $this;
+    }
+}
+
+struct Point {
+    use Movable;
+    public function __construct(public float $x, public float $y) {}
+}
+</code>
+
+  * **Traits carry the color.** A trait may declare ''function increment() mutating'' — the marker travels with the flattened method, so a trait written for structs states its intent and gets in-place semantics in every struct consumer; a //class// consuming a trait's mutating method is a link-time error, and trait aliasing cannot add or remove the marker. Trait-supplied set hooks become implicitly mutating on the struct's copy of the hook, never on the trait's own (the same trait may serve classes).
+  * **No mutation error at composition time for uncolored trait methods — deliberately.** Statically distinguishing "mutates expecting persistence" (the class-era trap) from "mutates its copy and returns it" (the wither idiom, above) is a semantic judgment, not a syntactic one; any op-array scan for ''$this'' writes would reject ''Movable'' — the canonical good citizen. The trap now has a declared fix — mark the method ''mutating'' — and the residual (an unmarked trait method that expected persistence) stays linter territory.
+  * **Structs make traits safer than classes do.** A trait method touching a property the composing struct did not declare is a loud runtime ''Error'' under the undeclared-access rules — where a class warns or fabricates a dynamic property. Trait **properties** flatten into the shape and must satisfy the typed-shape rule at link time (an untyped trait property is a composition error), and hooked trait properties follow the direction-split ''$this'' rules unchanged.
+  * The struct member bans apply at flattening: a trait supplying forbidden magic methods or static properties is a link-time error in composition (a trait-supplied pure-read magic method, e.g. ''<nowiki>__toString</nowiki>'', composes and yields ''Stringable'' as usual). A trait's abstract requirements must be satisfied by concrete struct members, as for classes; a trait-supplied ''<nowiki>__construct</nowiki>'' counts as the struct's one constructor. The standard ''insteadof''/''as'' conflict machinery applies unchanged.
+
+=== clone and clone-with ===
+
+''clone $s'' is legal and semantically a no-op (the value //is// its copy); it exists so generic code need not special-case structs. It requires no magic-method support: cloning is the ''clone_obj'' handler's raw property copy, and ''<nowiki>__clone()</nowiki>'' is an optional hook most classes never define. For structs that hook is not merely banned but **impossible in principle**: every assignment is conceptually a copy, so copy-time user code would have to run at CoW separation — an engine-scheduled event whose timing depends on refcounts and optimization — and would leak sharing decisions as observable behavior, the same property the identity ban protects. A value type with an observable copy hook is not a value type (C# forbids struct copy constructors on identical grounds). The struct copy is therefore, unconditionally, the raw slot copy.
+
+The **clone-with** syntax is the idiomatic update for ''readonly'' structs and works unchanged — the updates are ordinary property writes to the fresh, exclusively-held instance (set hooks fire and persist, per the one rule):
+
+<code php>
+$moved = clone($span, [ 'start' => $span->start + 1 ]);
+</code>
+
+=== Interop with existing functionality ===
+
+  * ''(array)'' cast and ''get_object_vars()'' yield the property map, as for objects.
+  * ''var_dump''/''print_r'' display structs like objects, labelled ''struct''.
+  * ''serialize()''/''unserialize()'' and ''json_encode()'' behave as for plain objects; unserialization bypasses the constructor (standard behavior), so the escape check does not run — the wire format cannot express aliasing into a fresh value anyway.
+  * ''match'', ''??'', ''isset()'' on properties: ordinary object behavior.
+  * ''Closure::bind()'' to a struct instance follows method semantics automatically (see Uncolored methods and ''$this'').
+  * **Reflection-based property writes throw** for value-class instances: ''<nowiki>ReflectionProperty::setValue()</nowiki>'' and its relatives receive the object, not its storage slot, so they cannot participate in separation — a write through them would be visible through every sharer. Reflection reads are unrestricted; ''<nowiki>ReflectionMethod::invoke()</nowiki>'' of a mutating method follows the shared-receiver gate (see Mutating methods and the scoped borrow).
+  * **Extension methods** (the [[rfc:extension_methods|Extension Methods]] family, if adopted) apply to structs with no special rules: the declared receiver variable is an ordinary by-value local, which is exactly struct copy semantics — the extension method operates on a copy and mutations are local, indistinguishable from a native struct method's ''$this''. Extensions therefore let consumers add methods to structs they do not own, under the same value rules as the struct's own.
+
+===== Backward Incompatible Changes =====
+
+''struct'' becomes a contextual keyword via the lookahead technique already used for ''enum''; classes, functions, constants, methods, and properties named ''struct'' continue to parse. The residual break is the pathological ''struct'' //as a class name followed by instantiation-like syntax at statement level//, which does not occur in analyzed public code. ''mutating'' reserves **nothing**: it parses contextually in a position where no identifier can otherwise appear, so every existing use of the name — functions, classes, methods, constants, types — is untouched. No API, ABI, or behavioral changes affect existing classes, arrays, or objects.
+
+===== Proposed PHP Version(s) =====
+
+PHP 9.0. The implementation builds on the direction-aware property resolution refactor (in 8.6): undeclared-access enforcement hangs off its access-kind resolution, and value-class separation composes with — and must be respected by — its populated-write-slot fast paths, including the planned JIT granted-store inlining.
+
+===== RFC Impact =====
+
+==== To SAPIs ====
+None.
+
+==== To Existing Extensions ====
+
+The extension ABI is unchanged: structs are ordinary ''zend_object''s of a flagged class — **no new zval type is introduced**. Extensions receive struct arguments as objects and may read them normally. An extension that writes properties on a received struct through the object API would bypass value semantics; the flag (''ZEND_ACC2_VALUE_CLASS'', in ''ce_flags2'') is documented so property-writing extensions can check it, mirroring how ''ZEND_ACC_READONLY_CLASS'' is handled today.
+
+==== To Opcache ====
+
+The class flag persists like other ''zend_class_entry'' flags. The JIT is value-class-aware throughout: the object-write emitters separate shared structs inline (a class known at compile time to not be a value class emits **nothing** — the zero-cost-for-classes property is structural, not aspirational); the receiver-position read and the mutating call convention are emitted in traces with their guards; and every remaining cold path falls back to VM-parity helpers. The prototype is green under function and tracing JIT, including allocator- and trace-torture configurations.
+
+===== Implementation =====
+
+The design principle throughout: **value semantics live entirely in the calling code — the opcodes that own the storage slot — never in the struct**. This mirrors how arrays work, and the mutating call is no exception: the call site owns the receiver's slot, so the call site separates and lends it. Nothing about a struct instance itself carries mutability state; separation is per-object refcount state and is never cacheable.
+
+  * A struct compiles to a ''zend_class_entry'' carrying ''ZEND_ACC2_VALUE_CLASS'' in ''ce_flags2'' (alongside ''ZEND_ACC_FINAL'' and ''ZEND_ACC_NO_DYNAMIC_PROPERTIES'' in ''ce_flags''; the marker lives in ''ce_flags2'' because ''ce_flags'' has one free bit left, and it persists with the class entry at no cost — opcache copies the whole ''zend_class_entry''). Instances are **ordinary refcounted, GC-collectable ''zend_object''s**. Notably they do //not// use ''GC_IMMUTABLE''/''IS_ARRAY_IMMUTABLE'' — that flag means "refcount not maintained, lives in SHM" and cannot hold live object references; struct copy-on-write is refcount-driven, like arrays.
+  * **Separation** happens caller-side in the write-path handlers — ''ASSIGN_OBJ'', ''ASSIGN_OBJ_OP'', ''FETCH_OBJ_W''/''FETCH_OBJ_RW'', ''PRE_INC_OBJ''-family — and their JIT counterparts: if the receiver is a value-class instance with refcount > 1, ''clone_obj'' it and write the fresh instance back into the slot before performing the write. Nested paths ride the existing W-fetch chaining that already separates nested arrays. The default ''clone_obj'' (raw property-table copy plus addref) is already the correct copy operation.
+  * **The mutating call convention.** The ''mutating'' marker becomes a function flag (''fn_flags2''), set for declared mutating methods, constructors, and struct set hooks. ''ZEND_INIT_METHOD_CALL'' validates the receiver //after// resolution: variables separate in the caller's slot and bind owned; ''$this'' chains inside mutating frames stay borrowed; anything else throws. Mutating callees are excluded from the method inline caches, so no cache-hit fast path — interpreted or JIT-compiled — can push their frame without this validation; the routes that cannot lend a receiver (callables, first-class-callable creation, dynamic array-calls, reflection on shared receivers) each enforce the ban at their own chokepoint. The one hot-path cost anywhere is a single flag test per resolved method call, measured at noise level.
+  * **The receiver-position property read** (''<nowiki>$this->list->append(...)</nowiki>'') compiles to a dedicated opcode, ''ZEND_FETCH_OBJ_RECEIVER'', emitted only when a property read directly feeds a literal-name method call — which guarantees the read and its call are adjacent, so the borrowed slot pointer cannot outlive the call setup. At runtime it yields ''IS_INDIRECT'' to the slot for a struct value in a lendable slot (set-visible from the calling scope, not ''readonly'', and anchored per the rules above) and otherwise performs — and costs — an ordinary property read; the class-valued case measures at parity with ''ZEND_FETCH_OBJ_R''. The interior-reference ban is untouched: the borrow is consumed at call setup and no user-visible reference to the slot ever exists.
+  * The ''new''-route escape check is a single refcount comparison when a ''new''-invoked constructor returns; no other context is checked (escape is legal there, see Semantics).
+  * ''$this'' binding by context: ''new''-borne constructors and ''set'' hooks bind ''$this'' as a **borrowed** reference to the exclusively-held instance (no addref — writes land in place); mutating method calls bind an **owned** reference to the value just separated in the caller's slot (the slot and frame legitimately share it, and in-place writes are visible through the slot — that is the point); ''get'' hooks and uncolored methods bind **by value**, so the separation branch fires on their first write through ''$this'' and the frame's copy dies at teardown.
+  * The undeclared-read ''Error'' is a value-class branch in the slot where ''zend_std_read_property'' emits the undefined-property ''E_WARNING'' today — the cold tail reached only after every lookup has missed, already guarded by ''type != BP_VAR_IS'' (which supplies the ''isset''/''?<nowiki>?</nowiki>'' carve-out) and already an exception-throwing site for uninitialized typed properties, so no VM or JIT unwind paths change.
+  * ''==='' for value classes routes to a structural comparison in the compare handler; ''spl_object_id''/''WeakMap''/by-ref acquisition reject on the class flag.
+  * No changes to the zval representation, no new type tag, no parser changes beyond the contextual keyword.
+
+===== Open Issues =====
+
+  * Relational comparison and ''sort()'' behavior for structs: inherit object comparison, or throw?
+  * ''var_export()'' round-trip: emit ''new StructName(...)'' (requires positional/named mapping) or a ''<nowiki>__set_state</nowiki>''-like form?
+  * Serialization wire format: plain object ''O:'' payload, or a distinct tag so ''unserialize()'' can reject shape drift?
+  * Whether class constants pull their weight in v1 or should be dropped for minimality.
+  * Whether ''struct implements ArrayAccess'' should be a link-time ''Error'' until dimension-write separation exists, or remain linter territory (''Iterator'' is resolved by coloring; see Interfaces).
+  * Keyword choice: ''struct'' vs ''record'' (the [[rfc:records|Records RFC]] uses the latter; see References for how the proposals differ).
+
+===== Unaffected PHP Functionality =====
+
+Classes, interfaces, enums, traits, arrays, references, and existing copy/assignment semantics are untouched. No existing code changes meaning; structs are purely additive.
+
+===== Future Scope =====
+
+  * **Coloring further core and SPL interfaces.** ''Iterator'' ships colored; ''ArrayAccess'' (''offsetSet''/''offsetUnset'') follows once dimension-write separation exists (below), and the SPL iterator hierarchy after that. Each retrofit is backward-compatible by construction under the edge rule.
+  * **More lendable receiver shapes.** Three deliberate v1 restrictions have known designs: array-element receivers (''<nowiki>$this->lists['en']->append(...)</nowiki>'' — the same slot-lending applied to ''FETCH_DIM''), dimension-//write// separation for ''ArrayAccess'' structs (''<nowiki>$s[0] = $v</nowiki>'' routing through an exclusive ''offsetSet''), and chains through //exclusively held// struct middles (a forward-carried exclusivity walk). Each extends the anchor rule without changing it.
+  * **Anonymous/positional tuples** — ''(int, string)''. These are structs minus names, but their //types// are parameterized (no class entry to hang field types on), which requires recursive ''zend_type'' machinery: the first step toward generics, and deliberately excluded here.
+  * **Destructuring / pattern matching** over struct shapes — shape-based polymorphism over values, complementing the interface-based kind now in scope.
+
+===== Rejected Features =====
+
+  * **A new zval type (''IS_STRUCT'').** Every ''Z_TYPE'' switch in the engine, every extension, and the JIT type lattice assume the current closed set; the last addition (PHP 7) was a rewrite-scale event. Flagged objects deliver the semantics with zero ABI cost. (Hack made the same call, lowering tuples onto varrays.)
+  * **Deep immutability / deep copy.** Recursively freezing or duplicating arbitrary object graphs is a different, much larger feature; shallow value semantics match arrays, ''readonly'', and C#, and compose to deep when built from value parts.
+  * **Struct identity.** Any identity notion (''==='' as instance-sameness, ''spl_object_id'') would leak CoW sharing decisions as observable behavior and break the value model.
+  * **A loud error for ''$this'' writes in immutable contexts** (get hooks and methods). Complete enforcement is impossible at compile time — ''<nowiki>$copy = $this; $copy->x = 5;</nowiki>'' is an ordinary variable write to an alias, indistinguishable from legitimate code, and takes the same separate-and-discard path — so a compile-time ban on literal ''<nowiki>$this-></nowiki>'' writes would advertise a guarantee the engine does not make, and closing the gap requires a frame-state check on general write paths: a per-write tax to catch a mistake. The one-rule semantics (writes to a shared ''$this'' separate and die with the frame) stay silent and uniform; "assignment to ''$this'' in a get hook" is a trivial, complete static-analysis rule, and linters are the intended home for it.
+  * **A call-site marker for mutating calls** (''<nowiki>$s->append!(...)</nowiki>''-style). Considered so the compiler could emit write-mode receiver fetches eagerly — and rejected: it colors every call site instead of one declaration, and the engine does not need it. The structural constraint (a receiver is evaluated //before// the method resolves, so writeness is unknowable at fetch time) is answered by //deferring the decision//, not by moving it into syntax: the receiver-position read delivers the slot either way and the call site commits after resolution — the receiver analog of how ''FETCH_OBJ_FUNC_ARG'' defers by-ref argument decisions. Eagerly compiling receivers in write mode was rejected with it: it would drag write-visibility errors and spurious separations onto pure-read calls.
+  * **Escape enforcement outside construction.** A method-return escape check was designed (refcount baselines per binding kind) and rejected: by the time it could fire, the in-place mutations have already landed in the caller's slot, so the error would condemn side effects it cannot undo — while allowing the escape yields coherent alias-then-separate semantics for free. Only ''new''-borne construction, where a throw discards the instance, keeps the check (see Semantics).
+
+===== Voting Choices =====
+
+Two votes, each 2/3 majority required:
+
+  - **Accept structs as described?** (primary)
+  - **Accept ''mutating'' methods, the scoped borrow, and interface coloring (including the ''Iterator'' retrofit) as described?** (secondary; counted only if the primary passes)
+
+The secondary is severable by construction: without it, every struct method is uncolored, updates are the wither idiom and by-ref parameters, and no other section changes. With it, in-place collection updates (''<nowiki>$this->list->append(...)</nowiki>'') are first-class.
+
+===== Patches and Tests =====
+
+tbd
+
+===== References =====
+
+  * [[rfc:records|PHP RFC: Records]] — closest prior art: named value objects, //immutable// with ''with''-style updates and method support. This proposal differs by permitting direct property mutation (CoW), by making mutation intent declarable per method (''mutating'' vs the by-value default), and by pinning implementation to caller-side separation in the write opcodes and call sites.
+  * [[rfc:property-hooks|PHP RFC: Property hooks]] — the write-path dispatch pipeline and the by-ref ban precedent.
+  * [[rfc:readonly_properties_v2|PHP RFC: Readonly properties]] and [[rfc:readonly_classes|readonly classes]] — the shallow-immutability precedent.
+  * [[rfc:clone_with_v2|PHP RFC: Clone with]] — the update idiom for readonly structs.
+  * [[https://docs.swift.org/swift-book/documentation/the-swift-programming-language/classesandstructures/|Swift: Structures and Classes]] — value/reference split, shallow copies, CoW.
+  * [[https://learn.microsoft.com/en-us/dotnet/csharp/language-reference/builtin-types/struct|C#: Structure types]].
+
+===== Changelog =====
+
+  * 0.20 (2026-07-19): **Interface coloring folded into the proposal** (same severable secondary vote). Interfaces and trait abstract members may declare ''mutating'' requirements; the entire variance system is one rule enforced on every subtyping edge — ''mutating'' may be removed along an edge, never added — making retrofits backward-compatible by construction (class methods are always uncolored and satisfy colored requirements untouched). ''Iterator::next()''/''rewind()'' ship colored, and ''foreach'' gains the value route: a struct iterator is copied into exclusively-held loop state, advances mutate in place there, and iteration never consumes the caller's value. ''ArrayAccess'' coloring deferred behind dimension-write separation (Future Scope); the ''Iterator''-lint Open Issue resolved by the retrofit. Implemented and green (interpreter, both JITs; SPL suite untouched).
+  * 0.19 (2026-07-19): **Mutating methods promoted from Future Scope into the proposal**, as a severable secondary vote. Syntax: a postfix signature marker (''function m() mutating: T'') in a position where no identifier can otherwise appear — contextual, case-insensitive, reserving nothing (zero BC surface). Semantics: the //scoped borrow// — the call site resolves the callee, separates the receiver in its own slot, and lends the exclusive value to the frame; the one ''$this'' rule is unchanged, exclusivity is manufactured rather than asserted. Receiver rules: variables and ''$this''-in-mutating-contexts lend; property receivers lend via a dedicated receiver-position read when the slot is set-visible, non-readonly, and anchored (class containers anywhere; struct containers only as exclusively held writable roots); everything else errors with "assign it to a variable first". Routes that cannot lend (callables, FCCs, dynamic array-calls, reflection on shared receivers) throw at their own chokepoints; mutating callees are excluded from method inline caches. Effect variance enforced at link time (a mutating method cannot satisfy an interface requirement; constructor exempt); interface-side coloring stays Future Scope. ''<nowiki>__construct</nowiki>'' reframed as the built-in mutating method — explicit ''<nowiki>$s->__construct()</nowiki>'' is now a legal mutating call; set hooks are implicitly mutating with no syntax and may make nested mutating calls. **Escape policy finalized**: ''$this'' may escape every mutating context //except// ''new''-borne construction (the one transactional context); the escapee becomes an ordinary shared value severed at the next write — method-return enforcement was rejected as half-transactional. Traits carry the color; a class consuming a mutating trait method is a link-time error. The call-site marker and eager write-mode receivers moved to Rejected Features with the deferral argument. All of the above is implemented and green in the prototype (interpreter, function JIT, tracing JIT), with the class-receiver paths measured at parity.
+  * 0.18 (2026-07-18): Corrected an introduction overclaim: ''readonly'' does not make a struct "a value all the way down" (a held object's interior remains mutable through the shared handle, per shallow-freeze); its function is stated precisely — frozen slots, constructor invariants held for the value's lifetime, and copies that never physically separate. Deep value-ness requires value-typed properties, with or without ''readonly''.
+  * 0.17 (2026-07-18): Magic methods reclassified by the value model (resolving the ''<nowiki>__toString</nowiki>'' open issue): the pure reads — ''<nowiki>__toString</nowiki>'' (unlocking ''Stringable''), ''<nowiki>__invoke</nowiki>'', ''<nowiki>__debugInfo</nowiki>'', ''<nowiki>__call</nowiki>'', ''<nowiki>__callStatic</nowiki>'' — are permitted and bind ''$this'' by value; ''<nowiki>__construct</nowiki>'' is identified as the mutating member, reachable only through object creation (explicit re-invocation deferred with ''mutating'' methods); ''<nowiki>__serialize</nowiki>''/''<nowiki>__unserialize</nowiki>'' deferred with the wire-format open issue (''<nowiki>__unserialize</nowiki>'' is a mutating initializer); ''<nowiki>__set_state</nowiki>'' deferred with ''var_export()''. New Magic methods section; implemented in the prototype.
+  * 0.16 (2026-07-16): Implementation-driven corrections, no semantic changes. The class flag is ''ZEND_ACC2_VALUE_CLASS'' in ''ce_flags2'', not ''ce_flags'' (which has one free bit left; ''ce_flags2'' persists with the class entry at no cost) — the extension-facing name in RFC Impact corrected accordingly. The ''<nowiki>__toString</nowiki>'' open issue broadened to the other pure-read magic methods, ''<nowiki>__invoke</nowiki>'' and ''<nowiki>__debugInfo</nowiki>'', which enums permit and the prototype currently bans.
+  * 0.15 (2026-07-16): Pre-publication fixes: target version pinned to PHP 9.0 (the next cycle); the extension-methods interop note updated for methods being in scope (extensions add methods to structs you do not own, under the same value rules).
+  * 0.14 (2026-07-16): Editorial pass, no semantic changes. Introduction reframed around the settled identity — a class-like construct with value semantics whose every exclusion is a consequence of the value model, not a scoping choice. The one-''$this''-rule promoted to its own section (''$this'': one rule) ahead of its four contexts, and Methods moved before Property hooks. Stale properties-only-era prose corrected: the property-visibility rationale ("there are no methods"), the escape-check framing ("no other ''$this'' to police"), and the trait abstract-member wording. By-reference semantics for struct //variables// made explicit: by-ref parameters are the sanctioned caller-visible-update route, per the ''sort($array)'' precedent. Clone section expanded: ''clone'' needs no magic-method support, and ''<nowiki>__clone</nowiki>'' is impossible in principle for a value type (copy-time user code would observe CoW separation; C# forbids struct copy constructors on the same grounds).
+  * 0.13 (2026-07-16): Traits admitted to the initial scope — flattened members are governed by the one ''$this'' rule identically to declared members (no composition-time mutation error: it would reject the wither idiom and create an own-vs-trait asymmetry; the class-era-trait trap stays linter territory until ''mutating'' coloring makes it a variance error). Trait properties must satisfy the typed-shape rule at link time; member bans apply at flattening; undeclared-access rules make trait mistakes louder on structs than on classes. "Permanently excluded" no longer appears in this document.
+  * 0.12 (2026-07-16): Non-mutating methods and interfaces promoted into the initial scope (early-reviewer feedback: methods are table stakes). Methods bind ''$this'' by value as ordinary calls; interfaces are satisfiable with no coloring syntax because every struct method is non-mutating by construction. First-class callables and ''Closure::bind()'' permitted (receiver semantics automatic); reflection-based property writes throw; ''Iterator''/''ArrayAccess'' mismatch and ''<nowiki>__toString</nowiki>''/''Stringable'' recorded as Open Issues; the interfaces entry left Rejected Features.
+  * 0.11 (2026-07-16): Interfaces softened from permanent exclusion to "excluded until mutating-method coloring exists" (traits remain permanent); far-scope design for ''mutating'' as a method color recorded in Future Scope — set-hook ''$this'' binding, CV-receiver verification (interface-typed parameters qualify), and the effect-variance rule (a ''mutating'' implementation cannot satisfy a non-''mutating'' requirement; classes satisfy either).
+  * 0.10 (2026-07-15): Property hooks admitted to the initial scope with direction-split ''$this'' semantics (set hooks persist, get hooks copy); native methods designated a fast follow with settled by-value-''$this'' design; interfaces and traits moved to permanent exclusions; ''mutating''-method designs moved to Rejected Features; extension-methods interop noted; silent discard (linter-enforced) chosen over a loud error for ''$this'' writes in immutable contexts.
+  * 0.9 (2026-07-14): Initial draft.
