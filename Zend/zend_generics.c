@@ -512,6 +512,7 @@ static bool zend_generics_substitute_list(
 	uint32_t kind_bits = ZEND_TYPE_FULL_MASK(*type)
 		& ~(_ZEND_TYPE_MAY_BE_MASK | _ZEND_TYPE_ARENA_BIT);
 	uint32_t cap = (old_list->num_types + 1) * (ZEND_GENERICS_MAX_ARGS + 1);
+	ALLOCA_FLAG(use_heap)
 	zend_type *elems = do_alloca(cap * sizeof(zend_type), use_heap);
 	uint32_t n = 0;
 	const zend_type *m;
