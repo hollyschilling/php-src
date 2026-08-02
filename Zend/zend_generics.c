@@ -1021,6 +1021,15 @@ static zend_class_entry *zend_generics_stamp_ce(
 		for (; p != end; p++) {
 			zend_string_addref(p->key);
 			const zend_property_info *prop_info = Z_PTR(p->val);
+			if (prop_info->ce != template_ce) {
+				/* Inherited from a concrete parent: cannot mention type
+				 * parameters, and its declaring scope must stay the parent
+				 * (visibility from the parent's own scope -- e.g. the
+				 * exception machinery writing Exception's protected
+				 * properties -- depends on it). Share, exactly as ordinary
+				 * inheritance does. */
+				continue;
+			}
 			zend_property_info *new_prop_info =
 				zend_arena_alloc(&CG(arena), sizeof(zend_property_info));
 			Z_PTR(p->val) = new_prop_info;
@@ -1074,6 +1083,10 @@ static zend_class_entry *zend_generics_stamp_ce(
 		for (; p != end; p++) {
 			zend_string_addref(p->key);
 			const zend_class_constant *c = Z_PTR(p->val);
+			if (c->ce != template_ce) {
+				/* Inherited from a concrete parent: share (see properties). */
+				continue;
+			}
 			zend_class_constant *new_c =
 				zend_arena_alloc(&CG(arena), sizeof(zend_class_constant));
 			Z_PTR(p->val) = new_c;
