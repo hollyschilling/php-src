@@ -33,6 +33,10 @@ ZEND_API void zend_generics_preload_stamp_all(void);
 ZEND_API void zend_generics_substitute_closure_signature(
 		zend_op_array *op_array, const zend_class_entry *scope);
 
+/* Teardown for an op_array flagged ZEND_ACC2_GENERIC_SUBST_ARG_INFO: releases
+ * what its arg_info copy owns and restores the template's array. */
+ZEND_API void zend_generics_release_substituted_arg_info(zend_op_array *op_array);
+
 /* Maps a template type-parameter index (as carried by
  * ZEND_FETCH_CLASS_TYPE_PARAM opcodes) to the argument index in the scope's
  * binding. Identity without a pack; with one, post-pack params shift by the

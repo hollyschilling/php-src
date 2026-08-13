@@ -768,6 +768,54 @@ static bool zend_generics_substitute_type(
 	return true;
 }
 
+/* A substituted arg_info block is a memcpy of the template's, so it must take
+ * references for the strings it copied: opcache releases the template's copy of
+ * each while persisting a preloaded class, which would leave the instantiation
+ * reading freed memory. zend_generics_release_substituted_arg_info() gives them
+ * back. Both are no-ops for interned strings. */
+static void zend_generics_arg_info_addref(zend_arg_info *entries, uint32_t count)
+{
+	for (uint32_t i = 0; i < count; i++) {
+		if (entries[i].name) {
+			zend_string_addref(entries[i].name);
+		}
+		if (entries[i].doc_comment) {
+			zend_string_addref(entries[i].doc_comment);
+		}
+	}
+}
+
+ZEND_API void zend_generics_release_substituted_arg_info(zend_op_array *op_array)
+{
+	ZEND_ASSERT(op_array->fn_flags2 & ZEND_ACC2_GENERIC_SUBST_ARG_INFO);
+
+	zend_arg_info *entries = op_array->arg_info;
+	uint32_t count = op_array->num_args;
+
+	if (op_array->fn_flags & ZEND_ACC_HAS_RETURN_TYPE) {
+		entries--;
+		count++;
+	}
+	if (op_array->fn_flags & ZEND_ACC_VARIADIC) {
+		count++;
+	}
+
+	for (uint32_t i = 0; i < count; i++) {
+		if (entries[i].name) {
+			zend_string_release(entries[i].name);
+		}
+		if (entries[i].doc_comment) {
+			zend_string_release(entries[i].doc_comment);
+		}
+		zend_type_release(entries[i].type, /* persistent */ false);
+	}
+
+	/* The block itself is arena memory; put back the template's real array,
+	 * stashed one pointer before it, so the caller's teardown frees that. */
+	op_array->arg_info = ((zend_arg_info **) entries)[-1];
+	op_array->fn_flags2 &= ~ZEND_ACC2_GENERIC_SUBST_ARG_INFO;
+}
+
 /* Substitute a stamped scope's type arguments into a freshly created
  * closure's own op_array copy. Closure bodies (and their declared arg_info)
  * are shared with the template through dynamic_func_defs, so a signature
@@ -811,12 +859,17 @@ ZEND_API void zend_generics_substitute_closure_signature(
 	memcpy(entries, base, total * sizeof(zend_arg_info));
 	for (uint32_t i = 0; i < total; i++) {
 		if (!zend_generics_substitute_type(&entries[i].type, template_ce,
-				scope->generic_binding, scope->name, /* take_refs */ false)) {
+				scope->generic_binding, scope->name, /* take_refs */ true)) {
 			/* Substitution threw (scalar arg inside a composite type); keep
-			 * the original signature and let the Error propagate. */
+			 * the original signature and let the Error propagate. Only the
+			 * earlier types hold references yet. */
+			while (i-- > 0) {
+				zend_type_release(entries[i].type, /* persistent */ false);
+			}
 			return;
 		}
 	}
+	zend_generics_arg_info_addref(entries, total);
 	op_array->arg_info = entries + has_ret;
 	op_array->fn_flags2 |= ZEND_ACC2_GENERIC_SUBST_ARG_INFO;
 }
@@ -867,15 +920,17 @@ static zend_op_array *zend_generics_clone_method(
 			zend_arg_info *entries = (zend_arg_info *) (block + sizeof(zend_arg_info *));
 			memcpy(entries, tpl_base, total * sizeof(zend_arg_info));
 			for (uint32_t i = 0; i < total; i++) {
-				/* These entries are never destroyed (the template's original
-				 * arg_info is restored before the final free), so they must
-				 * not take string references. */
 				if (!zend_generics_substitute_type(
 						&entries[i].type, template_ce, binding, display_name,
-						/* take_refs */ false)) {
+						/* take_refs */ true)) {
+					/* Only the earlier types hold references yet. */
+					while (i-- > 0) {
+						zend_type_release(entries[i].type, /* persistent */ false);
+					}
 					return NULL;
 				}
 			}
+			zend_generics_arg_info_addref(entries, total);
 			new_fn->arg_info = entries + has_ret;
 			new_fn->fn_flags2 |= ZEND_ACC2_GENERIC_SUBST_ARG_INFO;
 		}
