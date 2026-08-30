@@ -816,6 +816,41 @@ ZEND_API void zend_generics_release_substituted_arg_info(zend_op_array *op_array
 	op_array->fn_flags2 &= ~ZEND_ACC2_GENERIC_SUBST_ARG_INFO;
 }
 
+ZEND_API void zend_generics_dup_substituted_arg_info(zend_op_array *op_array)
+{
+	ZEND_ASSERT(op_array->fn_flags2 & ZEND_ACC2_GENERIC_SUBST_ARG_INFO);
+
+	zend_arg_info *src = op_array->arg_info;
+	uint32_t count = op_array->num_args;
+	uint32_t has_ret = (op_array->fn_flags & ZEND_ACC_HAS_RETURN_TYPE) ? 1 : 0;
+	src -= has_ret;
+	count += has_ret;
+	if (op_array->fn_flags & ZEND_ACC_VARIADIC) {
+		count++;
+	}
+
+	/* Give this op_array its own copy of the substituted block. A plain
+	 * op_array memcpy (zend_create_closure_ex when a closure declared in a
+	 * generic instantiation is rebound) duplicates the ZEND_ACC2_GENERIC_SUBST
+	 * flag and the arg_info pointer, so without this both headers would own —
+	 * and release_substituted_arg_info() would free — the same strings, types
+	 * and block. Deep-copy the types and take fresh string references so each
+	 * header owns its block outright; the hidden template original is shared
+	 * verbatim (it is only ever read, and freed once when the refcount the
+	 * headers share reaches zero). */
+	char *block = zend_arena_alloc(&CG(arena),
+		sizeof(zend_arg_info *) + count * sizeof(zend_arg_info));
+	*(zend_arg_info **) block = ((zend_arg_info **) src)[-1];
+	zend_arg_info *entries = (zend_arg_info *) (block + sizeof(zend_arg_info *));
+	memcpy(entries, src, count * sizeof(zend_arg_info));
+	for (uint32_t i = 0; i < count; i++) {
+		zend_generics_type_copy_ctor(&entries[i].type, /* take_refs */ true);
+	}
+	zend_generics_arg_info_addref(entries, count);
+	op_array->arg_info = entries + has_ret;
+	/* The flag is already set, carried over by the caller's memcpy. */
+}
+
 /* Substitute a stamped scope's type arguments into a freshly created
  * closure's own op_array copy. Closure bodies (and their declared arg_info)
  * are shared with the template through dynamic_func_defs, so a signature

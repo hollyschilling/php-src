@@ -29,6 +29,7 @@
 #include "zend_enum.h"
 #include "zend_attributes.h"
 #include "zend_constants.h"
+#include "zend_generics.h"
 #include "zend_observer.h"
 
 ZEND_API zend_class_entry* (*zend_inheritance_cache_get)(zend_class_entry *ce, zend_class_entry *parent, zend_class_entry **traits_and_interfaces) = NULL;
@@ -2421,6 +2422,12 @@ static void zend_add_trait_method(zend_class_entry *ce, zend_string *name, zend_
 		new_fn = zend_arena_alloc(&CG(arena), sizeof(zend_op_array));
 		memcpy(new_fn, fn, sizeof(zend_op_array));
 		new_fn->op_array.fn_flags &= ~ZEND_ACC_IMMUTABLE;
+		if (UNEXPECTED(new_fn->op_array.fn_flags2 & ZEND_ACC2_GENERIC_SUBST_ARG_INFO)) {
+			/* The trait is a generic instantiation: the memcpy shared its
+			 * substituted arg_info block and ownership flag; give this copy
+			 * its own so teardown releases each exactly once. */
+			zend_generics_dup_substituted_arg_info(&new_fn->op_array);
+		}
 	}
 	new_fn->common.fn_flags |= ZEND_ACC_TRAIT_CLONE;
 
@@ -3006,6 +3013,10 @@ static void zend_do_traits_property_binding(zend_class_entry *ce, zend_class_ent
 						zend_function *new_fn = zend_arena_alloc(&CG(arena), sizeof(zend_op_array));
 						memcpy(new_fn, old_fn, sizeof(zend_op_array));
 						new_fn->op_array.fn_flags &= ~ZEND_ACC_IMMUTABLE;
+						if (UNEXPECTED(new_fn->op_array.fn_flags2 & ZEND_ACC2_GENERIC_SUBST_ARG_INFO)) {
+							/* Same as zend_add_trait_method: own the substituted block. */
+							zend_generics_dup_substituted_arg_info(&new_fn->op_array);
+						}
 						new_fn->common.fn_flags |= ZEND_ACC_TRAIT_CLONE;
 						new_fn->common.prop_info = new_prop;
 						function_add_ref(new_fn);
