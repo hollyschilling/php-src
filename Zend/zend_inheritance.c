@@ -3982,7 +3982,9 @@ ZEND_API zend_class_entry *zend_try_early_bind(zend_class_entry *ce, zend_class_
 	zend_class_entry *proto = NULL;
 	zend_class_entry *orig_linking_class;
 
-	if (UNEXPECTED(parent_ce->ce_flags2 & ZEND_ACC2_GENERIC_TEMPLATE)) {
+	/* parent_ce is NULL when re-binding an already-linked, parentless class
+	 * from the delayed early binding list (GH-8846). */
+	if (UNEXPECTED(parent_ce && (parent_ce->ce_flags2 & ZEND_ACC2_GENERIC_TEMPLATE))) {
 		/* Never early-bind against a generic template; the runtime link path
 		 * reports the missing type arguments. */
 		return NULL;
