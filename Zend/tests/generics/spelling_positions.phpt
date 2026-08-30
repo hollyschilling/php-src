@@ -9,7 +9,8 @@ class D1::<X> { public ?X $v = null; }
 interface D2::<A, B> {}
 trait D3::<T> { public function t(): string { return "trait"; } }
 class D4::<...Ts> {}
-class D5 { public function f::<U>(U $x): U { return $x; } }
+// Type-parameter lists attach to classes, interfaces and traits. Methods and
+// functions do not take them here; method_params_unsupported.phpt pins that.
 
 var_dump((new ReflectionClass('D1'))->isGenericTemplate());
 var_dump((new ReflectionClass('D1'))->getGenericTypeParameters()[0]['name']);
@@ -42,9 +43,6 @@ trait TB { public function t(): string { return "b"; } }
 class U2 { use D3<int>, TB { D3::<int>::t insteadof TB; } }
 var_dump(get_parent_class(new E1()));
 var_dump((new U2)->t());
-
-// ---- TurboFish in method calls (both dispatch kinds), and mixed with class refs ----
-var_dump((new D5)->f::<Vec<int>>(new Vec<int>()) instanceof Vec::<int>);
 
 // ---- Attributes: both spellings ----
 #[Attribute] class At<T> {}
@@ -86,7 +84,6 @@ string(8) "Vec<int>"
 string(12) "D1<Vec<int>>"
 string(8) "Vec<int>"
 string(5) "trait"
-bool(true)
 string(7) "At<int>"
 string(10) "At<string>"
 catch bare
