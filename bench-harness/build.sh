@@ -74,7 +74,10 @@ build_one() {
         *DEBUG*) echo "ERROR: $name is a DEBUG build — benchmark numbers would be meaningless"; exit 1 ;;
     esac
     # A binary without valgrind support silently breaks the cold/warm split.
-    "$dir"/sapi/cli/php -i | grep -q -- '--with-valgrind' \
+    # No `grep -q` here: under `set -o pipefail` it exits on the first match,
+    # `php -i` dies writing to the closed pipe, and the check fails on every
+    # build — including correct ones.
+    "$dir"/sapi/cli/php -i | grep -- '--with-valgrind' >/dev/null \
         || echo "WARNING: $name was built without --with-valgrind; warm numbers will be wrong"
 }
 
