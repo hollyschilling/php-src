@@ -620,6 +620,13 @@ ZEND_API void destroy_op_array(zend_op_array *op_array)
 		zend_string_release_ex(op_array->function_name, 0);
 	}
 
+	if (UNEXPECTED(op_array->fn_flags2 & ZEND_ACC2_GENERIC_SUBST_ARG_INFO)) {
+		/* Before the refcount check below, not after: every clone made its
+		 * own copy of the substituted arg_info, so every clone has references
+		 * to give back, not just whichever one is destroyed last. */
+		zend_generics_release_substituted_arg_info(op_array);
+	}
+
 	if (!op_array->refcount || --(*op_array->refcount) > 0) {
 		return;
 	}
@@ -627,26 +634,15 @@ ZEND_API void destroy_op_array(zend_op_array *op_array)
 	if (UNEXPECTED(op_array->fn_flags2 & ZEND_ACC2_GENERIC_METHOD_TEMPLATE)
 			&& op_array->generic_params) {
 		/* Release is a no-op for the (usual) interned case; the arena owns
-		 * the struct. Clones cleared the flag, so this runs exactly once. */
+		 * the struct. Clones cleared the flag, so this runs exactly once.
+		 * After the refcount check: copied headers (closures) share the
+		 * generic_params pointer, so only the final release may free it. */
 		for (uint32_t i = 0; i < op_array->generic_params->num_params; i++) {
 			zend_string_release_ex(op_array->generic_params->params[i].name, 0);
 			if (op_array->generic_params->params[i].bound_name) {
 				zend_string_release_ex(op_array->generic_params->params[i].bound_name, 0);
 			}
 		}
-	}
-
-	if (UNEXPECTED(op_array->fn_flags2 & ZEND_ACC2_GENERIC_SUBST_ARG_INFO)) {
-		/* This header carries an arena-allocated, type-substituted arg_info
-		 * (generic instantiation clone). Its entries own nothing the arena and
-		 * interned strings don't reclaim. Restore the shared original stored
-		 * one pointer before the arena block, so the final release below frees
-		 * the template's real array. */
-		zend_arg_info *base = op_array->arg_info;
-		if (op_array->fn_flags & ZEND_ACC_HAS_RETURN_TYPE) {
-			base--;
-		}
-		op_array->arg_info = ((zend_arg_info **) base)[-1];
 	}
 
 	efree_size(op_array->refcount, sizeof(*(op_array->refcount)));

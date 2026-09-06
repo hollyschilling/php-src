@@ -391,11 +391,20 @@ name:
 	|	T_NAME_MODULE								{ $$ = $1; $$->attr = ZEND_NAME_MODULE; }
 ;
 
+/* Inside '#[...]' only an attribute name can follow, so a plain '<' after it
+ * is COMMITTED to opening a type-argument list (the only tokens that may
+ * follow the name are '(', ',' and ']'). */
 attribute_decl:
 		class_name
 			{ $$ = zend_ast_create(ZEND_AST_ATTRIBUTE, $1, NULL); }
 	|	class_name argument_list
 			{ $$ = zend_ast_create(ZEND_AST_ATTRIBUTE, $1, $2); }
+	|	name '<' generic_arg_list_closed
+			{ $$ = zend_ast_create(ZEND_AST_ATTRIBUTE,
+				  zend_ast_create(ZEND_AST_GENERIC_TYPE, $1, $3), NULL); }
+	|	name '<' generic_arg_list_closed argument_list
+			{ $$ = zend_ast_create(ZEND_AST_ATTRIBUTE,
+				  zend_ast_create(ZEND_AST_GENERIC_TYPE, $1, $3), $4); }
 ;
 
 attribute_group:
@@ -669,9 +678,18 @@ catch_list:
 			{ $$ = zend_ast_list_add($1, zend_ast_create(ZEND_AST_CATCH, $4, $5, $8)); }
 ;
 
+/* Inside 'catch (' only class names can appear, so a plain '<' after a name
+ * is COMMITTED to opening a type-argument list, like after 'new' and
+ * 'instanceof'; the lexer's bounded lookahead is not consulted. */
 catch_name_list:
 		class_name { $$ = zend_ast_create_list(1, ZEND_AST_NAME_LIST, $1); }
+	|	name '<' generic_arg_list_closed
+			{ $$ = zend_ast_create_list(1, ZEND_AST_NAME_LIST,
+				  zend_ast_create(ZEND_AST_GENERIC_TYPE, $1, $3)); }
 	|	catch_name_list '|' class_name { $$ = zend_ast_list_add($1, $3); }
+	|	catch_name_list '|' name '<' generic_arg_list_closed
+			{ $$ = zend_ast_list_add($1,
+				  zend_ast_create(ZEND_AST_GENERIC_TYPE, $3, $5)); }
 ;
 
 optional_variable:
@@ -740,6 +758,7 @@ generic_params:
 generic_open:
 		'<'
 	|	T_GENERIC_OPEN
+	|	T_TURBOFISH
 ;
 
 generic_type_args:

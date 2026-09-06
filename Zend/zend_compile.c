@@ -3044,6 +3044,12 @@ static inline bool zend_can_write_to_variable(const zend_ast *ast) /* {{{ */
 
 static inline bool zend_is_const_default_class_ref(zend_ast *name_ast) /* {{{ */
 {
+	if (name_ast->kind == ZEND_AST_GENERIC_TYPE) {
+		/* A generic instantiation resolves to a constant mangled name.
+		 * Argument concreteness is enforced when the reference resolves
+		 * (parameter-dependent references are rejected there). */
+		return zend_get_class_fetch_type_ast(name_ast->child[0]) == ZEND_FETCH_CLASS_DEFAULT;
+	}
 	if (name_ast->kind != ZEND_AST_ZVAL) {
 		return false;
 	}

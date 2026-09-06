@@ -783,7 +783,16 @@ static void zend_create_closure_ex(zval *res, zend_function *func, zend_class_en
 			(*closure->func.op_array.refcount)++;
 		}
 
-		if (UNEXPECTED(scope && scope->generic_binding)) {
+		if (UNEXPECTED(closure->func.op_array.fn_flags2 & ZEND_ACC2_GENERIC_SUBST_ARG_INFO)) {
+			/* The source already carries a substituted (concrete) signature —
+			 * it was itself created in a generic instantiation, and is now
+			 * being copied again (e.g. Closure::bind). The memcpy above shared
+			 * its arg_info block and the ownership flag; give this copy its own
+			 * block so teardown releases each exactly once. The signature is
+			 * already concrete, so it is correct for any new scope and must not
+			 * be re-substituted (the template's type parameters are gone). */
+			zend_generics_dup_substituted_arg_info(&closure->func.op_array);
+		} else if (UNEXPECTED(scope && scope->generic_binding)) {
 			/* Closures declared inside a generic instantiation carry the
 			 * template's symbolic parameter types; substitute into this
 			 * closure's own signature copy. */

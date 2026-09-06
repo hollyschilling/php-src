@@ -535,6 +535,7 @@ static bool zend_generics_substitute_list(
 	uint32_t kind_bits = ZEND_TYPE_FULL_MASK(*type)
 		& ~(_ZEND_TYPE_MAY_BE_MASK | _ZEND_TYPE_ARENA_BIT);
 	uint32_t cap = (old_list->num_types + 1) * (ZEND_GENERICS_MAX_ARGS + 1);
+	ALLOCA_FLAG(use_heap)
 	zend_type *elems = do_alloca(cap * sizeof(zend_type), use_heap);
 	uint32_t n = 0;
 	const zend_type *m;
@@ -790,6 +791,89 @@ static bool zend_generics_substitute_type(
 	return true;
 }
 
+/* A substituted arg_info block is a memcpy of the template's, so it must take
+ * references for the strings it copied: opcache releases the template's copy of
+ * each while persisting a preloaded class, which would leave the instantiation
+ * reading freed memory. zend_generics_release_substituted_arg_info() gives them
+ * back. Both are no-ops for interned strings. */
+static void zend_generics_arg_info_addref(zend_arg_info *entries, uint32_t count)
+{
+	for (uint32_t i = 0; i < count; i++) {
+		if (entries[i].name) {
+			zend_string_addref(entries[i].name);
+		}
+		if (entries[i].doc_comment) {
+			zend_string_addref(entries[i].doc_comment);
+		}
+	}
+}
+
+ZEND_API void zend_generics_release_substituted_arg_info(zend_op_array *op_array)
+{
+	ZEND_ASSERT(op_array->fn_flags2 & ZEND_ACC2_GENERIC_SUBST_ARG_INFO);
+
+	zend_arg_info *entries = op_array->arg_info;
+	uint32_t count = op_array->num_args;
+
+	if (op_array->fn_flags & ZEND_ACC_HAS_RETURN_TYPE) {
+		entries--;
+		count++;
+	}
+	if (op_array->fn_flags & ZEND_ACC_VARIADIC) {
+		count++;
+	}
+
+	for (uint32_t i = 0; i < count; i++) {
+		if (entries[i].name) {
+			zend_string_release(entries[i].name);
+		}
+		if (entries[i].doc_comment) {
+			zend_string_release(entries[i].doc_comment);
+		}
+		zend_type_release(entries[i].type, /* persistent */ false);
+	}
+
+	/* The block itself is arena memory; put back the template's real array,
+	 * stashed one pointer before it, so the caller's teardown frees that. */
+	op_array->arg_info = ((zend_arg_info **) entries)[-1];
+	op_array->fn_flags2 &= ~ZEND_ACC2_GENERIC_SUBST_ARG_INFO;
+}
+
+ZEND_API void zend_generics_dup_substituted_arg_info(zend_op_array *op_array)
+{
+	ZEND_ASSERT(op_array->fn_flags2 & ZEND_ACC2_GENERIC_SUBST_ARG_INFO);
+
+	zend_arg_info *src = op_array->arg_info;
+	uint32_t count = op_array->num_args;
+	uint32_t has_ret = (op_array->fn_flags & ZEND_ACC_HAS_RETURN_TYPE) ? 1 : 0;
+	src -= has_ret;
+	count += has_ret;
+	if (op_array->fn_flags & ZEND_ACC_VARIADIC) {
+		count++;
+	}
+
+	/* Give this op_array its own copy of the substituted block. A plain
+	 * op_array memcpy (zend_create_closure_ex when a closure declared in a
+	 * generic instantiation is rebound) duplicates the ZEND_ACC2_GENERIC_SUBST
+	 * flag and the arg_info pointer, so without this both headers would own —
+	 * and release_substituted_arg_info() would free — the same strings, types
+	 * and block. Deep-copy the types and take fresh string references so each
+	 * header owns its block outright; the hidden template original is shared
+	 * verbatim (it is only ever read, and freed once when the refcount the
+	 * headers share reaches zero). */
+	char *block = zend_arena_alloc(&CG(arena),
+		sizeof(zend_arg_info *) + count * sizeof(zend_arg_info));
+	*(zend_arg_info **) block = ((zend_arg_info **) src)[-1];
+	zend_arg_info *entries = (zend_arg_info *) (block + sizeof(zend_arg_info *));
+	memcpy(entries, src, count * sizeof(zend_arg_info));
+	for (uint32_t i = 0; i < count; i++) {
+		zend_generics_type_copy_ctor(&entries[i].type, /* take_refs */ true);
+	}
+	zend_generics_arg_info_addref(entries, count);
+	op_array->arg_info = entries + has_ret;
+	/* The flag is already set, carried over by the caller's memcpy. */
+}
+
 /* Substitute a stamped scope's type arguments into a freshly created
  * closure's own op_array copy. Closure bodies (and their declared arg_info)
  * are shared with the template through dynamic_func_defs, so a signature
@@ -833,12 +917,17 @@ ZEND_API void zend_generics_substitute_closure_signature(
 	memcpy(entries, base, total * sizeof(zend_arg_info));
 	for (uint32_t i = 0; i < total; i++) {
 		if (!zend_generics_substitute_type(&entries[i].type, template_ce,
-				scope->generic_binding, scope->name, /* take_refs */ false)) {
+				scope->generic_binding, scope->name, /* take_refs */ true)) {
 			/* Substitution threw (scalar arg inside a composite type); keep
-			 * the original signature and let the Error propagate. */
+			 * the original signature and let the Error propagate. Only the
+			 * earlier types hold references yet. */
+			while (i-- > 0) {
+				zend_type_release(entries[i].type, /* persistent */ false);
+			}
 			return;
 		}
 	}
+	zend_generics_arg_info_addref(entries, total);
 	op_array->arg_info = entries + has_ret;
 	op_array->fn_flags2 |= ZEND_ACC2_GENERIC_SUBST_ARG_INFO;
 }
@@ -903,6 +992,12 @@ ZEND_API void zend_generics_substitute_closure_method_signature(
 		*(zend_arg_info **) block = zend_generics_base_arg_info(op_array);
 		entries = (zend_arg_info *) (block + sizeof(zend_arg_info *));
 		memcpy(entries, base, total * sizeof(zend_arg_info));
+		/* destroy_op_array releases every flagged block's strings and types
+		 * (per-header ownership); own the copies before substituting. */
+		for (uint32_t i = 0; i < total; i++) {
+			zend_generics_type_copy_ctor(&entries[i].type, /* take_refs */ true);
+		}
+		zend_generics_arg_info_addref(entries, total);
 		op_array->arg_info = entries + has_ret;
 		op_array->fn_flags2 |= ZEND_ACC2_GENERIC_SUBST_ARG_INFO;
 	}
@@ -920,9 +1015,13 @@ ZEND_API void zend_generics_substitute_closure_method_signature(
 				ZSTR_VAL(tname), ZSTR_LEN(tname), &arg);
 			ZEND_ASSERT(found);
 			if (ZEND_TYPE_HAS_NAME(*arg)) {
-				type->ptr = ZEND_TYPE_NAME(*arg);
+				zend_string *aname = ZEND_TYPE_NAME(*arg);
+				zend_string_addref(aname);
+				zend_string_release(tname);
+				type->ptr = aname;
 				type->type_mask = _ZEND_TYPE_NAME_BIT | extra;
 			} else {
+				zend_string_release(tname);
 				type->ptr = NULL;
 				type->type_mask = ZEND_TYPE_PURE_MASK(*arg) | extra;
 			}
@@ -930,10 +1029,13 @@ ZEND_API void zend_generics_substitute_closure_method_signature(
 			zend_string *sub = zend_generics_substitute_symbol_str(
 				ZSTR_VAL(tname), ZSTR_LEN(tname), mgp, mbind, NULL, NULL);
 			if (!sub) {
+				/* Entries stay owned and flagged; teardown stays balanced. */
 				return;
 			}
 			sub = zend_generics_request_type_name(sub);
 			sub = zend_generics_binding_own_name(mbind, sub);
+			zend_string_addref(sub);
+			zend_string_release(tname);
 			type->ptr = sub;
 			type->type_mask = _ZEND_TYPE_NAME_BIT | extra;
 		}
@@ -991,15 +1093,17 @@ static zend_op_array *zend_generics_clone_method(
 			zend_arg_info *entries = (zend_arg_info *) (block + sizeof(zend_arg_info *));
 			memcpy(entries, tpl_base, total * sizeof(zend_arg_info));
 			for (uint32_t i = 0; i < total; i++) {
-				/* These entries are never destroyed (the template's original
-				 * arg_info is restored before the final free), so they must
-				 * not take string references. */
 				if (!zend_generics_substitute_type(
 						&entries[i].type, template_ce, binding, display_name,
-						/* take_refs */ false)) {
+						/* take_refs */ true)) {
+					/* Only the earlier types hold references yet. */
+					while (i-- > 0) {
+						zend_type_release(entries[i].type, /* persistent */ false);
+					}
 					return NULL;
 				}
 			}
+			zend_generics_arg_info_addref(entries, total);
 			new_fn->arg_info = entries + has_ret;
 			new_fn->fn_flags2 |= ZEND_ACC2_GENERIC_SUBST_ARG_INFO;
 		}
@@ -1145,6 +1249,15 @@ static zend_class_entry *zend_generics_stamp_ce(
 		for (; p != end; p++) {
 			zend_string_addref(p->key);
 			const zend_property_info *prop_info = Z_PTR(p->val);
+			if (prop_info->ce != template_ce) {
+				/* Inherited from a concrete parent: cannot mention type
+				 * parameters, and its declaring scope must stay the parent
+				 * (visibility from the parent's own scope -- e.g. the
+				 * exception machinery writing Exception's protected
+				 * properties -- depends on it). Share, exactly as ordinary
+				 * inheritance does. */
+				continue;
+			}
 			zend_property_info *new_prop_info =
 				zend_arena_alloc(&CG(arena), sizeof(zend_property_info));
 			Z_PTR(p->val) = new_prop_info;
@@ -1198,6 +1311,10 @@ static zend_class_entry *zend_generics_stamp_ce(
 		for (; p != end; p++) {
 			zend_string_addref(p->key);
 			const zend_class_constant *c = Z_PTR(p->val);
+			if (c->ce != template_ce) {
+				/* Inherited from a concrete parent: share (see properties). */
+				continue;
+			}
 			zend_class_constant *new_c =
 				zend_arena_alloc(&CG(arena), sizeof(zend_class_constant));
 			Z_PTR(p->val) = new_c;
@@ -3446,6 +3563,12 @@ ZEND_API zend_function *zend_generics_get_method_instantiation(
 				*(zend_arg_info **) block = zend_generics_base_arg_info(&base->op_array);
 				zend_arg_info *entries = (zend_arg_info *) (block + sizeof(zend_arg_info *));
 				memcpy(entries, tpl_base, total * sizeof(zend_arg_info));
+				/* destroy_op_array releases every flagged block's strings and
+				 * types (per-header ownership); own the copies first. */
+				for (uint32_t i = 0; i < total; i++) {
+					zend_generics_type_copy_ctor(&entries[i].type, /* take_refs */ true);
+				}
+				zend_generics_arg_info_addref(entries, total);
 				for (uint32_t i = 0; i < total; i++) {
 					zend_type *type = &entries[i].type;
 					if (!ZEND_TYPE_HAS_NAME(*type)
@@ -3461,11 +3584,13 @@ ZEND_API zend_function *zend_generics_get_method_instantiation(
 							ZSTR_VAL(tname), ZSTR_LEN(tname), &arg);
 						ZEND_ASSERT(found);
 						if (ZEND_TYPE_HAS_NAME(*arg)) {
-							/* No ref taken: entries are never destroyed (the
-							 * base's original arg_info is restored first). */
-							type->ptr = ZEND_TYPE_NAME(*arg);
+							zend_string *aname = ZEND_TYPE_NAME(*arg);
+							zend_string_addref(aname);
+							zend_string_release(tname);
+							type->ptr = aname;
 							type->type_mask = _ZEND_TYPE_NAME_BIT | extra;
 						} else {
+							zend_string_release(tname);
 							type->ptr = NULL;
 							type->type_mask = ZEND_TYPE_PURE_MASK(*arg) | extra;
 						}
@@ -3475,11 +3600,22 @@ ZEND_API zend_function *zend_generics_get_method_instantiation(
 						zend_string *sub = zend_generics_substitute_symbol_str(
 							ZSTR_VAL(tname), ZSTR_LEN(tname), mgp, binding, NULL, NULL);
 						if (!sub) {
+							for (uint32_t j = 0; j < total; j++) {
+								if (entries[j].name) {
+									zend_string_release(entries[j].name);
+								}
+								if (entries[j].doc_comment) {
+									zend_string_release(entries[j].doc_comment);
+								}
+								zend_type_release(entries[j].type, /* persistent */ false);
+							}
 							goto fail;
 						}
 						sub = zend_generics_request_type_name(sub);
-						/* Owned by this instantiation; released with it. */
+						/* The binding holds one ref; the block takes its own. */
 						sub = zend_generics_binding_own_name(binding, sub);
+						zend_string_addref(sub);
+						zend_string_release(tname);
 						type->ptr = sub;
 						type->type_mask = _ZEND_TYPE_NAME_BIT | extra;
 					}

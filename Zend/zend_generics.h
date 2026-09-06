@@ -39,6 +39,15 @@ ZEND_API void zend_generics_substitute_closure_signature(
 ZEND_API void zend_generics_substitute_closure_method_signature(
 		zend_op_array *op_array);
 
+/* Teardown for an op_array flagged ZEND_ACC2_GENERIC_SUBST_ARG_INFO: releases
+ * what its arg_info copy owns and restores the template's array. */
+ZEND_API void zend_generics_release_substituted_arg_info(zend_op_array *op_array);
+
+/* Re-establish sole ownership of a substituted arg_info block after an op_array
+ * header carrying ZEND_ACC2_GENERIC_SUBST_ARG_INFO has been memcpy'd (closure
+ * rebinding). Gives the copy its own block so teardown releases each once. */
+ZEND_API void zend_generics_dup_substituted_arg_info(zend_op_array *op_array);
+
 /* Maps a template type-parameter index (as carried by
  * ZEND_FETCH_CLASS_TYPE_PARAM opcodes) to the argument index in the scope's
  * binding. Identity without a pack; with one, post-pack params shift by the

@@ -30,6 +30,7 @@
 #include "zend_surfaces.h"
 #include "zend_attributes.h"
 #include "zend_constants.h"
+#include "zend_generics.h"
 #include "zend_observer.h"
 
 ZEND_API zend_class_entry* (*zend_inheritance_cache_get)(zend_class_entry *ce, zend_class_entry *parent, zend_class_entry **traits_and_interfaces) = NULL;
@@ -2509,6 +2510,12 @@ static void zend_add_trait_method(zend_class_entry *ce, zend_string *name, zend_
 		new_fn = zend_arena_alloc(&CG(arena), sizeof(zend_op_array));
 		memcpy(new_fn, fn, sizeof(zend_op_array));
 		new_fn->op_array.fn_flags &= ~ZEND_ACC_IMMUTABLE;
+		if (UNEXPECTED(new_fn->op_array.fn_flags2 & ZEND_ACC2_GENERIC_SUBST_ARG_INFO)) {
+			/* The trait is a generic instantiation: the memcpy shared its
+			 * substituted arg_info block and ownership flag; give this copy
+			 * its own so teardown releases each exactly once. */
+			zend_generics_dup_substituted_arg_info(&new_fn->op_array);
+		}
 	}
 	new_fn->common.fn_flags |= ZEND_ACC_TRAIT_CLONE;
 
@@ -3094,6 +3101,10 @@ static void zend_do_traits_property_binding(zend_class_entry *ce, zend_class_ent
 						zend_function *new_fn = zend_arena_alloc(&CG(arena), sizeof(zend_op_array));
 						memcpy(new_fn, old_fn, sizeof(zend_op_array));
 						new_fn->op_array.fn_flags &= ~ZEND_ACC_IMMUTABLE;
+						if (UNEXPECTED(new_fn->op_array.fn_flags2 & ZEND_ACC2_GENERIC_SUBST_ARG_INFO)) {
+							/* Same as zend_add_trait_method: own the substituted block. */
+							zend_generics_dup_substituted_arg_info(&new_fn->op_array);
+						}
 						new_fn->common.fn_flags |= ZEND_ACC_TRAIT_CLONE;
 						new_fn->common.prop_info = new_prop;
 						if (j == ZEND_PROPERTY_HOOK_SET
@@ -4146,7 +4157,9 @@ ZEND_API zend_class_entry *zend_try_early_bind(zend_class_entry *ce, zend_class_
 	zend_class_entry *proto = NULL;
 	zend_class_entry *orig_linking_class;
 
-	if (UNEXPECTED(parent_ce->ce_flags2 & ZEND_ACC2_GENERIC_TEMPLATE)) {
+	/* parent_ce is NULL when re-binding an already-linked, parentless class
+	 * from the delayed early binding list (GH-8846). */
+	if (UNEXPECTED(parent_ce && (parent_ce->ce_flags2 & ZEND_ACC2_GENERIC_TEMPLATE))) {
 		/* Never early-bind against a generic template; the runtime link path
 		 * reports the missing type arguments. */
 		return NULL;
