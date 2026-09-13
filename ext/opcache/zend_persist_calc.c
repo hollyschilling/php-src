@@ -223,6 +223,22 @@ static void zend_persist_type_calc(zend_type *type)
 
 static void zend_persist_op_array_calc_ex(zend_op_array *op_array)
 {
+	/* Must come before the "already stored" early return below, to match
+	 * zend_persist_op_array_ex(), which copies generic_params before its own.
+	 * Otherwise an op_array taking that return is copied but never sized. */
+	if (op_array->generic_params
+			&& !zend_shared_alloc_get_xlat_entry(op_array->generic_params)) {
+		zend_shared_alloc_register_xlat_entry(op_array->generic_params, op_array->generic_params);
+		for (uint32_t i = 0; i < op_array->generic_params->num_params; i++) {
+			ADD_INTERNED_STRING(op_array->generic_params->params[i].name);
+			if (op_array->generic_params->params[i].bound_name) {
+				ADD_INTERNED_STRING(op_array->generic_params->params[i].bound_name);
+			}
+		}
+		ADD_SIZE(sizeof(zend_generic_params)
+			+ (op_array->generic_params->num_params - 1) * sizeof(zend_generic_param));
+	}
+
 	if (op_array->function_name) {
 		const zend_string *old_name = op_array->function_name;
 		ADD_INTERNED_STRING(op_array->function_name);
@@ -317,19 +333,6 @@ static void zend_persist_op_array_calc_ex(zend_op_array *op_array)
 
 	if (op_array->filename) {
 		ADD_STRING(op_array->filename);
-	}
-
-	if (op_array->generic_params
-			&& !zend_shared_alloc_get_xlat_entry(op_array->generic_params)) {
-		zend_shared_alloc_register_xlat_entry(op_array->generic_params, op_array->generic_params);
-		for (uint32_t i = 0; i < op_array->generic_params->num_params; i++) {
-			ADD_INTERNED_STRING(op_array->generic_params->params[i].name);
-			if (op_array->generic_params->params[i].bound_name) {
-				ADD_INTERNED_STRING(op_array->generic_params->params[i].bound_name);
-			}
-		}
-		ADD_SIZE(sizeof(zend_generic_params)
-			+ (op_array->generic_params->num_params - 1) * sizeof(zend_generic_param));
 	}
 
 	if (op_array->arg_info) {
