@@ -1102,6 +1102,16 @@ zend_jit_trace_stop ZEND_FASTCALL zend_jit_trace_execute(zend_execute_data  *ex,
 				stop = ZEND_JIT_TRACE_STOP_INTERPRETER;
 				break;
 			}
+			if (EX(call)->func->type == ZEND_USER_FUNCTION
+			 && EX(call)->func->op_array.generic_binding) {
+				/* Don't trace into a copy of a generic method. All its copies
+				 * share the same bytecode, so compiled code cannot tell which
+				 * one it is calling, and each copy only lives for one request,
+				 * so details of it compiled into the trace (such as its return
+				 * type) would be wrong in later requests. */
+				stop = ZEND_JIT_TRACE_STOP_INTERPRETER;
+				break;
+			}
 			if (EX(call)->func->type == ZEND_INTERNAL_FUNCTION) {
 				zend_function *func = EX(call)->func;
 
