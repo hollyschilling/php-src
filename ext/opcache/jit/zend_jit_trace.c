@@ -9060,9 +9060,13 @@ static int zend_jit_restart_hot_trace_counters(zend_op_array *op_array)
  * are entered through the generic dispatch handlers. */
 static zend_always_inline bool zend_jit_op_array_is_generic_family(const zend_op_array *op_array)
 {
-	return op_array->scope
-		&& (op_array->scope->ce_flags2
-			& (ZEND_ACC2_GENERIC_TEMPLATE|ZEND_ACC2_GENERIC_INSTANCE));
+	/* A generic method is copied for each set of type arguments it is called
+	 * with, just like the methods of a generic class, so it needs the same
+	 * per-copy handling even when its class is not generic. */
+	return op_array->generic_params
+		|| (op_array->scope
+			&& (op_array->scope->ce_flags2
+				& (ZEND_ACC2_GENERIC_TEMPLATE|ZEND_ACC2_GENERIC_INSTANCE)));
 }
 
 static int zend_jit_setup_hot_trace_counters(zend_op_array *op_array)
