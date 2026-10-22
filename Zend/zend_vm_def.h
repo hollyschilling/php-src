@@ -3785,6 +3785,14 @@ ZEND_VM_HOT_OBJ_HANDLER(112, ZEND_INIT_METHOD_CALL, CONST|TMP|UNUSED|THIS|CV, CO
 						FREE_OP1();
 						ZEND_VM_NEXT_OPCODE();
 					}
+					/* The scalar lookup may have run the class autoloader for
+					 * imported-but-unloaded extensions; if the autoloader
+					 * threw, propagate instead of raising on top of it. */
+					if (UNEXPECTED(EG(exception))) {
+						FREE_OP2();
+						FREE_OP1();
+						HANDLE_EXCEPTION();
+					}
 				}
 				zend_invalid_method_call(object, function_name);
 				FREE_OP2();

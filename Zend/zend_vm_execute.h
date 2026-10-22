@@ -7507,6 +7507,16 @@ static ZEND_VM_COLD ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_FUNC_CCONV ZEND_
 
 						ZEND_VM_NEXT_OPCODE();
 					}
+					/* The scalar lookup may have run the class autoloader for
+					 * imported-but-unloaded extensions; if the autoloader
+					 * threw, propagate instead of raising on top of it. */
+					if (UNEXPECTED(EG(exception))) {
+
+
+
+
+						HANDLE_EXCEPTION();
+					}
 				}
 				zend_invalid_method_call(object, function_name);
 
@@ -10322,6 +10332,15 @@ static ZEND_VM_COLD ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_FUNC_CCONV ZEND_
 
 						ZEND_VM_NEXT_OPCODE();
 					}
+					/* The scalar lookup may have run the class autoloader for
+					 * imported-but-unloaded extensions; if the autoloader
+					 * threw, propagate instead of raising on top of it. */
+					if (UNEXPECTED(EG(exception))) {
+						zval_ptr_dtor_nogc(EX_VAR(opline->op2.var));
+
+
+						HANDLE_EXCEPTION();
+					}
 				}
 				zend_invalid_method_call(object, function_name);
 				zval_ptr_dtor_nogc(EX_VAR(opline->op2.var));
@@ -13009,6 +13028,16 @@ static ZEND_VM_COLD ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_FUNC_CCONV ZEND_
 
 
 						ZEND_VM_NEXT_OPCODE();
+					}
+					/* The scalar lookup may have run the class autoloader for
+					 * imported-but-unloaded extensions; if the autoloader
+					 * threw, propagate instead of raising on top of it. */
+					if (UNEXPECTED(EG(exception))) {
+
+
+
+
+						HANDLE_EXCEPTION();
 					}
 				}
 				zend_invalid_method_call(object, function_name);
@@ -19426,6 +19455,15 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_FUNC_CCONV ZEND_INIT_METHOD_C
 						zval_ptr_dtor_nogc(EX_VAR(opline->op1.var));
 						ZEND_VM_NEXT_OPCODE();
 					}
+					/* The scalar lookup may have run the class autoloader for
+					 * imported-but-unloaded extensions; if the autoloader
+					 * threw, propagate instead of raising on top of it. */
+					if (UNEXPECTED(EG(exception))) {
+
+
+						zval_ptr_dtor_nogc(EX_VAR(opline->op1.var));
+						HANDLE_EXCEPTION();
+					}
 				}
 				zend_invalid_method_call(object, function_name);
 
@@ -21033,6 +21071,14 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_FUNC_CCONV ZEND_INIT_METHOD_C
 						}
 						zval_ptr_dtor_nogc(EX_VAR(opline->op1.var));
 						ZEND_VM_NEXT_OPCODE();
+					}
+					/* The scalar lookup may have run the class autoloader for
+					 * imported-but-unloaded extensions; if the autoloader
+					 * threw, propagate instead of raising on top of it. */
+					if (UNEXPECTED(EG(exception))) {
+						zval_ptr_dtor_nogc(EX_VAR(opline->op2.var));
+						zval_ptr_dtor_nogc(EX_VAR(opline->op1.var));
+						HANDLE_EXCEPTION();
 					}
 				}
 				zend_invalid_method_call(object, function_name);
@@ -22925,6 +22971,15 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_FUNC_CCONV ZEND_INIT_METHOD_C
 						}
 						zval_ptr_dtor_nogc(EX_VAR(opline->op1.var));
 						ZEND_VM_NEXT_OPCODE();
+					}
+					/* The scalar lookup may have run the class autoloader for
+					 * imported-but-unloaded extensions; if the autoloader
+					 * threw, propagate instead of raising on top of it. */
+					if (UNEXPECTED(EG(exception))) {
+
+
+						zval_ptr_dtor_nogc(EX_VAR(opline->op1.var));
+						HANDLE_EXCEPTION();
 					}
 				}
 				zend_invalid_method_call(object, function_name);
@@ -34645,6 +34700,16 @@ static ZEND_VM_HOT ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_FUNC_CCONV ZEND_I
 
 						ZEND_VM_NEXT_OPCODE();
 					}
+					/* The scalar lookup may have run the class autoloader for
+					 * imported-but-unloaded extensions; if the autoloader
+					 * threw, propagate instead of raising on top of it. */
+					if (UNEXPECTED(EG(exception))) {
+
+
+
+
+						HANDLE_EXCEPTION();
+					}
 				}
 				zend_invalid_method_call(object, function_name);
 
@@ -36789,6 +36854,15 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_FUNC_CCONV ZEND_INIT_METHOD_C
 
 
 						ZEND_VM_NEXT_OPCODE();
+					}
+					/* The scalar lookup may have run the class autoloader for
+					 * imported-but-unloaded extensions; if the autoloader
+					 * threw, propagate instead of raising on top of it. */
+					if (UNEXPECTED(EG(exception))) {
+						zval_ptr_dtor_nogc(EX_VAR(opline->op2.var));
+
+
+						HANDLE_EXCEPTION();
 					}
 				}
 				zend_invalid_method_call(object, function_name);
@@ -39444,6 +39518,16 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_FUNC_CCONV ZEND_INIT_METHOD_C
 
 
 						ZEND_VM_NEXT_OPCODE();
+					}
+					/* The scalar lookup may have run the class autoloader for
+					 * imported-but-unloaded extensions; if the autoloader
+					 * threw, propagate instead of raising on top of it. */
+					if (UNEXPECTED(EG(exception))) {
+
+
+
+
+						HANDLE_EXCEPTION();
 					}
 				}
 				zend_invalid_method_call(object, function_name);
@@ -44431,6 +44515,16 @@ static ZEND_VM_HOT ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_FUNC_CCONV ZEND_I
 
 						ZEND_VM_NEXT_OPCODE();
 					}
+					/* The scalar lookup may have run the class autoloader for
+					 * imported-but-unloaded extensions; if the autoloader
+					 * threw, propagate instead of raising on top of it. */
+					if (UNEXPECTED(EG(exception))) {
+
+
+
+
+						HANDLE_EXCEPTION();
+					}
 				}
 				zend_invalid_method_call(object, function_name);
 
@@ -48273,6 +48367,15 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_FUNC_CCONV ZEND_INIT_METHOD_C
 
 
 						ZEND_VM_NEXT_OPCODE();
+					}
+					/* The scalar lookup may have run the class autoloader for
+					 * imported-but-unloaded extensions; if the autoloader
+					 * threw, propagate instead of raising on top of it. */
+					if (UNEXPECTED(EG(exception))) {
+						zval_ptr_dtor_nogc(EX_VAR(opline->op2.var));
+
+
+						HANDLE_EXCEPTION();
 					}
 				}
 				zend_invalid_method_call(object, function_name);
@@ -53475,6 +53578,16 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_FUNC_CCONV ZEND_INIT_METHOD_C
 
 
 						ZEND_VM_NEXT_OPCODE();
+					}
+					/* The scalar lookup may have run the class autoloader for
+					 * imported-but-unloaded extensions; if the autoloader
+					 * threw, propagate instead of raising on top of it. */
+					if (UNEXPECTED(EG(exception))) {
+
+
+
+
+						HANDLE_EXCEPTION();
 					}
 				}
 				zend_invalid_method_call(object, function_name);
@@ -60854,6 +60967,16 @@ static ZEND_VM_COLD ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_CCONV ZEND_INIT_
 
 						ZEND_VM_NEXT_OPCODE();
 					}
+					/* The scalar lookup may have run the class autoloader for
+					 * imported-but-unloaded extensions; if the autoloader
+					 * threw, propagate instead of raising on top of it. */
+					if (UNEXPECTED(EG(exception))) {
+
+
+
+
+						HANDLE_EXCEPTION();
+					}
 				}
 				zend_invalid_method_call(object, function_name);
 
@@ -63669,6 +63792,15 @@ static ZEND_VM_COLD ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_CCONV ZEND_INIT_
 
 						ZEND_VM_NEXT_OPCODE();
 					}
+					/* The scalar lookup may have run the class autoloader for
+					 * imported-but-unloaded extensions; if the autoloader
+					 * threw, propagate instead of raising on top of it. */
+					if (UNEXPECTED(EG(exception))) {
+						zval_ptr_dtor_nogc(EX_VAR(opline->op2.var));
+
+
+						HANDLE_EXCEPTION();
+					}
 				}
 				zend_invalid_method_call(object, function_name);
 				zval_ptr_dtor_nogc(EX_VAR(opline->op2.var));
@@ -66254,6 +66386,16 @@ static ZEND_VM_COLD ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_CCONV ZEND_INIT_
 
 
 						ZEND_VM_NEXT_OPCODE();
+					}
+					/* The scalar lookup may have run the class autoloader for
+					 * imported-but-unloaded extensions; if the autoloader
+					 * threw, propagate instead of raising on top of it. */
+					if (UNEXPECTED(EG(exception))) {
+
+
+
+
+						HANDLE_EXCEPTION();
 					}
 				}
 				zend_invalid_method_call(object, function_name);
@@ -72671,6 +72813,15 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_CCONV ZEND_INIT_METHOD_CALL_S
 						zval_ptr_dtor_nogc(EX_VAR(opline->op1.var));
 						ZEND_VM_NEXT_OPCODE();
 					}
+					/* The scalar lookup may have run the class autoloader for
+					 * imported-but-unloaded extensions; if the autoloader
+					 * threw, propagate instead of raising on top of it. */
+					if (UNEXPECTED(EG(exception))) {
+
+
+						zval_ptr_dtor_nogc(EX_VAR(opline->op1.var));
+						HANDLE_EXCEPTION();
+					}
 				}
 				zend_invalid_method_call(object, function_name);
 
@@ -74278,6 +74429,14 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_CCONV ZEND_INIT_METHOD_CALL_S
 						}
 						zval_ptr_dtor_nogc(EX_VAR(opline->op1.var));
 						ZEND_VM_NEXT_OPCODE();
+					}
+					/* The scalar lookup may have run the class autoloader for
+					 * imported-but-unloaded extensions; if the autoloader
+					 * threw, propagate instead of raising on top of it. */
+					if (UNEXPECTED(EG(exception))) {
+						zval_ptr_dtor_nogc(EX_VAR(opline->op2.var));
+						zval_ptr_dtor_nogc(EX_VAR(opline->op1.var));
+						HANDLE_EXCEPTION();
 					}
 				}
 				zend_invalid_method_call(object, function_name);
@@ -76070,6 +76229,15 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_CCONV ZEND_INIT_METHOD_CALL_S
 						}
 						zval_ptr_dtor_nogc(EX_VAR(opline->op1.var));
 						ZEND_VM_NEXT_OPCODE();
+					}
+					/* The scalar lookup may have run the class autoloader for
+					 * imported-but-unloaded extensions; if the autoloader
+					 * threw, propagate instead of raising on top of it. */
+					if (UNEXPECTED(EG(exception))) {
+
+
+						zval_ptr_dtor_nogc(EX_VAR(opline->op1.var));
+						HANDLE_EXCEPTION();
 					}
 				}
 				zend_invalid_method_call(object, function_name);
@@ -87790,6 +87958,16 @@ static ZEND_VM_HOT ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_CCONV ZEND_INIT_M
 
 						ZEND_VM_NEXT_OPCODE();
 					}
+					/* The scalar lookup may have run the class autoloader for
+					 * imported-but-unloaded extensions; if the autoloader
+					 * threw, propagate instead of raising on top of it. */
+					if (UNEXPECTED(EG(exception))) {
+
+
+
+
+						HANDLE_EXCEPTION();
+					}
 				}
 				zend_invalid_method_call(object, function_name);
 
@@ -89934,6 +90112,15 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_CCONV ZEND_INIT_METHOD_CALL_S
 
 
 						ZEND_VM_NEXT_OPCODE();
+					}
+					/* The scalar lookup may have run the class autoloader for
+					 * imported-but-unloaded extensions; if the autoloader
+					 * threw, propagate instead of raising on top of it. */
+					if (UNEXPECTED(EG(exception))) {
+						zval_ptr_dtor_nogc(EX_VAR(opline->op2.var));
+
+
+						HANDLE_EXCEPTION();
 					}
 				}
 				zend_invalid_method_call(object, function_name);
@@ -92589,6 +92776,16 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_CCONV ZEND_INIT_METHOD_CALL_S
 
 
 						ZEND_VM_NEXT_OPCODE();
+					}
+					/* The scalar lookup may have run the class autoloader for
+					 * imported-but-unloaded extensions; if the autoloader
+					 * threw, propagate instead of raising on top of it. */
+					if (UNEXPECTED(EG(exception))) {
+
+
+
+
+						HANDLE_EXCEPTION();
 					}
 				}
 				zend_invalid_method_call(object, function_name);
@@ -97576,6 +97773,16 @@ static ZEND_VM_HOT ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_CCONV ZEND_INIT_M
 
 						ZEND_VM_NEXT_OPCODE();
 					}
+					/* The scalar lookup may have run the class autoloader for
+					 * imported-but-unloaded extensions; if the autoloader
+					 * threw, propagate instead of raising on top of it. */
+					if (UNEXPECTED(EG(exception))) {
+
+
+
+
+						HANDLE_EXCEPTION();
+					}
 				}
 				zend_invalid_method_call(object, function_name);
 
@@ -101418,6 +101625,15 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_CCONV ZEND_INIT_METHOD_CALL_S
 
 
 						ZEND_VM_NEXT_OPCODE();
+					}
+					/* The scalar lookup may have run the class autoloader for
+					 * imported-but-unloaded extensions; if the autoloader
+					 * threw, propagate instead of raising on top of it. */
+					if (UNEXPECTED(EG(exception))) {
+						zval_ptr_dtor_nogc(EX_VAR(opline->op2.var));
+
+
+						HANDLE_EXCEPTION();
 					}
 				}
 				zend_invalid_method_call(object, function_name);
@@ -106518,6 +106734,16 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_CCONV ZEND_INIT_METHOD_CALL_S
 
 
 						ZEND_VM_NEXT_OPCODE();
+					}
+					/* The scalar lookup may have run the class autoloader for
+					 * imported-but-unloaded extensions; if the autoloader
+					 * threw, propagate instead of raising on top of it. */
+					if (UNEXPECTED(EG(exception))) {
+
+
+
+
+						HANDLE_EXCEPTION();
 					}
 				}
 				zend_invalid_method_call(object, function_name);

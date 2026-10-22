@@ -16,9 +16,11 @@ try {
 }
 
 // Negative-cached now: the loader is not consulted again, so the ordinary
-// errors come back.
+// errors come back — on the object path and on the scalar path.
 try { $o->nope(); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+try { "s"->nope(); } catch (Error $e) { echo $e->getMessage(), "\n"; }
 ?>
 --EXPECT--
 loader says no: Vendor\Missing
 Call to undefined method stdClass::nope()
+Call to a member function nope() on string
