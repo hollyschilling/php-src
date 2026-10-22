@@ -8734,6 +8734,27 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_FUNC_CCONV ZEND_CALLABLE_CONV
 	SAVE_OPLINE();
 
 	zend_execute_data *call = EX(call);
+
+	if (UNEXPECTED(Z_TYPE(call->This) >= IS_FALSE && Z_TYPE(call->This) <= IS_ARRAY)) {
+		/* Partial applications cannot yet carry a by-value scalar receiver
+		 * (the same limitation as first-class callables): unwind the
+		 * pending call frame before zend_partial_create() would read the
+		 * non-object This slot as a class entry. */
+		zend_throw_error(NULL,
+			"Cannot create a partial application from a scalar extension method");
+		zend_vm_stack_free_args(call);
+		if (ZEND_CALL_INFO(call) & ZEND_CALL_HAS_EXTRA_NAMED_PARAMS) {
+			zend_free_extra_named_params(call->extra_named_params);
+		}
+		if (ZEND_CALL_INFO(call) & ZEND_CALL_RELEASE_THIS) {
+			zend_vm_release_call_frame_this(call);
+		}
+		EX(call) = call->prev_execute_data;
+		zend_vm_stack_free_call_frame(call);
+		ZVAL_UNDEF(EX_VAR(opline->result.var));
+		HANDLE_EXCEPTION();
+	}
+
 	void **cache_slot = CACHE_ADDR(opline->extended_value & ~ZEND_PARTIAL_FLAGS);
 	zval *named_positions = RT_CONSTANT(opline, opline->op2);
 	zend_string *pfa_name = Z_STR_P(RT_CONSTANT(opline, opline->op1));
@@ -8763,7 +8784,7 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_FUNC_CCONV ZEND_CALLABLE_CONV
 	}
 
 	if (ZEND_CALL_INFO(call) & ZEND_CALL_RELEASE_THIS) {
-		OBJ_RELEASE(Z_OBJ(call->This));
+		zend_vm_release_call_frame_this(call);
 	} else if (ZEND_CALL_INFO(call) & ZEND_CALL_CLOSURE) {
 		OBJ_RELEASE(ZEND_CLOSURE_OBJECT(call->func));
 	}
@@ -12147,6 +12168,27 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_FUNC_CCONV ZEND_CALLABLE_CONV
 	SAVE_OPLINE();
 
 	zend_execute_data *call = EX(call);
+
+	if (UNEXPECTED(Z_TYPE(call->This) >= IS_FALSE && Z_TYPE(call->This) <= IS_ARRAY)) {
+		/* Partial applications cannot yet carry a by-value scalar receiver
+		 * (the same limitation as first-class callables): unwind the
+		 * pending call frame before zend_partial_create() would read the
+		 * non-object This slot as a class entry. */
+		zend_throw_error(NULL,
+			"Cannot create a partial application from a scalar extension method");
+		zend_vm_stack_free_args(call);
+		if (ZEND_CALL_INFO(call) & ZEND_CALL_HAS_EXTRA_NAMED_PARAMS) {
+			zend_free_extra_named_params(call->extra_named_params);
+		}
+		if (ZEND_CALL_INFO(call) & ZEND_CALL_RELEASE_THIS) {
+			zend_vm_release_call_frame_this(call);
+		}
+		EX(call) = call->prev_execute_data;
+		zend_vm_stack_free_call_frame(call);
+		ZVAL_UNDEF(EX_VAR(opline->result.var));
+		HANDLE_EXCEPTION();
+	}
+
 	void **cache_slot = CACHE_ADDR(opline->extended_value & ~ZEND_PARTIAL_FLAGS);
 	zval *named_positions = NULL;
 	zend_string *pfa_name = Z_STR_P(RT_CONSTANT(opline, opline->op1));
@@ -12176,7 +12218,7 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_FUNC_CCONV ZEND_CALLABLE_CONV
 	}
 
 	if (ZEND_CALL_INFO(call) & ZEND_CALL_RELEASE_THIS) {
-		OBJ_RELEASE(Z_OBJ(call->This));
+		zend_vm_release_call_frame_this(call);
 	} else if (ZEND_CALL_INFO(call) & ZEND_CALL_CLOSURE) {
 		OBJ_RELEASE(ZEND_CLOSURE_OBJECT(call->func));
 	}
@@ -62194,6 +62236,27 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_CCONV ZEND_CALLABLE_CONVERT_P
 	SAVE_OPLINE();
 
 	zend_execute_data *call = EX(call);
+
+	if (UNEXPECTED(Z_TYPE(call->This) >= IS_FALSE && Z_TYPE(call->This) <= IS_ARRAY)) {
+		/* Partial applications cannot yet carry a by-value scalar receiver
+		 * (the same limitation as first-class callables): unwind the
+		 * pending call frame before zend_partial_create() would read the
+		 * non-object This slot as a class entry. */
+		zend_throw_error(NULL,
+			"Cannot create a partial application from a scalar extension method");
+		zend_vm_stack_free_args(call);
+		if (ZEND_CALL_INFO(call) & ZEND_CALL_HAS_EXTRA_NAMED_PARAMS) {
+			zend_free_extra_named_params(call->extra_named_params);
+		}
+		if (ZEND_CALL_INFO(call) & ZEND_CALL_RELEASE_THIS) {
+			zend_vm_release_call_frame_this(call);
+		}
+		EX(call) = call->prev_execute_data;
+		zend_vm_stack_free_call_frame(call);
+		ZVAL_UNDEF(EX_VAR(opline->result.var));
+		HANDLE_EXCEPTION();
+	}
+
 	void **cache_slot = CACHE_ADDR(opline->extended_value & ~ZEND_PARTIAL_FLAGS);
 	zval *named_positions = RT_CONSTANT(opline, opline->op2);
 	zend_string *pfa_name = Z_STR_P(RT_CONSTANT(opline, opline->op1));
@@ -62223,7 +62286,7 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_CCONV ZEND_CALLABLE_CONVERT_P
 	}
 
 	if (ZEND_CALL_INFO(call) & ZEND_CALL_RELEASE_THIS) {
-		OBJ_RELEASE(Z_OBJ(call->This));
+		zend_vm_release_call_frame_this(call);
 	} else if (ZEND_CALL_INFO(call) & ZEND_CALL_CLOSURE) {
 		OBJ_RELEASE(ZEND_CLOSURE_OBJECT(call->func));
 	}
@@ -65505,6 +65568,27 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_CCONV ZEND_CALLABLE_CONVERT_P
 	SAVE_OPLINE();
 
 	zend_execute_data *call = EX(call);
+
+	if (UNEXPECTED(Z_TYPE(call->This) >= IS_FALSE && Z_TYPE(call->This) <= IS_ARRAY)) {
+		/* Partial applications cannot yet carry a by-value scalar receiver
+		 * (the same limitation as first-class callables): unwind the
+		 * pending call frame before zend_partial_create() would read the
+		 * non-object This slot as a class entry. */
+		zend_throw_error(NULL,
+			"Cannot create a partial application from a scalar extension method");
+		zend_vm_stack_free_args(call);
+		if (ZEND_CALL_INFO(call) & ZEND_CALL_HAS_EXTRA_NAMED_PARAMS) {
+			zend_free_extra_named_params(call->extra_named_params);
+		}
+		if (ZEND_CALL_INFO(call) & ZEND_CALL_RELEASE_THIS) {
+			zend_vm_release_call_frame_this(call);
+		}
+		EX(call) = call->prev_execute_data;
+		zend_vm_stack_free_call_frame(call);
+		ZVAL_UNDEF(EX_VAR(opline->result.var));
+		HANDLE_EXCEPTION();
+	}
+
 	void **cache_slot = CACHE_ADDR(opline->extended_value & ~ZEND_PARTIAL_FLAGS);
 	zval *named_positions = NULL;
 	zend_string *pfa_name = Z_STR_P(RT_CONSTANT(opline, opline->op1));
@@ -65534,7 +65618,7 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_CCONV ZEND_CALLABLE_CONVERT_P
 	}
 
 	if (ZEND_CALL_INFO(call) & ZEND_CALL_RELEASE_THIS) {
-		OBJ_RELEASE(Z_OBJ(call->This));
+		zend_vm_release_call_frame_this(call);
 	} else if (ZEND_CALL_INFO(call) & ZEND_CALL_CLOSURE) {
 		OBJ_RELEASE(ZEND_CLOSURE_OBJECT(call->func));
 	}
