@@ -57,14 +57,19 @@ ZEND_API void zend_generics_dup_substituted_arg_info(zend_op_array *op_array);
 ZEND_API bool zend_generics_name_mentions_params(
 		const zend_string *name, const zend_generic_params *gp);
 
-/* Resolve a compiler-emitted symbolic generic class reference ("T", "C<T>",
- * "U", "Sequence<U>") against the executing method instantiation's binding
- * (if any) and, secondarily, the scope's class binding. Owned string, or
- * NULL with an exception. */
-ZEND_API zend_string *zend_generics_resolve_type_symbol(const char *sym, size_t sym_len);
-
 ZEND_API uint32_t zend_generics_binding_arg_index(
 		const zend_class_entry *scope_ce, uint32_t param_idx);
+
+/* Generic METHODS (spike): stamp (or fetch the cached) instantiation of a
+ * generic method for a mangled call name such as "map<App\Price>". Returns
+ * NULL with an exception set on any structural failure. */
+ZEND_API zend_function *zend_generics_get_method_instantiation(
+		zend_class_entry *ce, zend_string *method_name, zend_string *lc_name);
+
+/* Resolve a compiler-emitted method-symbol class reference ("U",
+ * "Sequence<U>") against the executing method instantiation's binding (and,
+ * secondarily, the scope's class binding). Owned string or NULL + throw. */
+ZEND_API zend_string *zend_generics_resolve_type_symbol(const char *sym, size_t sym_len);
 
 /* Release the class-name references a binding argument holds, including
  * names inside composite (DNF) type lists; list buffers are arena-owned. */
@@ -95,11 +100,6 @@ ZEND_API bool zend_generics_variant_implements(
  * clone otherwise inherits through the header memcpy. NULL when no JIT, or
  * for JIT modes that exclude generic bodies. */
 ZEND_API extern void (*zend_generics_jit_clone_hook)(zend_op_array *op_array);
-/* Generic METHODS (spike): stamp (or fetch the cached) instantiation of a
- * generic method for a mangled call name such as "map<App\Price>". Returns
- * NULL with an exception set on any structural failure. */
-ZEND_API zend_function *zend_generics_get_method_instantiation(
-		zend_class_entry *ce, zend_string *method_name, zend_string *lc_name);
 
 END_EXTERN_C()
 
