@@ -70,6 +70,8 @@ enum _zend_ast_kind {
 	ZEND_AST_MATCH_ARM_LIST,
 	ZEND_AST_MODIFIER_LIST,
 	ZEND_AST_SURFACE_NAMES,
+	ZEND_AST_GENERIC_PARAM_LIST,
+	ZEND_AST_GENERIC_ARG_LIST,
 
 	/* 0 child nodes */
 	ZEND_AST_MAGIC_CONST = 0 << ZEND_AST_NUM_CHILDREN_SHIFT,
@@ -113,6 +115,8 @@ enum _zend_ast_kind {
 	ZEND_AST_CONTINUE,
 	ZEND_AST_PROPERTY_HOOK_SHORT_BODY,
 	ZEND_AST_MODULE_DECL,
+	/* "...Ts" in a generic type-argument list (pack expansion). */
+	ZEND_AST_GENERIC_ARG_SPREAD,
 
 	/* 2 child nodes */
 	ZEND_AST_DIM = 2 << ZEND_AST_NUM_CHILDREN_SHIFT,
@@ -158,6 +162,8 @@ enum _zend_ast_kind {
 	ZEND_AST_MODULE_EXPORT,
 	ZEND_AST_USE_MODULE,
 	ZEND_AST_PIPE,
+	ZEND_AST_GENERIC_PARAM,
+	ZEND_AST_GENERIC_TYPE,
 
 	/* Surfaces (RFC prototype): a `surface Name (implements Iface)?;` class
 	 * statement; a member declaration wrapped with its surface[...] name
@@ -232,7 +238,9 @@ typedef struct _zend_ast_op_array {
 	zend_op_array *op_array;
 } zend_ast_op_array;
 
-/* Separate structure for function and class declaration, as they need extra information. */
+/* Separate structure for function and class declaration, as they need extra
+ * information. child[5] holds the generic type-parameter list for METHODS
+ * (classes keep theirs in child[4], the enum-backing slot). */
 typedef struct _zend_ast_decl {
 	zend_ast_kind kind;
 	zend_ast_attr attr;
@@ -241,7 +249,7 @@ typedef struct _zend_ast_decl {
 	uint32_t flags;
 	zend_string *doc_comment;
 	zend_string *name;
-	zend_ast *child[5];
+	zend_ast *child[6];
 } zend_ast_decl;
 
 // TODO: rename
@@ -356,6 +364,11 @@ ZEND_API zend_ast * ZEND_FASTCALL zend_ast_arg_list_add(zend_ast *list, zend_ast
 ZEND_API zend_ast *zend_ast_create_decl(
 	zend_ast_kind kind, uint32_t flags, uint32_t start_lineno, zend_string *doc_comment,
 	zend_string *name, zend_ast *child0, zend_ast *child1, zend_ast *child2, zend_ast *child3, zend_ast *child4
+);
+ZEND_API zend_ast *zend_ast_create_decl_ex(
+	zend_ast_kind kind, uint32_t flags, uint32_t start_lineno, zend_string *doc_comment,
+	zend_string *name, zend_ast *child0, zend_ast *child1, zend_ast *child2, zend_ast *child3, zend_ast *child4,
+	zend_ast *child5
 );
 
 ZEND_API zend_ast * ZEND_FASTCALL zend_ast_create_fcc(zend_ast *args);

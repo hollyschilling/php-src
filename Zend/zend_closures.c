@@ -21,6 +21,7 @@
 #include "zend_API.h"
 #include "zend_closures.h"
 #include "zend_exceptions.h"
+#include "zend_generics.h"
 #include "zend_interfaces.h"
 #include "zend_objects.h"
 #include "zend_objects_API.h"
@@ -829,6 +830,29 @@ static void zend_create_closure_ex(
 		zend_string_addref(closure->func.op_array.function_name);
 		if (closure->func.op_array.refcount) {
 			(*closure->func.op_array.refcount)++;
+		}
+
+		if (UNEXPECTED(closure->func.op_array.fn_flags2 & ZEND_ACC2_GENERIC_SUBST_ARG_INFO)) {
+			/* The source already carries a substituted (concrete) signature —
+			 * it was itself created in a generic instantiation, and is now
+			 * being copied again (e.g. Closure::bind). The memcpy above shared
+			 * its arg_info block and the ownership flag; give this copy its own
+			 * block so teardown releases each exactly once. The signature is
+			 * already concrete, so it is correct for any new scope and must not
+			 * be re-substituted (the template's type parameters are gone). */
+			zend_generics_dup_substituted_arg_info(&closure->func.op_array);
+		} else if (UNEXPECTED(scope && scope->generic_binding)) {
+			/* Closures declared inside a generic instantiation carry the
+			 * template's symbolic parameter types; substitute into this
+			 * closure's own signature copy. */
+			zend_generics_substitute_closure_signature(&closure->func.op_array, scope);
+		}
+		if (UNEXPECTED(closure->func.op_array.generic_params != NULL
+				&& closure->func.op_array.generic_binding == NULL)) {
+			/* Closure nested in a generic METHOD: substitute the creating
+			 * instantiation's method-space arguments and adopt its binding
+			 * for body references. */
+			zend_generics_substitute_closure_method_signature(&closure->func.op_array);
 		}
 
 		/* For fake closures, we want to reuse the static variables of the original function. */

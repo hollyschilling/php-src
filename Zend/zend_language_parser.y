@@ -45,7 +45,12 @@ static YYSIZE_T zend_yytnamerr(char*, const char*);
 %define api.pure full
 %define api.value.type {zend_parser_stack_elem}
 %define parse.error verbose
-%expect 0
+/* The single expected shift/reduce conflict is the deliberate commitment of
+ * a plain '<' after 'new NAME' / 'instanceof NAME' to a generic
+ * type-argument list (shift) over completing the class reference and
+ * reading '<' as a comparison (reduce). Shifting is the intended
+ * resolution; see class_name_reference. */
+%expect 1
 
 %destructor { zend_ast_destroy($$); } <ast>
 %destructor { if ($$) zend_string_release_ex($$, 0); } <str>
@@ -214,6 +219,8 @@ static YYSIZE_T zend_yytnamerr(char*, const char*);
 %token T_SPACESHIP "'<=>'"
 %token T_SL "'<<'"
 %token T_SR "'>>'"
+%token T_GENERIC_OPEN "generic '<'"
+%token T_TURBOFISH "'::<'"
 %token T_INC "'++'"
 %token T_DEC "'--'"
 %token T_INT_CAST    "'(int)'"
@@ -269,6 +276,7 @@ static YYSIZE_T zend_yytnamerr(char*, const char*);
 %type <ast> static_var class_statement trait_adaptation trait_precedence trait_alias
 %type <ast> absolute_trait_method_reference trait_method_reference property echo_expr
 %type <ast> new_dereferenceable new_non_dereferenceable anonymous_class class_name class_name_reference simple_variable
+%type <ast> inheritance_class_name inheritance_class_name_list
 %type <ast> internal_functions_in_yacc
 %type <ast> scalar backticks_expr lexical_var function_call member_name property_name
 %type <ast> variable_class_name dereferenceable_scalar constant class_constant
@@ -287,6 +295,12 @@ static YYSIZE_T zend_yytnamerr(char*, const char*);
 %type <ast> isset_variable type return_type type_expr type_without_static
 %type <ast> identifier type_expr_without_static union_type_without_static_element union_type_without_static intersection_type_without_static
 %type <ast> inline_function union_type_element union_type intersection_type
+%type <ast> generic_params generic_param_list generic_param
+%type <ast> generic_type_args generic_arg_list generic_arg
+%type <ast> generic_arg_list_closed generic_arg_list_fused generic_arg_fused_tail
+%type <ast> generic_bound generic_param_fused
+%type <ast> generic_arg_member generic_arg_union generic_arg_union_element
+%type <ast> generic_arg_intersection generic_arg_fused_inst
 %type <ast> attributed_statement attributed_top_statement attributed_class_statement attributed_parameter
 %type <ast> attribute_decl attribute attributes attribute_group namespace_declaration_name
 %type <ast> match match_arm_list non_empty_match_arm_list match_arm match_arm_cond_list
@@ -376,11 +390,20 @@ name:
 	|	T_NAME_MODULE								{ $$ = $1; $$->attr = ZEND_NAME_MODULE; }
 ;
 
+/* Inside '#[...]' only an attribute name can follow, so a plain '<' after it
+ * is COMMITTED to opening a type-argument list (the only tokens that may
+ * follow the name are '(', ',' and ']'). */
 attribute_decl:
 		class_name
 			{ $$ = zend_ast_create(ZEND_AST_ATTRIBUTE, $1, NULL); }
 	|	class_name argument_list
 			{ $$ = zend_ast_create(ZEND_AST_ATTRIBUTE, $1, $2); }
+	|	name '<' generic_arg_list_closed
+			{ $$ = zend_ast_create(ZEND_AST_ATTRIBUTE,
+				  zend_ast_create(ZEND_AST_GENERIC_TYPE, $1, $3), NULL); }
+	|	name '<' generic_arg_list_closed argument_list
+			{ $$ = zend_ast_create(ZEND_AST_ATTRIBUTE,
+				  zend_ast_create(ZEND_AST_GENERIC_TYPE, $1, $3), $4); }
 ;
 
 attribute_group:
@@ -635,9 +658,18 @@ catch_list:
 			{ $$ = zend_ast_list_add($1, zend_ast_create(ZEND_AST_CATCH, $4, $5, $8)); }
 ;
 
+/* Inside 'catch (' only class names can appear, so a plain '<' after a name
+ * is COMMITTED to opening a type-argument list, like after 'new' and
+ * 'instanceof'; the lexer's bounded lookahead is not consulted. */
 catch_name_list:
 		class_name { $$ = zend_ast_create_list(1, ZEND_AST_NAME_LIST, $1); }
+	|	name '<' generic_arg_list_closed
+			{ $$ = zend_ast_create_list(1, ZEND_AST_NAME_LIST,
+				  zend_ast_create(ZEND_AST_GENERIC_TYPE, $1, $3)); }
 	|	catch_name_list '|' class_name { $$ = zend_ast_list_add($1, $3); }
+	|	catch_name_list '|' name '<' generic_arg_list_closed
+			{ $$ = zend_ast_list_add($1,
+				  zend_ast_create(ZEND_AST_GENERIC_TYPE, $3, $5)); }
 ;
 
 optional_variable:
@@ -687,11 +719,164 @@ is_variadic:
 
 class_declaration_statement:
 		class_modifiers T_CLASS { $<num>$ = CG(zend_lineno); }
-		T_STRING extends_from implements_list backup_doc_comment '{' class_statement_list '}'
-			{ $$ = zend_ast_create_decl(ZEND_AST_CLASS, $1, $<num>3, $7, zend_ast_get_str($4), $5, $6, $9, NULL, NULL); }
+		T_STRING generic_params extends_from implements_list backup_doc_comment '{' class_statement_list '}'
+			{ $$ = zend_ast_create_decl(ZEND_AST_CLASS, $1, $<num>3, $8, zend_ast_get_str($4), $6, $7, $10, NULL, $5); }
 	|	T_CLASS { $<num>$ = CG(zend_lineno); }
-		T_STRING extends_from implements_list backup_doc_comment '{' class_statement_list '}'
-			{ $$ = zend_ast_create_decl(ZEND_AST_CLASS, 0, $<num>2, $6, zend_ast_get_str($3), $4, $5, $8, NULL, NULL); }
+		T_STRING generic_params extends_from implements_list backup_doc_comment '{' class_statement_list '}'
+			{ $$ = zend_ast_create_decl(ZEND_AST_CLASS, 0, $<num>2, $7, zend_ast_get_str($3), $5, $6, $9, NULL, $4); }
+;
+
+generic_params:
+		%empty							{ $$ = NULL; }
+	|	generic_open generic_param_list '>'		{ $$ = $2; }
+	|	generic_open generic_param_fused
+			{ $$ = zend_ast_create_list(1, ZEND_AST_GENERIC_PARAM_LIST, $2); }
+	|	generic_open generic_param_list ',' generic_param_fused
+			{ $$ = zend_ast_list_add($2, $4); }
+;
+
+generic_open:
+		'<'
+	|	T_GENERIC_OPEN
+	|	T_TURBOFISH
+;
+
+generic_type_args:
+		generic_open generic_arg_list_closed	{ $$ = $2; }
+;
+
+/* An argument list together with its closing '>'. Adjacent closes of nested
+ * lists reach us as one T_SR ('>>') token; rather than splitting it in the
+ * lexer with fragile depth state, the fused alternatives below consume T_SR
+ * as two closes at the only place it can occur: after the final argument,
+ * when that argument is itself a nested instantiation. The fused forms
+ * compose, so '>>>' (T_SR '>') and deeper nestings fall out recursively. */
+generic_arg_list_closed:
+		generic_arg_list '>'		{ $$ = $1; }
+	|	generic_arg_list_fused		{ $$ = $1; }
+;
+
+generic_arg_list_fused:
+		generic_arg_fused_tail
+			{ $$ = zend_ast_create_list(1, ZEND_AST_GENERIC_ARG_LIST, $1); }
+	|	generic_arg_list ',' generic_arg_fused_tail
+			{ $$ = zend_ast_list_add($1, $3); }
+;
+
+/* Final argument whose own close and the enclosing list's close were lexed
+ * as one T_SR: consuming it closes both levels. The DNF variants cover a
+ * composite argument whose last member is a nested instantiation
+ * ('A|Box<int>>', '?Box<int>>', 'A&Box<int>>'). */
+generic_arg_fused_inst:
+		name generic_open generic_arg_list T_SR
+			{ $$ = zend_ast_create(ZEND_AST_GENERIC_TYPE, $1, $3); }
+;
+
+generic_arg_fused_tail:
+		generic_arg_fused_inst				{ $$ = $1; }
+	|	generic_arg_union '|' generic_arg_fused_inst
+			{ $$ = zend_ast_list_add($1, $3); }
+	|	generic_arg_union_element '|' generic_arg_fused_inst
+			{ $$ = zend_ast_create_list(2, ZEND_AST_TYPE_UNION, $1, $3); }
+	|	'?' generic_arg_fused_inst
+			{ $$ = zend_ast_create_list(2, ZEND_AST_TYPE_UNION, $2,
+				  zend_ast_create_ex(ZEND_AST_TYPE, IS_NULL)); }
+	|	generic_arg_intersection T_AMPERSAND_NOT_FOLLOWED_BY_VAR_OR_VARARG generic_arg_fused_inst
+			{ $$ = zend_ast_list_add($1, $3); }
+	|	generic_arg_member T_AMPERSAND_NOT_FOLLOWED_BY_VAR_OR_VARARG generic_arg_fused_inst
+			{ $$ = zend_ast_create_list(2, ZEND_AST_TYPE_INTERSECTION, $1, $3); }
+;
+
+generic_arg_list:
+		generic_arg							{ $$ = zend_ast_create_list(1, ZEND_AST_GENERIC_ARG_LIST, $1); }
+	|	generic_arg_list ',' generic_arg	{ $$ = zend_ast_list_add($1, $3); }
+;
+
+/* A type argument: a single member, a DNF composite over members, a
+ * nullable shorthand ('?Foo' canonicalizes to 'Foo|null'), or a pack
+ * spread. Members are class/interface names (possibly instantiations),
+ * the four scalars, 'array', or -- inside unions -- 'null'. */
+generic_arg:
+		generic_arg_member					{ $$ = $1; }
+	|	generic_arg_union					{ $$ = $1; }
+	|	generic_arg_intersection			{ $$ = $1; }
+	|	'?' generic_arg_member
+			{ $$ = zend_ast_create_list(2, ZEND_AST_TYPE_UNION, $2,
+				  zend_ast_create_ex(ZEND_AST_TYPE, IS_NULL)); }
+	|	T_ELLIPSIS name						{ $$ = zend_ast_create(ZEND_AST_GENERIC_ARG_SPREAD, $2); }
+;
+
+generic_arg_member:
+		name								{ $$ = $1; }
+	|	name generic_type_args				{ $$ = zend_ast_create(ZEND_AST_GENERIC_TYPE, $1, $2); }
+	|	T_ARRAY								{ $$ = zend_ast_create_ex(ZEND_AST_TYPE, IS_ARRAY); }
+;
+
+generic_arg_union_element:
+		generic_arg_member					{ $$ = $1; }
+	|	'(' generic_arg_intersection ')'	{ $$ = $2; }
+;
+
+generic_arg_union:
+		generic_arg_union_element '|' generic_arg_union_element
+			{ $$ = zend_ast_create_list(2, ZEND_AST_TYPE_UNION, $1, $3); }
+	|	generic_arg_union '|' generic_arg_union_element
+			{ $$ = zend_ast_list_add($1, $3); }
+;
+
+generic_arg_intersection:
+		generic_arg_member T_AMPERSAND_NOT_FOLLOWED_BY_VAR_OR_VARARG generic_arg_member
+			{ $$ = zend_ast_create_list(2, ZEND_AST_TYPE_INTERSECTION, $1, $3); }
+	|	generic_arg_intersection T_AMPERSAND_NOT_FOLLOWED_BY_VAR_OR_VARARG generic_arg_member
+			{ $$ = zend_ast_list_add($1, $3); }
+;
+
+generic_param_list:
+		generic_param					{ $$ = zend_ast_create_list(1, ZEND_AST_GENERIC_PARAM_LIST, $1); }
+	|	generic_param_list ',' generic_param
+			{ $$ = zend_ast_list_add($1, $3); }
+;
+
+/* A bound is written 'T: <type>' where the type may be a class/interface
+ * name (possibly an instantiation), a scalar, 'array', or a composite (DNF)
+ * over those members -- the same grammar as type arguments. The relation is
+ * inferred from what the bound resolves to; there is no declared
+ * implements/extends distinction. */
+generic_param:
+		T_STRING						{ $$ = zend_ast_create(ZEND_AST_GENERIC_PARAM, $1, NULL); }
+	|	T_STRING ':' generic_bound
+			{ $$ = zend_ast_create_ex(ZEND_AST_GENERIC_PARAM, ZEND_GENERIC_BOUND_TYPE, $1, $3); }
+	|	T_STRING T_STRING
+			{ $$ = zend_ast_create_ex(ZEND_AST_GENERIC_PARAM,
+				  zend_generic_variance_attr($1), $2, NULL); }
+	|	T_STRING T_STRING ':' generic_bound
+			{ $$ = zend_ast_create_ex(ZEND_AST_GENERIC_PARAM,
+				  zend_generic_variance_attr($1) | ZEND_GENERIC_BOUND_TYPE, $2, $4); }
+	|	T_ELLIPSIS T_STRING
+			{ $$ = zend_ast_create_ex(ZEND_AST_GENERIC_PARAM, ZEND_GENERIC_PARAM_PACK, $2, NULL); }
+	|	T_ELLIPSIS T_STRING ':' generic_bound
+			{ $$ = zend_ast_create_ex(ZEND_AST_GENERIC_PARAM,
+				  ZEND_GENERIC_BOUND_TYPE | ZEND_GENERIC_PARAM_PACK, $2, $4); }
+;
+
+generic_bound:
+		generic_arg_member					{ $$ = $1; }
+	|	generic_arg_union					{ $$ = $1; }
+	|	generic_arg_intersection			{ $$ = $1; }
+	|	'?' generic_arg_member
+			{ $$ = zend_ast_create_list(2, ZEND_AST_TYPE_UNION, $2,
+				  zend_ast_create_ex(ZEND_AST_TYPE, IS_NULL)); }
+;
+
+/* Final parameter whose bound ends in a nested instantiation whose close
+ * fused with the parameter list's own close ('<K: Box<int>>' lexes the
+ * trailing '>>' as T_SR). */
+generic_param_fused:
+		T_STRING ':' generic_arg_fused_tail
+			{ $$ = zend_ast_create_ex(ZEND_AST_GENERIC_PARAM, ZEND_GENERIC_BOUND_TYPE, $1, $3); }
+	|	T_ELLIPSIS T_STRING ':' generic_arg_fused_tail
+			{ $$ = zend_ast_create_ex(ZEND_AST_GENERIC_PARAM,
+				  ZEND_GENERIC_BOUND_TYPE | ZEND_GENERIC_PARAM_PACK, $2, $4); }
 ;
 
 class_modifiers:
@@ -720,8 +905,8 @@ class_modifier:
 
 trait_declaration_statement:
 		T_TRAIT { $<num>$ = CG(zend_lineno); }
-		T_STRING backup_doc_comment '{' class_statement_list '}'
-			{ $$ = zend_ast_create_decl(ZEND_AST_CLASS, ZEND_ACC_TRAIT, $<num>2, $4, zend_ast_get_str($3), NULL, NULL, $6, NULL, NULL); }
+		T_STRING generic_params backup_doc_comment '{' class_statement_list '}'
+			{ $$ = zend_ast_create_decl(ZEND_AST_CLASS, ZEND_ACC_TRAIT, $<num>2, $5, zend_ast_get_str($3), NULL, NULL, $7, NULL, $4); }
 	|	class_modifiers T_TRAIT
 			{ $$ = NULL; zend_unexpected_class_modifiers($1, "a trait"); YYERROR; }
 ;
@@ -745,8 +930,8 @@ struct_declaration_statement:
 
 interface_declaration_statement:
 		T_INTERFACE { $<num>$ = CG(zend_lineno); }
-		T_STRING interface_extends_list backup_doc_comment '{' class_statement_list '}'
-			{ $$ = zend_ast_create_decl(ZEND_AST_CLASS, ZEND_ACC_INTERFACE, $<num>2, $5, zend_ast_get_str($3), NULL, $4, $7, NULL, NULL); }
+		T_STRING generic_params interface_extends_list backup_doc_comment '{' class_statement_list '}'
+			{ $$ = zend_ast_create_decl(ZEND_AST_CLASS, ZEND_ACC_INTERFACE, $<num>2, $6, zend_ast_get_str($3), NULL, $5, $8, NULL, $4); }
 	|	class_modifiers T_INTERFACE
 			{ $$ = NULL; zend_unexpected_class_modifiers($1, "an interface"); YYERROR; }
 ;
@@ -807,17 +992,32 @@ enum_case_expr:
 
 extends_from:
 		%empty				{ $$ = NULL; }
-	|	T_EXTENDS class_name	{ $$ = $2; }
+	|	T_EXTENDS inheritance_class_name	{ $$ = $2; }
 ;
 
 interface_extends_list:
 		%empty			        { $$ = NULL; }
-	|	T_EXTENDS class_name_list	{ $$ = $2; }
+	|	T_EXTENDS inheritance_class_name_list	{ $$ = $2; }
 ;
 
 implements_list:
 		%empty		        		{ $$ = NULL; }
-	|	T_IMPLEMENTS class_name_list	{ $$ = $2; }
+	|	T_IMPLEMENTS inheritance_class_name_list	{ $$ = $2; }
+;
+
+/* Class references in declaration headers (extends/implements): no
+ * expression ambiguity exists here, so a plain '<' opens generic type
+ * arguments even when the lexer's bounded lookahead declined to emit
+ * T_GENERIC_OPEN (e.g. pack spreads, or a following "implements"). */
+inheritance_class_name:
+		class_name					{ $$ = $1; }
+	|	name '<' generic_arg_list_closed
+			{ $$ = zend_ast_create(ZEND_AST_GENERIC_TYPE, $1, $3); }
+;
+
+inheritance_class_name_list:
+		inheritance_class_name { $$ = zend_ast_create_list(1, ZEND_AST_NAME_LIST, $1); }
+	|	inheritance_class_name_list ',' inheritance_class_name { $$ = zend_ast_list_add($1, $3); }
 ;
 
 foreach_variable:
@@ -1012,6 +1212,8 @@ type_without_static:
 		T_ARRAY		{ $$ = zend_ast_create_ex(ZEND_AST_TYPE, IS_ARRAY); }
 	|	T_CALLABLE	{ $$ = zend_ast_create_ex(ZEND_AST_TYPE, IS_CALLABLE); }
 	|	name		{ $$ = $1; }
+	|	name generic_type_args
+			{ $$ = zend_ast_create(ZEND_AST_GENERIC_TYPE, $1, $2); }
 ;
 
 union_type_without_static_element:
@@ -1162,16 +1364,16 @@ attributed_class_statement:
 			  $$ = zend_ast_create(ZEND_AST_CLASS_CONST_GROUP, $4, NULL, $3);
 			  $$->attr = flags;
 			  if (surfaces) { $$ = zend_ast_create(ZEND_AST_SURFACE_MEMBER, $$, surfaces); } }
-	|	method_modifiers function returns_ref identifier backup_doc_comment '(' parameter_list ')'
+	|	method_modifiers function returns_ref identifier generic_params backup_doc_comment '(' parameter_list ')'
 		optional_receiver_modifier return_type backup_fn_flags method_body backup_fn_flags
 			{ zend_ast *surfaces = zend_surface_names_from_modifiers($1);
 			  uint32_t flags = $1 ? zend_modifier_list_to_flags(ZEND_MODIFIER_TARGET_METHOD, $1) : ZEND_ACC_PUBLIC;
 			  if ($1 && !flags && EG(exception)) { YYERROR; }
 			  if (surfaces && !zend_surface_member_modifiers_valid(flags)) { YYERROR; }
 			  if (!(flags & ZEND_ACC_PPP_MASK)) { flags |= ZEND_ACC_PUBLIC; }
-			  $$ = zend_ast_create_decl(ZEND_AST_METHOD, $3 | flags | $13, $2, $5,
-				  zend_ast_get_str($4), $7, NULL, $12, $10, NULL); CG(extra_fn_flags) = $11;
-			  if ($9) { $$->attr |= ZEND_FN_IS_MUTATING; }
+			  $$ = zend_ast_create_decl_ex(ZEND_AST_METHOD, $3 | flags | $14, $2, $6,
+				  zend_ast_get_str($4), $8, NULL, $13, $11, NULL, $5); CG(extra_fn_flags) = $12;
+			  if ($10) { $$->attr |= ZEND_FN_IS_MUTATING; }
 			  if (surfaces) { $$ = zend_ast_create(ZEND_AST_SURFACE_MEMBER, $$, surfaces); } }
 	|	enum_case { $$ = $1; }
 ;
@@ -1198,9 +1400,11 @@ surface_modifier:
 		T_SURFACE '[' surface_name_list ']' { $$ = $3; }
 ;
 
+/* Trait-use sites live in class bodies where no expression reading exists,
+ * so like inheritance headers they accept a plain '<' for generic args. */
 class_name_list:
-		class_name { $$ = zend_ast_create_list(1, ZEND_AST_NAME_LIST, $1); }
-	|	class_name_list ',' class_name { $$ = zend_ast_list_add($1, $3); }
+		inheritance_class_name { $$ = zend_ast_create_list(1, ZEND_AST_NAME_LIST, $1); }
+	|	class_name_list ',' inheritance_class_name { $$ = zend_ast_list_add($1, $3); }
 ;
 
 trait_adaptations:
@@ -1675,8 +1879,20 @@ function_call:
 		}
 	|	class_name T_PAAMAYIM_NEKUDOTAYIM member_name argument_list
 			{ $$ = zend_ast_create(ZEND_AST_STATIC_CALL, $1, $3, $4); }
+	|	class_name T_PAAMAYIM_NEKUDOTAYIM T_STRING T_GENERIC_OPEN generic_arg_list_closed argument_list
+			{ $$ = zend_ast_create(ZEND_AST_STATIC_CALL, $1,
+				  zend_ast_create(ZEND_AST_GENERIC_TYPE, $3, $5), $6); }
+	|	class_name T_PAAMAYIM_NEKUDOTAYIM T_STRING T_TURBOFISH generic_arg_list_closed argument_list
+			{ $$ = zend_ast_create(ZEND_AST_STATIC_CALL, $1,
+				  zend_ast_create(ZEND_AST_GENERIC_TYPE, $3, $5), $6); }
 	|	variable_class_name T_PAAMAYIM_NEKUDOTAYIM member_name argument_list
 			{ $$ = zend_ast_create(ZEND_AST_STATIC_CALL, $1, $3, $4); }
+	|	variable_class_name T_PAAMAYIM_NEKUDOTAYIM T_STRING T_GENERIC_OPEN generic_arg_list_closed argument_list
+			{ $$ = zend_ast_create(ZEND_AST_STATIC_CALL, $1,
+				  zend_ast_create(ZEND_AST_GENERIC_TYPE, $3, $5), $6); }
+	|	variable_class_name T_PAAMAYIM_NEKUDOTAYIM T_STRING T_TURBOFISH generic_arg_list_closed argument_list
+			{ $$ = zend_ast_create(ZEND_AST_STATIC_CALL, $1,
+				  zend_ast_create(ZEND_AST_GENERIC_TYPE, $3, $5), $6); }
 	|	callable_expr { $<num>$ = CG(zend_lineno); } argument_list {
 			$$ = zend_ast_create(ZEND_AST_CALL, $1, $3);
 			$$->lineno = $<num>2;
@@ -1688,10 +1904,21 @@ class_name:
 			{ zval zv; ZVAL_INTERNED_STR(&zv, ZSTR_KNOWN(ZEND_STR_STATIC));
 			  $$ = zend_ast_create_zval_ex(&zv, ZEND_NAME_NOT_FQ); }
 	|	name { $$ = $1; }
+	|	name T_GENERIC_OPEN generic_arg_list_closed
+			{ $$ = zend_ast_create(ZEND_AST_GENERIC_TYPE, $1, $3); }
+	|	name T_TURBOFISH generic_arg_list_closed
+			{ $$ = zend_ast_create(ZEND_AST_GENERIC_TYPE, $1, $3); }
 ;
 
+/* After 'new' and 'instanceof' a plain '<' following a class name is
+ * COMMITTED to opening a type-argument list, independent of the lexer's
+ * bounded lookahead: the shift wins over reducing the bare name. The
+ * sacrificed reading -- comparing a fresh instance or an instanceof result
+ * against a bare constant, '(new Foo) < CONST' -- becomes a parse error. */
 class_name_reference:
 		class_name		{ $$ = $1; }
+	|	name '<' generic_arg_list_closed
+			{ $$ = zend_ast_create(ZEND_AST_GENERIC_TYPE, $1, $3); }
 	|	new_variable	{ $$ = $1; }
 	|	'(' expr ')'	{ $$ = $2; }
 ;
@@ -1792,6 +2019,12 @@ callable_variable:
 			{ $$ = zend_ast_create(ZEND_AST_DIM, $1, $3); }
 	|	array_object_dereferenceable T_OBJECT_OPERATOR property_name argument_list
 			{ $$ = zend_ast_create(ZEND_AST_METHOD_CALL, $1, $3, $4); }
+	|	array_object_dereferenceable T_OBJECT_OPERATOR T_STRING T_GENERIC_OPEN generic_arg_list_closed argument_list
+			{ $$ = zend_ast_create(ZEND_AST_METHOD_CALL, $1,
+				  zend_ast_create(ZEND_AST_GENERIC_TYPE, $3, $5), $6); }
+	|	array_object_dereferenceable T_OBJECT_OPERATOR T_STRING T_TURBOFISH generic_arg_list_closed argument_list
+			{ $$ = zend_ast_create(ZEND_AST_METHOD_CALL, $1,
+				  zend_ast_create(ZEND_AST_GENERIC_TYPE, $3, $5), $6); }
 	|	array_object_dereferenceable T_NULLSAFE_OBJECT_OPERATOR property_name argument_list
 			{ $$ = zend_ast_create(ZEND_AST_NULLSAFE_METHOD_CALL, $1, $3, $4); }
 	|	function_call { $$ = $1; }

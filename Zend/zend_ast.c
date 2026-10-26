@@ -156,8 +156,20 @@ ZEND_API zend_ast *zend_ast_create_decl(
 	ast->child[2] = child2;
 	ast->child[3] = child3;
 	ast->child[4] = child4;
+	ast->child[5] = NULL;
 
 	return (zend_ast *) ast;
+}
+
+ZEND_API zend_ast *zend_ast_create_decl_ex(
+	zend_ast_kind kind, uint32_t flags, uint32_t start_lineno, zend_string *doc_comment,
+	zend_string *name, zend_ast *child0, zend_ast *child1, zend_ast *child2, zend_ast *child3, zend_ast *child4,
+	zend_ast *child5
+) {
+	zend_ast *ast = zend_ast_create_decl(kind, flags, start_lineno, doc_comment,
+		name, child0, child1, child2, child3, child4);
+	((zend_ast_decl *) ast)->child[5] = child5;
+	return ast;
 }
 
 static bool zend_ast_is_placeholder_arg(zend_ast *arg) {
@@ -1650,7 +1662,8 @@ tail_call:
 		zend_ast_destroy(decl->child[1]);
 		zend_ast_destroy(decl->child[2]);
 		zend_ast_destroy(decl->child[3]);
-		ast = decl->child[4];
+		zend_ast_destroy(decl->child[4]);
+		ast = decl->child[5];
 		goto tail_call;
 	} else if (EXPECTED(ast->kind == ZEND_AST_CALLABLE_CONVERT)) {
 		zend_ast_fcc *fcc_ast = (zend_ast_fcc*) ast;
@@ -2815,6 +2828,21 @@ simple_list:
 			zend_ast_export_ex(str, ast->child[0], 0, indent);
 			smart_str_appends(str, " instanceof ");
 			zend_ast_export_ns_name_or_expression(str, ast->child[1], 0, indent);
+			break;
+		case ZEND_AST_GENERIC_TYPE: {
+			const zend_ast_list *args = zend_ast_get_list(ast->child[1]);
+			zend_ast_export_ns_name(str, ast->child[0], 0, indent);
+			smart_str_appendc(str, '<');
+			for (uint32_t i = 0; i < args->children; i++) {
+				if (i) smart_str_appends(str, ", ");
+				zend_ast_export_ex(str, args->child[i], 0, indent);
+			}
+			smart_str_appendc(str, '>');
+			break;
+		}
+		case ZEND_AST_GENERIC_ARG_SPREAD:
+			smart_str_appends(str, "...");
+			zend_ast_export_ns_name(str, ast->child[0], 0, indent);
 			break;
 		case ZEND_AST_YIELD:
 			if (priority > 70) smart_str_appendc(str, '(');

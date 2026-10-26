@@ -279,6 +279,20 @@ class ReflectionClass implements Reflector
     /** @tentative-return-type */
     public function isInstantiable(): bool {}
 
+    public function isGenericTemplate(): bool {}
+
+    public function isGenericInstantiation(): bool {}
+
+    public function getGenericTypeParameters(): array {}
+
+    public function getGenericTypeArguments(): array {}
+
+    public function getGenericTemplate(): ?ReflectionClass {}
+
+    public function getGenericInterfaceNames(): array {}
+
+    public function getGenericParentName(): ?string {}
+
     /** @tentative-return-type */
     public function isCloneable(): bool {}
 

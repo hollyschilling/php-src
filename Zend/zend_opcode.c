@@ -27,6 +27,7 @@
 #include "zend_sort.h"
 #include "zend_constants.h"
 #include "zend_observer.h"
+#include "zend_generics.h"
 
 #include "zend_vm.h"
 
@@ -69,6 +70,9 @@ void init_op_array(zend_op_array *op_array, zend_function_type type, int initial
 	op_array->attributes = NULL;
 	op_array->extension_imports = NULL;
 	op_array->surface_grants = NULL;
+
+	op_array->generic_params = NULL;
+	op_array->generic_binding = NULL;
 
 	op_array->arg_info = NULL;
 	op_array->num_args = 0;
@@ -390,6 +394,22 @@ ZEND_API void destroy_zend_class(zval *zv)
 				if (ce->num_traits > 0) {
 					_destroy_zend_class_traits_info(ce);
 				}
+
+				if (ce->generic_params) {
+					/* Release is a no-op for the (usual) interned case. */
+					for (uint32_t i = 0; i < ce->generic_params->num_params; i++) {
+						zend_string_release_ex(ce->generic_params->params[i].name, 0);
+						if (ce->generic_params->params[i].bound_name) {
+							zend_string_release_ex(ce->generic_params->params[i].bound_name, 0);
+						}
+					}
+					for (uint32_t i = 0; i < ce->generic_params->num_deferred_interfaces; i++) {
+						zend_string_release_ex(ce->generic_params->deferred_interfaces[i], 0);
+					}
+					if (ce->generic_params->deferred_parent) {
+						zend_string_release_ex(ce->generic_params->deferred_parent, 0);
+					}
+				}
 			}
 
 			if (ce->default_properties_table) {
@@ -455,6 +475,19 @@ ZEND_API void destroy_zend_class(zval *zv)
 			}
 			if (ce->backed_enum_table) {
 				zend_hash_release(ce->backed_enum_table);
+			}
+			if (ce->generic_binding) {
+				/* Struct is arena-allocated; the arg names and any owned
+				 * substituted composite type names ("C<Bag>") are refs. */
+				for (uint32_t i = 0; i < ce->generic_binding->num_args; i++) {
+					zend_generics_arg_release_names(ce->generic_binding->args[i]);
+				}
+				for (uint32_t i = 0; i < ce->generic_binding->num_owned_names; i++) {
+					zend_string_release_ex(ce->generic_binding->owned_names[i], 0);
+				}
+				if (ce->generic_binding->owned_names) {
+					efree(ce->generic_binding->owned_names);
+				}
 			}
 			break;
 		case ZEND_INTERNAL_CLASS:
@@ -595,8 +628,29 @@ ZEND_API void destroy_op_array(zend_op_array *op_array)
 		zend_string_release_ex(op_array->function_name, 0);
 	}
 
+	if (UNEXPECTED(op_array->fn_flags2 & ZEND_ACC2_GENERIC_SUBST_ARG_INFO)) {
+		/* Before the refcount check below, not after: every clone made its
+		 * own copy of the substituted arg_info, so every clone has references
+		 * to give back, not just whichever one is destroyed last. */
+		zend_generics_release_substituted_arg_info(op_array);
+	}
+
 	if (!op_array->refcount || --(*op_array->refcount) > 0) {
 		return;
+	}
+
+	if (UNEXPECTED(op_array->fn_flags2 & ZEND_ACC2_GENERIC_METHOD_TEMPLATE)
+			&& op_array->generic_params) {
+		/* Release is a no-op for the (usual) interned case; the arena owns
+		 * the struct. Clones cleared the flag, so this runs exactly once.
+		 * After the refcount check: copied headers (closures) share the
+		 * generic_params pointer, so only the final release may free it. */
+		for (uint32_t i = 0; i < op_array->generic_params->num_params; i++) {
+			zend_string_release_ex(op_array->generic_params->params[i].name, 0);
+			if (op_array->generic_params->params[i].bound_name) {
+				zend_string_release_ex(op_array->generic_params->params[i].bound_name, 0);
+			}
+		}
 	}
 
 	efree_size(op_array->refcount, sizeof(*(op_array->refcount)));

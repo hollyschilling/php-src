@@ -28,6 +28,7 @@
 #include "zend_extension_methods.h"
 #include "zend_surfaces.h"
 #include "zend_interfaces.h"
+#include "zend_generics.h"
 #include "zend_exceptions.h"
 #include "zend_closures.h"
 #include "zend_compile.h"
@@ -2073,6 +2074,21 @@ ZEND_API zend_function *zend_std_get_method(zend_object **obj_ptr, zend_string *
 	if (UNEXPECTED(fbc == NULL)) {
 		zend_function *fbc_fallback;
 
+		if (UNEXPECTED(memchr(ZSTR_VAL(lc_method_name), '<', ZSTR_LEN(lc_method_name)) != NULL)) {
+			/* Generic method call ($seq->map<Price>()): stamp (or fetch the
+			 * cached) method instantiation for these explicit type args, then
+			 * run the ordinary access checks below. */
+			fbc = zend_generics_get_method_instantiation(
+				zobj->ce, method_name, lc_method_name);
+			if (UNEXPECTED(!fbc)) {
+				if (UNEXPECTED(!key)) {
+					ZSTR_ALLOCA_FREE(lc_method_name, use_heap);
+				}
+				return NULL; /* exception set */
+			}
+			goto check_access;
+		}
+
 		if (zobj->ce->__call) {
 			/* An explicit __call catch-all is the object's own behavior and
 			 * always beats extension methods (mirrors "real members win"). */
@@ -2088,6 +2104,8 @@ ZEND_API zend_function *zend_std_get_method(zend_object **obj_ptr, zend_string *
 		return fbc_fallback; /* may be NULL -> undefined method error */
 	}
 
+
+check_access:
 	/* Check access level */
 	if (fbc->op_array.fn_flags & (ZEND_ACC_CHANGED|ZEND_ACC_PRIVATE|ZEND_ACC_PROTECTED|ZEND_ACC_MODULE_INTERNAL)) {
 		const zend_class_entry *scope = zend_get_executed_scope();
@@ -2183,7 +2201,27 @@ ZEND_API zend_function *zend_std_get_static_method(const zend_class_entry *ce, z
 		fbc = zend_hash_find_ptr_lc(&ce->function_table, function_name);
 	}
 
-	if (EXPECTED(fbc)) {
+	zend_function *generic_fbc = NULL;
+	if (UNEXPECTED(!fbc)) {
+		zend_string *lc_function_name = key ? Z_STR_P(key) : zend_string_tolower(function_name);
+		if (UNEXPECTED(memchr(ZSTR_VAL(lc_function_name), '<', ZSTR_LEN(lc_function_name)) != NULL)) {
+			/* Generic static call (Seq::of<Price>()): stamp (or fetch the
+			 * cached) instantiation, then run the ordinary visibility checks. */
+			generic_fbc = zend_generics_get_method_instantiation(
+				(zend_class_entry *) ce, function_name, lc_function_name);
+			if (UNEXPECTED(!generic_fbc)) {
+				if (UNEXPECTED(!key)) {
+					zend_string_release_ex(lc_function_name, 0);
+				}
+				return NULL; /* exception set */
+			}
+		}
+		if (UNEXPECTED(!key)) {
+			zend_string_release_ex(lc_function_name, 0);
+		}
+	}
+	if (EXPECTED(fbc) || generic_fbc) {
+		fbc = generic_fbc ? generic_fbc : fbc;
 		if (!(fbc->common.fn_flags & ZEND_ACC_PUBLIC)
 		 || UNEXPECTED(fbc->common.fn_flags & ZEND_ACC_MODULE_INTERNAL)) {
 			const zend_class_entry *scope = zend_get_executed_scope();

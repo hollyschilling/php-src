@@ -31,6 +31,7 @@
 #include "zend_exceptions.h"
 #include "zend_closures.h"
 #include "zend_generators.h"
+#include "zend_generics.h"
 #include "zend_vm.h"
 #include "zend_float.h"
 #include "zend_fibers.h"
@@ -159,6 +160,11 @@ void init_executor(void) /* {{{ */
 	zend_hash_init(&EG(autoload_current_classnames), 8, NULL, NULL, 0);
 	EG(extension_autoload_attempted) = NULL;
 	EG(extension_method_registry) = NULL;
+
+	EG(generics_stamping) = NULL;
+	EG(generics_variance_cache) = NULL;
+	EG(generics_type_names) = NULL;
+	EG(generics_method_cache) = NULL;
 
 	EG(ticks_count) = 0;
 
@@ -551,6 +557,17 @@ void shutdown_executor(void) /* {{{ */
 		}
 		zend_extension_methods_request_shutdown();
 
+		if (EG(generics_method_cache)) {
+			zend_hash_destroy(EG(generics_method_cache));
+			FREE_HASHTABLE(EG(generics_method_cache));
+			EG(generics_method_cache) = NULL;
+		}
+		if (EG(generics_stamping)) {
+			zend_hash_destroy(EG(generics_stamping));
+			FREE_HASHTABLE(EG(generics_stamping));
+			EG(generics_stamping) = NULL;
+		}
+
 		zend_stack_destroy(&EG(user_error_handlers_error_reporting));
 		zend_stack_destroy(&EG(user_error_handlers));
 		zend_stack_destroy(&EG(user_exception_handlers));
@@ -563,6 +580,31 @@ void shutdown_executor(void) /* {{{ */
 
 		zend_hash_destroy(&EG(callable_convert_cache));
 		zend_hash_destroy(&EG(partial_function_application_cache));
+
+		if (EG(generics_type_names)) {
+			/* Torn down LAST: these strings are flagged IS_STR_INTERNED so
+			 * refcounting no-ops leave their CE-cache slot (hosted in the
+			 * refcount field) intact, which means every holder above released
+			 * them as a no-op and this table owns the only real free. The
+			 * interned-keyed table is static-keys-only, so free each key by
+			 * hand after stripping the flags. */
+			zend_string *tn_key;
+			ZEND_HASH_MAP_FOREACH_STR_KEY(EG(generics_type_names), tn_key) {
+				GC_TYPE_INFO(tn_key) = GC_STRING;
+				GC_SET_REFCOUNT(tn_key, 1);
+				zend_string_release_ex(tn_key, 0);
+			} ZEND_HASH_FOREACH_END();
+			zend_hash_destroy(EG(generics_type_names));
+			FREE_HASHTABLE(EG(generics_type_names));
+			EG(generics_type_names) = NULL;
+		}
+		/* Like generics_type_names: destructors above may have re-populated
+		 * (or re-allocated) the variance-edge cache; tear it down last. */
+		if (EG(generics_variance_cache)) {
+			zend_hash_destroy(EG(generics_variance_cache));
+			FREE_HASHTABLE(EG(generics_variance_cache));
+			EG(generics_variance_cache) = NULL;
+		}
 	}
 
 #if ZEND_DEBUG
@@ -1389,6 +1431,22 @@ ZEND_API zend_class_entry *zend_lookup_class_ex(zend_string *name, zend_string *
 		return ce;
 	}
 
+	/* Mangled generic names miss the class table until their instantiation is
+	 * stamped from the template. Stamping may itself load classes, so it is
+	 * only attempted at run-time. */
+	if (UNEXPECTED(memchr(ZSTR_VAL(lc_name), '<', ZSTR_LEN(lc_name)) != NULL)
+			&& !zend_is_compiling()) {
+		ce = zend_generics_stamp_instantiation(name, lc_name,
+			!(flags & ZEND_FETCH_CLASS_NO_AUTOLOAD));
+		if (!key) {
+			zend_string_release_ex(lc_name, 0);
+		}
+		if (ce && ce_cache) {
+			SET_CE_CACHE(ce_cache, ce);
+		}
+		return ce;
+	}
+
 	/* The compiler is not-reentrant. Make sure we autoload only during run-time. */
 	if ((flags & ZEND_FETCH_CLASS_NO_AUTOLOAD) || zend_is_compiling()) {
 		if (!key) {
@@ -1893,6 +1951,51 @@ check_fetch_type:
 				return NULL;
 			}
 			return ce;
+		case ZEND_FETCH_CLASS_TYPE_PARAM: {
+			uint32_t param_idx = fetch_type >> ZEND_FETCH_CLASS_TYPE_PARAM_SHIFT;
+			zend_type arg;
+			if (fetch_type & ZEND_FETCH_CLASS_TYPE_PARAM_METHOD) {
+				/* Method-space parameter (function map<U>): resolved against
+				 * the executing method instantiation's binding. */
+				const zend_execute_data *ex = EG(current_execute_data);
+				const zend_function *func = ex ? ex->func : NULL;
+				if (UNEXPECTED(!func || !ZEND_USER_CODE(func->common.type)
+						|| !func->op_array.generic_binding)) {
+					zend_throw_or_error(fetch_type, NULL,
+						"Cannot resolve a method type parameter when no generic method binding is in scope");
+					return NULL;
+				}
+				ZEND_ASSERT(param_idx < func->op_array.generic_binding->num_args);
+				arg = func->op_array.generic_binding->args[param_idx];
+				goto have_type_param;
+			}
+			scope = zend_get_executed_scope();
+			if (UNEXPECTED(!scope || !scope->generic_binding)) {
+				zend_throw_or_error(fetch_type, NULL,
+					"Cannot resolve a type parameter when no generic binding is in scope");
+				return NULL;
+			}
+			param_idx = zend_generics_binding_arg_index(scope, param_idx);
+			ZEND_ASSERT(param_idx < scope->generic_binding->num_args);
+			arg = scope->generic_binding->args[param_idx];
+have_type_param:;
+			if (UNEXPECTED(!ZEND_TYPE_HAS_NAME(arg) || ZEND_TYPE_PURE_MASK(arg) != 0)) {
+				zend_string *type_str = zend_type_to_string(arg);
+				zend_throw_or_error(fetch_type, NULL,
+					ZEND_TYPE_HAS_NAME(arg) || ZEND_TYPE_HAS_LIST(arg)
+						? "Cannot use composite type argument %s as a class"
+						: "Cannot use scalar type argument %s as a class",
+					ZSTR_VAL(type_str));
+				zend_string_release(type_str);
+				return NULL;
+			}
+			ce = zend_lookup_class_ex(ZEND_TYPE_NAME(arg), NULL, fetch_type);
+			if (!ce) {
+				report_class_fetch_error(ZEND_TYPE_NAME(arg), fetch_type);
+				return NULL;
+			}
+			return ce;
+		}
 		case ZEND_FETCH_CLASS_AUTO: {
 				fetch_sub_type = zend_get_class_fetch_type(class_name);
 				if (UNEXPECTED(fetch_sub_type != ZEND_FETCH_CLASS_DEFAULT)) {
@@ -2029,6 +2132,24 @@ static zend_never_inline zend_class_entry *zend_fetch_class_via_module(const zen
 
 zend_class_entry *zend_fetch_class_by_name(zend_string *class_name, zend_string *key, uint32_t fetch_type) /* {{{ */
 {
+	if (UNEXPECTED(ZSTR_LEN(class_name) > 1 && ZSTR_VAL(class_name)[0] == '\0'
+			&& ZSTR_VAL(class_name)[1] == '\x01')) {
+		/* Symbolic generic marker ("\0\x01" SYM): a class reference whose
+		 * arguments mention type parameters (method-level or the template's
+		 * own); substitute against the executing bindings, then resolve. */
+		zend_string *resolved = zend_generics_resolve_type_symbol(
+			ZSTR_VAL(class_name) + 2, ZSTR_LEN(class_name) - 2);
+		if (!resolved) {
+			return NULL;
+		}
+		zend_class_entry *marked_ce = zend_lookup_class_ex(resolved, NULL, fetch_type);
+		if (!marked_ce) {
+			report_class_fetch_error(resolved, fetch_type);
+		}
+		zend_string_release(resolved);
+		return marked_ce;
+	}
+
 	if (UNEXPECTED(ZSTR_LEN(class_name) > 0 && ZSTR_VAL(class_name)[0] == '\0')) {
 		return zend_fetch_class_via_module(class_name, fetch_type);
 	}
