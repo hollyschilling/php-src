@@ -1166,7 +1166,7 @@ static zend_never_inline ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_FUNC_CCONV 
 		call_info = EX_CALL_INFO();
 #endif
 		if (UNEXPECTED(call_info & ZEND_CALL_RELEASE_THIS)) {
-			OBJ_RELEASE(Z_OBJ(execute_data->This));
+			zend_vm_release_call_frame_this(execute_data);
 		} else if (UNEXPECTED(call_info & ZEND_CALL_CLOSURE)) {
 			OBJ_RELEASE(ZEND_CLOSURE_OBJECT(EX(func)));
 		}
@@ -1200,7 +1200,7 @@ static zend_never_inline ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_FUNC_CCONV 
 		zend_vm_stack_free_extra_args_ex(call_info, execute_data);
 
 		if (UNEXPECTED(call_info & ZEND_CALL_RELEASE_THIS)) {
-			OBJ_RELEASE(Z_OBJ(execute_data->This));
+			zend_vm_release_call_frame_this(execute_data);
 		} else if (UNEXPECTED(call_info & ZEND_CALL_CLOSURE)) {
 			OBJ_RELEASE(ZEND_CLOSURE_OBJECT(EX(func)));
 		}
@@ -1296,6 +1296,37 @@ static ZEND_VM_HOT ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_FUNC_CCONV ZEND_J
 	USE_OPLINE
 
 	ZEND_VM_JMP_EX(OP_JMP_ADDR(opline, opline->op1), 0);
+}
+
+static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_FUNC_CCONV ZEND_RECV_RECEIVER_SPEC_HANDLER(ZEND_OPCODE_HANDLER_ARGS)
+{
+	USE_OPLINE
+	zval *cv = EX_VAR(opline->result.var);
+
+	/* Bind the extension method's receiver into its declared variable.
+	 * The receiver arrives through the frame's This slot via the normal
+	 * method calling convention. */
+	if (EXPECTED(Z_TYPE(EX(This)) == IS_OBJECT)) {
+		ZVAL_OBJ_COPY(cv, Z_OBJ(EX(This)));
+		ZEND_VM_NEXT_OPCODE();
+	}
+	if (Z_TYPE(EX(This)) >= IS_FALSE && Z_TYPE(EX(This)) <= IS_ARRAY) {
+		/* Scalar receiver: transfer ownership out of the This slot into the
+		 * CV, then neutralize the slot (value nulled, RELEASE_THIS cleared)
+		 * so the rest of the call sees an ordinary scoped frame. */
+		uint32_t this_call_info = Z_TYPE_INFO(EX(This)) & ~0xffffu;
+
+		ZVAL_COPY_VALUE(cv, &EX(This));
+		Z_TYPE_INFO_P(cv) = Z_TYPE_INFO(EX(This)) & 0xffffu;
+		Z_PTR(EX(This)) = NULL;
+		Z_TYPE_INFO(EX(This)) = (this_call_info & ~ZEND_CALL_RELEASE_THIS) | IS_UNDEF;
+		ZEND_VM_NEXT_OPCODE();
+	}
+	SAVE_OPLINE();
+	zend_throw_error(NULL, "No receiver is bound to extension method %s()",
+		ZSTR_VAL(EX(func)->common.function_name));
+	ZVAL_UNDEF(cv);
+	HANDLE_EXCEPTION();
 }
 
 static ZEND_VM_HOT ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_FUNC_CCONV ZEND_DO_ICALL_SPEC_RETVAL_UNUSED_HANDLER(ZEND_OPCODE_HANDLER_ARGS)
@@ -2059,7 +2090,7 @@ fcall_end:
 	}
 
 	if (UNEXPECTED(ZEND_CALL_INFO(call) & ZEND_CALL_RELEASE_THIS)) {
-		OBJ_RELEASE(Z_OBJ(call->This));
+		zend_vm_release_call_frame_this(call);
 	}
 
 	zend_vm_stack_free_call_frame(call);
@@ -2194,7 +2225,7 @@ fcall_end:
 	}
 
 	if (UNEXPECTED(ZEND_CALL_INFO(call) & ZEND_CALL_RELEASE_THIS)) {
-		OBJ_RELEASE(Z_OBJ(call->This));
+		zend_vm_release_call_frame_this(call);
 	}
 
 	zend_vm_stack_free_call_frame(call);
@@ -2325,7 +2356,7 @@ fcall_end:
 	}
 
 	if (UNEXPECTED(ZEND_CALL_INFO(call) & ZEND_CALL_RELEASE_THIS)) {
-		OBJ_RELEASE(Z_OBJ(call->This));
+		zend_vm_release_call_frame_this(call);
 	}
 
 	zend_vm_stack_free_call_frame(call);
@@ -7445,6 +7476,48 @@ static ZEND_VM_COLD ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_FUNC_CCONV ZEND_
 				if (IS_CONST == IS_CONST) {
 					function_name = RT_CONSTANT(opline, opline->op2);
 				}
+				/* Scalar extension methods: fallback on what is otherwise an
+				 * unconditional error path. The receiver rides in the frame's
+				 * This slot (call-info bits preserved) only until the body's
+				 * ZEND_RECV_RECEIVER moves it into the declared variable. */
+				if (Z_TYPE_P(object) >= IS_FALSE && Z_TYPE_P(object) <= IS_ARRAY) {
+					zend_function *scalar_fbc = zend_extension_methods_get_scalar(object,
+						Z_STR_P(function_name),
+						(IS_CONST == IS_CONST) ? Z_STR_P(RT_CONSTANT(opline, opline->op2) + 1) : NULL);
+					if (UNEXPECTED(scalar_fbc != NULL)) {
+						uint32_t this_call_info;
+
+						if (EXPECTED(scalar_fbc->type == ZEND_USER_FUNCTION)
+						 && UNEXPECTED(!RUN_TIME_CACHE(&scalar_fbc->op_array))) {
+							init_func_run_time_cache(&scalar_fbc->op_array);
+						}
+						call = zend_vm_stack_push_call_frame(
+							ZEND_CALL_NESTED_FUNCTION | ZEND_CALL_HAS_THIS | ZEND_CALL_RELEASE_THIS,
+							scalar_fbc, opline->extended_value, scalar_fbc->common.scope);
+						this_call_info = Z_TYPE_INFO(call->This) & ~0xffffu;
+						ZVAL_COPY(&call->This, object);
+						Z_TYPE_INFO(call->This) = (Z_TYPE_INFO(call->This) & 0xffffu) | this_call_info;
+						call->prev_execute_data = EX(call);
+						EX(call) = call;
+						if (IS_CONST != IS_CONST) {
+
+
+						}
+
+
+						ZEND_VM_NEXT_OPCODE();
+					}
+					/* The scalar lookup may have run the class autoloader for
+					 * imported-but-unloaded extensions; if the autoloader
+					 * threw, propagate instead of raising on top of it. */
+					if (UNEXPECTED(EG(exception))) {
+
+
+
+
+						HANDLE_EXCEPTION();
+					}
+				}
 				zend_invalid_method_call(object, function_name);
 
 
@@ -8661,6 +8734,27 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_FUNC_CCONV ZEND_CALLABLE_CONV
 	SAVE_OPLINE();
 
 	zend_execute_data *call = EX(call);
+
+	if (UNEXPECTED(Z_TYPE(call->This) >= IS_FALSE && Z_TYPE(call->This) <= IS_ARRAY)) {
+		/* Partial applications cannot yet carry a by-value scalar receiver
+		 * (the same limitation as first-class callables): unwind the
+		 * pending call frame before zend_partial_create() would read the
+		 * non-object This slot as a class entry. */
+		zend_throw_error(NULL,
+			"Cannot create a partial application from a scalar extension method");
+		zend_vm_stack_free_args(call);
+		if (ZEND_CALL_INFO(call) & ZEND_CALL_HAS_EXTRA_NAMED_PARAMS) {
+			zend_free_extra_named_params(call->extra_named_params);
+		}
+		if (ZEND_CALL_INFO(call) & ZEND_CALL_RELEASE_THIS) {
+			zend_vm_release_call_frame_this(call);
+		}
+		EX(call) = call->prev_execute_data;
+		zend_vm_stack_free_call_frame(call);
+		ZVAL_UNDEF(EX_VAR(opline->result.var));
+		HANDLE_EXCEPTION();
+	}
+
 	void **cache_slot = CACHE_ADDR(opline->extended_value & ~ZEND_PARTIAL_FLAGS);
 	zval *named_positions = RT_CONSTANT(opline, opline->op2);
 	zend_string *pfa_name = Z_STR_P(RT_CONSTANT(opline, opline->op1));
@@ -8690,7 +8784,7 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_FUNC_CCONV ZEND_CALLABLE_CONV
 	}
 
 	if (ZEND_CALL_INFO(call) & ZEND_CALL_RELEASE_THIS) {
-		OBJ_RELEASE(Z_OBJ(call->This));
+		zend_vm_release_call_frame_this(call);
 	} else if (ZEND_CALL_INFO(call) & ZEND_CALL_CLOSURE) {
 		OBJ_RELEASE(ZEND_CLOSURE_OBJECT(call->func));
 	}
@@ -10228,6 +10322,46 @@ static ZEND_VM_COLD ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_FUNC_CCONV ZEND_
 				}
 				if (IS_TMP_VAR == IS_CONST) {
 					function_name = _get_zval_ptr_tmp(opline->op2.var EXECUTE_DATA_CC);
+				}
+				/* Scalar extension methods: fallback on what is otherwise an
+				 * unconditional error path. The receiver rides in the frame's
+				 * This slot (call-info bits preserved) only until the body's
+				 * ZEND_RECV_RECEIVER moves it into the declared variable. */
+				if (Z_TYPE_P(object) >= IS_FALSE && Z_TYPE_P(object) <= IS_ARRAY) {
+					zend_function *scalar_fbc = zend_extension_methods_get_scalar(object,
+						Z_STR_P(function_name),
+						(IS_TMP_VAR == IS_CONST) ? Z_STR_P(RT_CONSTANT(opline, opline->op2) + 1) : NULL);
+					if (UNEXPECTED(scalar_fbc != NULL)) {
+						uint32_t this_call_info;
+
+						if (EXPECTED(scalar_fbc->type == ZEND_USER_FUNCTION)
+						 && UNEXPECTED(!RUN_TIME_CACHE(&scalar_fbc->op_array))) {
+							init_func_run_time_cache(&scalar_fbc->op_array);
+						}
+						call = zend_vm_stack_push_call_frame(
+							ZEND_CALL_NESTED_FUNCTION | ZEND_CALL_HAS_THIS | ZEND_CALL_RELEASE_THIS,
+							scalar_fbc, opline->extended_value, scalar_fbc->common.scope);
+						this_call_info = Z_TYPE_INFO(call->This) & ~0xffffu;
+						ZVAL_COPY(&call->This, object);
+						Z_TYPE_INFO(call->This) = (Z_TYPE_INFO(call->This) & 0xffffu) | this_call_info;
+						call->prev_execute_data = EX(call);
+						EX(call) = call;
+						if (IS_TMP_VAR != IS_CONST) {
+							zval_ptr_dtor_nogc(EX_VAR(opline->op2.var));
+						}
+
+
+						ZEND_VM_NEXT_OPCODE();
+					}
+					/* The scalar lookup may have run the class autoloader for
+					 * imported-but-unloaded extensions; if the autoloader
+					 * threw, propagate instead of raising on top of it. */
+					if (UNEXPECTED(EG(exception))) {
+						zval_ptr_dtor_nogc(EX_VAR(opline->op2.var));
+
+
+						HANDLE_EXCEPTION();
+					}
 				}
 				zend_invalid_method_call(object, function_name);
 				zval_ptr_dtor_nogc(EX_VAR(opline->op2.var));
@@ -12034,6 +12168,27 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_FUNC_CCONV ZEND_CALLABLE_CONV
 	SAVE_OPLINE();
 
 	zend_execute_data *call = EX(call);
+
+	if (UNEXPECTED(Z_TYPE(call->This) >= IS_FALSE && Z_TYPE(call->This) <= IS_ARRAY)) {
+		/* Partial applications cannot yet carry a by-value scalar receiver
+		 * (the same limitation as first-class callables): unwind the
+		 * pending call frame before zend_partial_create() would read the
+		 * non-object This slot as a class entry. */
+		zend_throw_error(NULL,
+			"Cannot create a partial application from a scalar extension method");
+		zend_vm_stack_free_args(call);
+		if (ZEND_CALL_INFO(call) & ZEND_CALL_HAS_EXTRA_NAMED_PARAMS) {
+			zend_free_extra_named_params(call->extra_named_params);
+		}
+		if (ZEND_CALL_INFO(call) & ZEND_CALL_RELEASE_THIS) {
+			zend_vm_release_call_frame_this(call);
+		}
+		EX(call) = call->prev_execute_data;
+		zend_vm_stack_free_call_frame(call);
+		ZVAL_UNDEF(EX_VAR(opline->result.var));
+		HANDLE_EXCEPTION();
+	}
+
 	void **cache_slot = CACHE_ADDR(opline->extended_value & ~ZEND_PARTIAL_FLAGS);
 	zval *named_positions = NULL;
 	zend_string *pfa_name = Z_STR_P(RT_CONSTANT(opline, opline->op1));
@@ -12063,7 +12218,7 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_FUNC_CCONV ZEND_CALLABLE_CONV
 	}
 
 	if (ZEND_CALL_INFO(call) & ZEND_CALL_RELEASE_THIS) {
-		OBJ_RELEASE(Z_OBJ(call->This));
+		zend_vm_release_call_frame_this(call);
 	} else if (ZEND_CALL_INFO(call) & ZEND_CALL_CLOSURE) {
 		OBJ_RELEASE(ZEND_CLOSURE_OBJECT(call->func));
 	}
@@ -12884,6 +13039,48 @@ static ZEND_VM_COLD ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_FUNC_CCONV ZEND_
 				}
 				if (IS_CV == IS_CONST) {
 					function_name = EX_VAR(opline->op2.var);
+				}
+				/* Scalar extension methods: fallback on what is otherwise an
+				 * unconditional error path. The receiver rides in the frame's
+				 * This slot (call-info bits preserved) only until the body's
+				 * ZEND_RECV_RECEIVER moves it into the declared variable. */
+				if (Z_TYPE_P(object) >= IS_FALSE && Z_TYPE_P(object) <= IS_ARRAY) {
+					zend_function *scalar_fbc = zend_extension_methods_get_scalar(object,
+						Z_STR_P(function_name),
+						(IS_CV == IS_CONST) ? Z_STR_P(RT_CONSTANT(opline, opline->op2) + 1) : NULL);
+					if (UNEXPECTED(scalar_fbc != NULL)) {
+						uint32_t this_call_info;
+
+						if (EXPECTED(scalar_fbc->type == ZEND_USER_FUNCTION)
+						 && UNEXPECTED(!RUN_TIME_CACHE(&scalar_fbc->op_array))) {
+							init_func_run_time_cache(&scalar_fbc->op_array);
+						}
+						call = zend_vm_stack_push_call_frame(
+							ZEND_CALL_NESTED_FUNCTION | ZEND_CALL_HAS_THIS | ZEND_CALL_RELEASE_THIS,
+							scalar_fbc, opline->extended_value, scalar_fbc->common.scope);
+						this_call_info = Z_TYPE_INFO(call->This) & ~0xffffu;
+						ZVAL_COPY(&call->This, object);
+						Z_TYPE_INFO(call->This) = (Z_TYPE_INFO(call->This) & 0xffffu) | this_call_info;
+						call->prev_execute_data = EX(call);
+						EX(call) = call;
+						if (IS_CV != IS_CONST) {
+
+
+						}
+
+
+						ZEND_VM_NEXT_OPCODE();
+					}
+					/* The scalar lookup may have run the class autoloader for
+					 * imported-but-unloaded extensions; if the autoloader
+					 * threw, propagate instead of raising on top of it. */
+					if (UNEXPECTED(EG(exception))) {
+
+
+
+
+						HANDLE_EXCEPTION();
+					}
 				}
 				zend_invalid_method_call(object, function_name);
 
@@ -19270,6 +19467,46 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_FUNC_CCONV ZEND_INIT_METHOD_C
 				if (IS_CONST == IS_CONST) {
 					function_name = RT_CONSTANT(opline, opline->op2);
 				}
+				/* Scalar extension methods: fallback on what is otherwise an
+				 * unconditional error path. The receiver rides in the frame's
+				 * This slot (call-info bits preserved) only until the body's
+				 * ZEND_RECV_RECEIVER moves it into the declared variable. */
+				if (Z_TYPE_P(object) >= IS_FALSE && Z_TYPE_P(object) <= IS_ARRAY) {
+					zend_function *scalar_fbc = zend_extension_methods_get_scalar(object,
+						Z_STR_P(function_name),
+						(IS_CONST == IS_CONST) ? Z_STR_P(RT_CONSTANT(opline, opline->op2) + 1) : NULL);
+					if (UNEXPECTED(scalar_fbc != NULL)) {
+						uint32_t this_call_info;
+
+						if (EXPECTED(scalar_fbc->type == ZEND_USER_FUNCTION)
+						 && UNEXPECTED(!RUN_TIME_CACHE(&scalar_fbc->op_array))) {
+							init_func_run_time_cache(&scalar_fbc->op_array);
+						}
+						call = zend_vm_stack_push_call_frame(
+							ZEND_CALL_NESTED_FUNCTION | ZEND_CALL_HAS_THIS | ZEND_CALL_RELEASE_THIS,
+							scalar_fbc, opline->extended_value, scalar_fbc->common.scope);
+						this_call_info = Z_TYPE_INFO(call->This) & ~0xffffu;
+						ZVAL_COPY(&call->This, object);
+						Z_TYPE_INFO(call->This) = (Z_TYPE_INFO(call->This) & 0xffffu) | this_call_info;
+						call->prev_execute_data = EX(call);
+						EX(call) = call;
+						if (IS_CONST != IS_CONST) {
+
+
+						}
+						zval_ptr_dtor_nogc(EX_VAR(opline->op1.var));
+						ZEND_VM_NEXT_OPCODE();
+					}
+					/* The scalar lookup may have run the class autoloader for
+					 * imported-but-unloaded extensions; if the autoloader
+					 * threw, propagate instead of raising on top of it. */
+					if (UNEXPECTED(EG(exception))) {
+
+
+						zval_ptr_dtor_nogc(EX_VAR(opline->op1.var));
+						HANDLE_EXCEPTION();
+					}
+				}
 				zend_invalid_method_call(object, function_name);
 
 
@@ -20847,6 +21084,44 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_FUNC_CCONV ZEND_INIT_METHOD_C
 				}
 				if (IS_TMP_VAR == IS_CONST) {
 					function_name = _get_zval_ptr_tmp(opline->op2.var EXECUTE_DATA_CC);
+				}
+				/* Scalar extension methods: fallback on what is otherwise an
+				 * unconditional error path. The receiver rides in the frame's
+				 * This slot (call-info bits preserved) only until the body's
+				 * ZEND_RECV_RECEIVER moves it into the declared variable. */
+				if (Z_TYPE_P(object) >= IS_FALSE && Z_TYPE_P(object) <= IS_ARRAY) {
+					zend_function *scalar_fbc = zend_extension_methods_get_scalar(object,
+						Z_STR_P(function_name),
+						(IS_TMP_VAR == IS_CONST) ? Z_STR_P(RT_CONSTANT(opline, opline->op2) + 1) : NULL);
+					if (UNEXPECTED(scalar_fbc != NULL)) {
+						uint32_t this_call_info;
+
+						if (EXPECTED(scalar_fbc->type == ZEND_USER_FUNCTION)
+						 && UNEXPECTED(!RUN_TIME_CACHE(&scalar_fbc->op_array))) {
+							init_func_run_time_cache(&scalar_fbc->op_array);
+						}
+						call = zend_vm_stack_push_call_frame(
+							ZEND_CALL_NESTED_FUNCTION | ZEND_CALL_HAS_THIS | ZEND_CALL_RELEASE_THIS,
+							scalar_fbc, opline->extended_value, scalar_fbc->common.scope);
+						this_call_info = Z_TYPE_INFO(call->This) & ~0xffffu;
+						ZVAL_COPY(&call->This, object);
+						Z_TYPE_INFO(call->This) = (Z_TYPE_INFO(call->This) & 0xffffu) | this_call_info;
+						call->prev_execute_data = EX(call);
+						EX(call) = call;
+						if (IS_TMP_VAR != IS_CONST) {
+							zval_ptr_dtor_nogc(EX_VAR(opline->op2.var));
+						}
+						zval_ptr_dtor_nogc(EX_VAR(opline->op1.var));
+						ZEND_VM_NEXT_OPCODE();
+					}
+					/* The scalar lookup may have run the class autoloader for
+					 * imported-but-unloaded extensions; if the autoloader
+					 * threw, propagate instead of raising on top of it. */
+					if (UNEXPECTED(EG(exception))) {
+						zval_ptr_dtor_nogc(EX_VAR(opline->op2.var));
+						zval_ptr_dtor_nogc(EX_VAR(opline->op1.var));
+						HANDLE_EXCEPTION();
+					}
 				}
 				zend_invalid_method_call(object, function_name);
 				zval_ptr_dtor_nogc(EX_VAR(opline->op2.var));
@@ -22708,6 +22983,46 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_FUNC_CCONV ZEND_INIT_METHOD_C
 				}
 				if (IS_CV == IS_CONST) {
 					function_name = EX_VAR(opline->op2.var);
+				}
+				/* Scalar extension methods: fallback on what is otherwise an
+				 * unconditional error path. The receiver rides in the frame's
+				 * This slot (call-info bits preserved) only until the body's
+				 * ZEND_RECV_RECEIVER moves it into the declared variable. */
+				if (Z_TYPE_P(object) >= IS_FALSE && Z_TYPE_P(object) <= IS_ARRAY) {
+					zend_function *scalar_fbc = zend_extension_methods_get_scalar(object,
+						Z_STR_P(function_name),
+						(IS_CV == IS_CONST) ? Z_STR_P(RT_CONSTANT(opline, opline->op2) + 1) : NULL);
+					if (UNEXPECTED(scalar_fbc != NULL)) {
+						uint32_t this_call_info;
+
+						if (EXPECTED(scalar_fbc->type == ZEND_USER_FUNCTION)
+						 && UNEXPECTED(!RUN_TIME_CACHE(&scalar_fbc->op_array))) {
+							init_func_run_time_cache(&scalar_fbc->op_array);
+						}
+						call = zend_vm_stack_push_call_frame(
+							ZEND_CALL_NESTED_FUNCTION | ZEND_CALL_HAS_THIS | ZEND_CALL_RELEASE_THIS,
+							scalar_fbc, opline->extended_value, scalar_fbc->common.scope);
+						this_call_info = Z_TYPE_INFO(call->This) & ~0xffffu;
+						ZVAL_COPY(&call->This, object);
+						Z_TYPE_INFO(call->This) = (Z_TYPE_INFO(call->This) & 0xffffu) | this_call_info;
+						call->prev_execute_data = EX(call);
+						EX(call) = call;
+						if (IS_CV != IS_CONST) {
+
+
+						}
+						zval_ptr_dtor_nogc(EX_VAR(opline->op1.var));
+						ZEND_VM_NEXT_OPCODE();
+					}
+					/* The scalar lookup may have run the class autoloader for
+					 * imported-but-unloaded extensions; if the autoloader
+					 * threw, propagate instead of raising on top of it. */
+					if (UNEXPECTED(EG(exception))) {
+
+
+						zval_ptr_dtor_nogc(EX_VAR(opline->op1.var));
+						HANDLE_EXCEPTION();
+					}
 				}
 				zend_invalid_method_call(object, function_name);
 
@@ -25610,6 +25925,49 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_FUNC_CCONV ZEND_ASSIGN_OBJ_RE
 }
 
 /* No specialization for op_types (CONST|TMPVAR|CV, UNUSED|CONST|TMP) */
+static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_FUNC_CCONV ZEND_BIND_EXTENSION_SPEC_VAR_CONST_HANDLER(ZEND_OPCODE_HANDLER_ARGS)
+{
+	USE_OPLINE
+	zend_class_entry *ce;
+	zend_string *ext_name_lc = NULL;
+
+	SAVE_OPLINE();
+	ce = Z_CE_P(EX_VAR(opline->op1.var));
+	/* extended_value flags the named form (`extension Name on Target`); the
+	 * lc extension name is then the literal following the target name. */
+	if (opline->extended_value) {
+		zval *existing;
+
+		ext_name_lc = Z_STR_P(RT_CONSTANT(opline, opline->op2) + 1);
+		/* A named extension is a class-table symbol under its own name: this
+		 * is what makes it visible to class_exists() and — decisively — to
+		 * the class autoloader (an imported-but-unloaded extension is
+		 * resolved through zend_lookup_class_ex at first use). Extension
+		 * names therefore share the class namespace, and collide like
+		 * classes do. */
+		existing = zend_hash_find(EG(class_table), ext_name_lc);
+		if (existing) {
+			if (UNEXPECTED(Z_CE_P(existing) != ce)) {
+				zend_error_noreturn(E_COMPILE_ERROR,
+					"Cannot declare extension %s, because the name is already in use",
+					ZSTR_VAL(ce->name));
+			}
+			/* Same CE re-bound (declaring file included again): the registry
+			 * registration below is idempotent (first-wins per method). */
+		} else {
+			zval zv;
+			/* Alias-typed entry: the anonymous-key entry made by
+			 * DECLARE_ANON_CLASS owns the CE's lifetime; destroy_zend_class
+			 * skips IS_ALIAS_PTR buckets, so no refcount juggling is needed
+			 * for mutable and immutable (opcache SHM) CEs alike. */
+			ZVAL_ALIAS_PTR(&zv, ce);
+			zend_hash_add_new(EG(class_table), ext_name_lc, &zv);
+		}
+	}
+	zend_extension_methods_register(Z_STR_P(RT_CONSTANT(opline, opline->op2)), ce, ext_name_lc);
+	ZEND_VM_NEXT_OPCODE_CHECK_EXCEPTION();
+}
+
 static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_FUNC_CCONV ZEND_INIT_STATIC_METHOD_CALL_SPEC_VAR_CONST_HANDLER(ZEND_OPCODE_HANDLER_ARGS)
 {
 	USE_OPLINE
@@ -34353,6 +34711,48 @@ static ZEND_VM_HOT ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_FUNC_CCONV ZEND_I
 				if (IS_CONST == IS_CONST) {
 					function_name = RT_CONSTANT(opline, opline->op2);
 				}
+				/* Scalar extension methods: fallback on what is otherwise an
+				 * unconditional error path. The receiver rides in the frame's
+				 * This slot (call-info bits preserved) only until the body's
+				 * ZEND_RECV_RECEIVER moves it into the declared variable. */
+				if (Z_TYPE_P(object) >= IS_FALSE && Z_TYPE_P(object) <= IS_ARRAY) {
+					zend_function *scalar_fbc = zend_extension_methods_get_scalar(object,
+						Z_STR_P(function_name),
+						(IS_CONST == IS_CONST) ? Z_STR_P(RT_CONSTANT(opline, opline->op2) + 1) : NULL);
+					if (UNEXPECTED(scalar_fbc != NULL)) {
+						uint32_t this_call_info;
+
+						if (EXPECTED(scalar_fbc->type == ZEND_USER_FUNCTION)
+						 && UNEXPECTED(!RUN_TIME_CACHE(&scalar_fbc->op_array))) {
+							init_func_run_time_cache(&scalar_fbc->op_array);
+						}
+						call = zend_vm_stack_push_call_frame(
+							ZEND_CALL_NESTED_FUNCTION | ZEND_CALL_HAS_THIS | ZEND_CALL_RELEASE_THIS,
+							scalar_fbc, opline->extended_value, scalar_fbc->common.scope);
+						this_call_info = Z_TYPE_INFO(call->This) & ~0xffffu;
+						ZVAL_COPY(&call->This, object);
+						Z_TYPE_INFO(call->This) = (Z_TYPE_INFO(call->This) & 0xffffu) | this_call_info;
+						call->prev_execute_data = EX(call);
+						EX(call) = call;
+						if (IS_CONST != IS_CONST) {
+
+
+						}
+
+
+						ZEND_VM_NEXT_OPCODE();
+					}
+					/* The scalar lookup may have run the class autoloader for
+					 * imported-but-unloaded extensions; if the autoloader
+					 * threw, propagate instead of raising on top of it. */
+					if (UNEXPECTED(EG(exception))) {
+
+
+
+
+						HANDLE_EXCEPTION();
+					}
+				}
 				zend_invalid_method_call(object, function_name);
 
 
@@ -36467,6 +36867,46 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_FUNC_CCONV ZEND_INIT_METHOD_C
 				if (IS_TMP_VAR == IS_CONST) {
 					function_name = _get_zval_ptr_tmp(opline->op2.var EXECUTE_DATA_CC);
 				}
+				/* Scalar extension methods: fallback on what is otherwise an
+				 * unconditional error path. The receiver rides in the frame's
+				 * This slot (call-info bits preserved) only until the body's
+				 * ZEND_RECV_RECEIVER moves it into the declared variable. */
+				if (Z_TYPE_P(object) >= IS_FALSE && Z_TYPE_P(object) <= IS_ARRAY) {
+					zend_function *scalar_fbc = zend_extension_methods_get_scalar(object,
+						Z_STR_P(function_name),
+						(IS_TMP_VAR == IS_CONST) ? Z_STR_P(RT_CONSTANT(opline, opline->op2) + 1) : NULL);
+					if (UNEXPECTED(scalar_fbc != NULL)) {
+						uint32_t this_call_info;
+
+						if (EXPECTED(scalar_fbc->type == ZEND_USER_FUNCTION)
+						 && UNEXPECTED(!RUN_TIME_CACHE(&scalar_fbc->op_array))) {
+							init_func_run_time_cache(&scalar_fbc->op_array);
+						}
+						call = zend_vm_stack_push_call_frame(
+							ZEND_CALL_NESTED_FUNCTION | ZEND_CALL_HAS_THIS | ZEND_CALL_RELEASE_THIS,
+							scalar_fbc, opline->extended_value, scalar_fbc->common.scope);
+						this_call_info = Z_TYPE_INFO(call->This) & ~0xffffu;
+						ZVAL_COPY(&call->This, object);
+						Z_TYPE_INFO(call->This) = (Z_TYPE_INFO(call->This) & 0xffffu) | this_call_info;
+						call->prev_execute_data = EX(call);
+						EX(call) = call;
+						if (IS_TMP_VAR != IS_CONST) {
+							zval_ptr_dtor_nogc(EX_VAR(opline->op2.var));
+						}
+
+
+						ZEND_VM_NEXT_OPCODE();
+					}
+					/* The scalar lookup may have run the class autoloader for
+					 * imported-but-unloaded extensions; if the autoloader
+					 * threw, propagate instead of raising on top of it. */
+					if (UNEXPECTED(EG(exception))) {
+						zval_ptr_dtor_nogc(EX_VAR(opline->op2.var));
+
+
+						HANDLE_EXCEPTION();
+					}
+				}
 				zend_invalid_method_call(object, function_name);
 				zval_ptr_dtor_nogc(EX_VAR(opline->op2.var));
 
@@ -37579,6 +38019,9 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_FUNC_CCONV ZEND_GET_CALLED_CL
 
 	if (Z_TYPE(EX(This)) == IS_OBJECT) {
 		ZVAL_STR_COPY(EX_VAR(opline->result.var), Z_OBJCE(EX(This))->name);
+	} else if (UNEXPECTED(Z_CE(EX(This)) == NULL) && EX(func)->common.scope) {
+		/* Neutralized scalar-extension frame: report the declaring scope. */
+		ZVAL_STR_COPY(EX_VAR(opline->result.var), EX(func)->common.scope->name);
 	} else if (Z_CE(EX(This))) {
 		ZVAL_STR_COPY(EX_VAR(opline->result.var), Z_CE(EX(This))->name);
 	} else {
@@ -37681,6 +38124,20 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_FUNC_CCONV ZEND_CALLABLE_CONV
 	USE_OPLINE
 	zend_execute_data *call = EX(call);
 
+	if (UNEXPECTED(Z_TYPE(call->This) >= IS_FALSE && Z_TYPE(call->This) <= IS_ARRAY)) {
+		/* Closures cannot yet carry a by-value scalar receiver. */
+		SAVE_OPLINE();
+		zend_throw_error(NULL,
+			"Cannot create a first-class callable from a scalar extension method");
+		if (ZEND_CALL_INFO(call) & ZEND_CALL_RELEASE_THIS) {
+			zend_vm_release_call_frame_this(call);
+		}
+		EX(call) = call->prev_execute_data;
+		zend_vm_stack_free_call_frame(call);
+		ZVAL_UNDEF(EX_VAR(opline->result.var));
+		HANDLE_EXCEPTION();
+	}
+
 	if (opline->extended_value != (uint32_t)-1) {
 		zend_object *closure = CACHED_PTR(opline->extended_value);
 		if (closure) {
@@ -37704,7 +38161,7 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_FUNC_CCONV ZEND_CALLABLE_CONV
 	}
 
 	if (ZEND_CALL_INFO(call) & ZEND_CALL_RELEASE_THIS) {
-		OBJ_RELEASE(Z_OBJ(call->This));
+		zend_vm_release_call_frame_this(call);
 	}
 
 	EX(call) = call->prev_execute_data;
@@ -39072,6 +39529,48 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_FUNC_CCONV ZEND_INIT_METHOD_C
 				}
 				if (IS_CV == IS_CONST) {
 					function_name = EX_VAR(opline->op2.var);
+				}
+				/* Scalar extension methods: fallback on what is otherwise an
+				 * unconditional error path. The receiver rides in the frame's
+				 * This slot (call-info bits preserved) only until the body's
+				 * ZEND_RECV_RECEIVER moves it into the declared variable. */
+				if (Z_TYPE_P(object) >= IS_FALSE && Z_TYPE_P(object) <= IS_ARRAY) {
+					zend_function *scalar_fbc = zend_extension_methods_get_scalar(object,
+						Z_STR_P(function_name),
+						(IS_CV == IS_CONST) ? Z_STR_P(RT_CONSTANT(opline, opline->op2) + 1) : NULL);
+					if (UNEXPECTED(scalar_fbc != NULL)) {
+						uint32_t this_call_info;
+
+						if (EXPECTED(scalar_fbc->type == ZEND_USER_FUNCTION)
+						 && UNEXPECTED(!RUN_TIME_CACHE(&scalar_fbc->op_array))) {
+							init_func_run_time_cache(&scalar_fbc->op_array);
+						}
+						call = zend_vm_stack_push_call_frame(
+							ZEND_CALL_NESTED_FUNCTION | ZEND_CALL_HAS_THIS | ZEND_CALL_RELEASE_THIS,
+							scalar_fbc, opline->extended_value, scalar_fbc->common.scope);
+						this_call_info = Z_TYPE_INFO(call->This) & ~0xffffu;
+						ZVAL_COPY(&call->This, object);
+						Z_TYPE_INFO(call->This) = (Z_TYPE_INFO(call->This) & 0xffffu) | this_call_info;
+						call->prev_execute_data = EX(call);
+						EX(call) = call;
+						if (IS_CV != IS_CONST) {
+
+
+						}
+
+
+						ZEND_VM_NEXT_OPCODE();
+					}
+					/* The scalar lookup may have run the class autoloader for
+					 * imported-but-unloaded extensions; if the autoloader
+					 * threw, propagate instead of raising on top of it. */
+					if (UNEXPECTED(EG(exception))) {
+
+
+
+
+						HANDLE_EXCEPTION();
+					}
 				}
 				zend_invalid_method_call(object, function_name);
 
@@ -44027,6 +44526,48 @@ static ZEND_VM_HOT ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_FUNC_CCONV ZEND_I
 				if (IS_CONST == IS_CONST) {
 					function_name = RT_CONSTANT(opline, opline->op2);
 				}
+				/* Scalar extension methods: fallback on what is otherwise an
+				 * unconditional error path. The receiver rides in the frame's
+				 * This slot (call-info bits preserved) only until the body's
+				 * ZEND_RECV_RECEIVER moves it into the declared variable. */
+				if (Z_TYPE_P(object) >= IS_FALSE && Z_TYPE_P(object) <= IS_ARRAY) {
+					zend_function *scalar_fbc = zend_extension_methods_get_scalar(object,
+						Z_STR_P(function_name),
+						(IS_CONST == IS_CONST) ? Z_STR_P(RT_CONSTANT(opline, opline->op2) + 1) : NULL);
+					if (UNEXPECTED(scalar_fbc != NULL)) {
+						uint32_t this_call_info;
+
+						if (EXPECTED(scalar_fbc->type == ZEND_USER_FUNCTION)
+						 && UNEXPECTED(!RUN_TIME_CACHE(&scalar_fbc->op_array))) {
+							init_func_run_time_cache(&scalar_fbc->op_array);
+						}
+						call = zend_vm_stack_push_call_frame(
+							ZEND_CALL_NESTED_FUNCTION | ZEND_CALL_HAS_THIS | ZEND_CALL_RELEASE_THIS,
+							scalar_fbc, opline->extended_value, scalar_fbc->common.scope);
+						this_call_info = Z_TYPE_INFO(call->This) & ~0xffffu;
+						ZVAL_COPY(&call->This, object);
+						Z_TYPE_INFO(call->This) = (Z_TYPE_INFO(call->This) & 0xffffu) | this_call_info;
+						call->prev_execute_data = EX(call);
+						EX(call) = call;
+						if (IS_CONST != IS_CONST) {
+
+
+						}
+
+
+						ZEND_VM_NEXT_OPCODE();
+					}
+					/* The scalar lookup may have run the class autoloader for
+					 * imported-but-unloaded extensions; if the autoloader
+					 * threw, propagate instead of raising on top of it. */
+					if (UNEXPECTED(EG(exception))) {
+
+
+
+
+						HANDLE_EXCEPTION();
+					}
+				}
 				zend_invalid_method_call(object, function_name);
 
 
@@ -47838,6 +48379,46 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_FUNC_CCONV ZEND_INIT_METHOD_C
 				}
 				if (IS_TMP_VAR == IS_CONST) {
 					function_name = _get_zval_ptr_tmp(opline->op2.var EXECUTE_DATA_CC);
+				}
+				/* Scalar extension methods: fallback on what is otherwise an
+				 * unconditional error path. The receiver rides in the frame's
+				 * This slot (call-info bits preserved) only until the body's
+				 * ZEND_RECV_RECEIVER moves it into the declared variable. */
+				if (Z_TYPE_P(object) >= IS_FALSE && Z_TYPE_P(object) <= IS_ARRAY) {
+					zend_function *scalar_fbc = zend_extension_methods_get_scalar(object,
+						Z_STR_P(function_name),
+						(IS_TMP_VAR == IS_CONST) ? Z_STR_P(RT_CONSTANT(opline, opline->op2) + 1) : NULL);
+					if (UNEXPECTED(scalar_fbc != NULL)) {
+						uint32_t this_call_info;
+
+						if (EXPECTED(scalar_fbc->type == ZEND_USER_FUNCTION)
+						 && UNEXPECTED(!RUN_TIME_CACHE(&scalar_fbc->op_array))) {
+							init_func_run_time_cache(&scalar_fbc->op_array);
+						}
+						call = zend_vm_stack_push_call_frame(
+							ZEND_CALL_NESTED_FUNCTION | ZEND_CALL_HAS_THIS | ZEND_CALL_RELEASE_THIS,
+							scalar_fbc, opline->extended_value, scalar_fbc->common.scope);
+						this_call_info = Z_TYPE_INFO(call->This) & ~0xffffu;
+						ZVAL_COPY(&call->This, object);
+						Z_TYPE_INFO(call->This) = (Z_TYPE_INFO(call->This) & 0xffffu) | this_call_info;
+						call->prev_execute_data = EX(call);
+						EX(call) = call;
+						if (IS_TMP_VAR != IS_CONST) {
+							zval_ptr_dtor_nogc(EX_VAR(opline->op2.var));
+						}
+
+
+						ZEND_VM_NEXT_OPCODE();
+					}
+					/* The scalar lookup may have run the class autoloader for
+					 * imported-but-unloaded extensions; if the autoloader
+					 * threw, propagate instead of raising on top of it. */
+					if (UNEXPECTED(EG(exception))) {
+						zval_ptr_dtor_nogc(EX_VAR(opline->op2.var));
+
+
+						HANDLE_EXCEPTION();
+					}
 				}
 				zend_invalid_method_call(object, function_name);
 				zval_ptr_dtor_nogc(EX_VAR(opline->op2.var));
@@ -53009,6 +53590,48 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_FUNC_CCONV ZEND_INIT_METHOD_C
 				if (IS_CV == IS_CONST) {
 					function_name = EX_VAR(opline->op2.var);
 				}
+				/* Scalar extension methods: fallback on what is otherwise an
+				 * unconditional error path. The receiver rides in the frame's
+				 * This slot (call-info bits preserved) only until the body's
+				 * ZEND_RECV_RECEIVER moves it into the declared variable. */
+				if (Z_TYPE_P(object) >= IS_FALSE && Z_TYPE_P(object) <= IS_ARRAY) {
+					zend_function *scalar_fbc = zend_extension_methods_get_scalar(object,
+						Z_STR_P(function_name),
+						(IS_CV == IS_CONST) ? Z_STR_P(RT_CONSTANT(opline, opline->op2) + 1) : NULL);
+					if (UNEXPECTED(scalar_fbc != NULL)) {
+						uint32_t this_call_info;
+
+						if (EXPECTED(scalar_fbc->type == ZEND_USER_FUNCTION)
+						 && UNEXPECTED(!RUN_TIME_CACHE(&scalar_fbc->op_array))) {
+							init_func_run_time_cache(&scalar_fbc->op_array);
+						}
+						call = zend_vm_stack_push_call_frame(
+							ZEND_CALL_NESTED_FUNCTION | ZEND_CALL_HAS_THIS | ZEND_CALL_RELEASE_THIS,
+							scalar_fbc, opline->extended_value, scalar_fbc->common.scope);
+						this_call_info = Z_TYPE_INFO(call->This) & ~0xffffu;
+						ZVAL_COPY(&call->This, object);
+						Z_TYPE_INFO(call->This) = (Z_TYPE_INFO(call->This) & 0xffffu) | this_call_info;
+						call->prev_execute_data = EX(call);
+						EX(call) = call;
+						if (IS_CV != IS_CONST) {
+
+
+						}
+
+
+						ZEND_VM_NEXT_OPCODE();
+					}
+					/* The scalar lookup may have run the class autoloader for
+					 * imported-but-unloaded extensions; if the autoloader
+					 * threw, propagate instead of raising on top of it. */
+					if (UNEXPECTED(EG(exception))) {
+
+
+
+
+						HANDLE_EXCEPTION();
+					}
+				}
 				zend_invalid_method_call(object, function_name);
 
 
@@ -54161,7 +54784,7 @@ static zend_never_inline ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_CCONV  zend
 		call_info = EX_CALL_INFO();
 #endif
 		if (UNEXPECTED(call_info & ZEND_CALL_RELEASE_THIS)) {
-			OBJ_RELEASE(Z_OBJ(execute_data->This));
+			zend_vm_release_call_frame_this(execute_data);
 		} else if (UNEXPECTED(call_info & ZEND_CALL_CLOSURE)) {
 			OBJ_RELEASE(ZEND_CLOSURE_OBJECT(EX(func)));
 		}
@@ -54195,7 +54818,7 @@ static zend_never_inline ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_CCONV  zend
 		zend_vm_stack_free_extra_args_ex(call_info, execute_data);
 
 		if (UNEXPECTED(call_info & ZEND_CALL_RELEASE_THIS)) {
-			OBJ_RELEASE(Z_OBJ(execute_data->This));
+			zend_vm_release_call_frame_this(execute_data);
 		} else if (UNEXPECTED(call_info & ZEND_CALL_CLOSURE)) {
 			OBJ_RELEASE(ZEND_CLOSURE_OBJECT(EX(func)));
 		}
@@ -54291,6 +54914,37 @@ static ZEND_VM_HOT ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_CCONV ZEND_JMP_SP
 	USE_OPLINE
 
 	ZEND_VM_JMP_EX(OP_JMP_ADDR(opline, opline->op1), 0);
+}
+
+static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_CCONV ZEND_RECV_RECEIVER_SPEC_TAILCALL_HANDLER(ZEND_OPCODE_HANDLER_ARGS)
+{
+	USE_OPLINE
+	zval *cv = EX_VAR(opline->result.var);
+
+	/* Bind the extension method's receiver into its declared variable.
+	 * The receiver arrives through the frame's This slot via the normal
+	 * method calling convention. */
+	if (EXPECTED(Z_TYPE(EX(This)) == IS_OBJECT)) {
+		ZVAL_OBJ_COPY(cv, Z_OBJ(EX(This)));
+		ZEND_VM_NEXT_OPCODE();
+	}
+	if (Z_TYPE(EX(This)) >= IS_FALSE && Z_TYPE(EX(This)) <= IS_ARRAY) {
+		/* Scalar receiver: transfer ownership out of the This slot into the
+		 * CV, then neutralize the slot (value nulled, RELEASE_THIS cleared)
+		 * so the rest of the call sees an ordinary scoped frame. */
+		uint32_t this_call_info = Z_TYPE_INFO(EX(This)) & ~0xffffu;
+
+		ZVAL_COPY_VALUE(cv, &EX(This));
+		Z_TYPE_INFO_P(cv) = Z_TYPE_INFO(EX(This)) & 0xffffu;
+		Z_PTR(EX(This)) = NULL;
+		Z_TYPE_INFO(EX(This)) = (this_call_info & ~ZEND_CALL_RELEASE_THIS) | IS_UNDEF;
+		ZEND_VM_NEXT_OPCODE();
+	}
+	SAVE_OPLINE();
+	zend_throw_error(NULL, "No receiver is bound to extension method %s()",
+		ZSTR_VAL(EX(func)->common.function_name));
+	ZVAL_UNDEF(cv);
+	HANDLE_EXCEPTION();
 }
 
 static ZEND_VM_HOT ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_CCONV ZEND_DO_ICALL_SPEC_RETVAL_UNUSED_TAILCALL_HANDLER(ZEND_OPCODE_HANDLER_ARGS)
@@ -55054,7 +55708,7 @@ fcall_end:
 	}
 
 	if (UNEXPECTED(ZEND_CALL_INFO(call) & ZEND_CALL_RELEASE_THIS)) {
-		OBJ_RELEASE(Z_OBJ(call->This));
+		zend_vm_release_call_frame_this(call);
 	}
 
 	zend_vm_stack_free_call_frame(call);
@@ -55189,7 +55843,7 @@ fcall_end:
 	}
 
 	if (UNEXPECTED(ZEND_CALL_INFO(call) & ZEND_CALL_RELEASE_THIS)) {
-		OBJ_RELEASE(Z_OBJ(call->This));
+		zend_vm_release_call_frame_this(call);
 	}
 
 	zend_vm_stack_free_call_frame(call);
@@ -55320,7 +55974,7 @@ fcall_end:
 	}
 
 	if (UNEXPECTED(ZEND_CALL_INFO(call) & ZEND_CALL_RELEASE_THIS)) {
-		OBJ_RELEASE(Z_OBJ(call->This));
+		zend_vm_release_call_frame_this(call);
 	}
 
 	zend_vm_stack_free_call_frame(call);
@@ -60324,6 +60978,48 @@ static ZEND_VM_COLD ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_CCONV ZEND_INIT_
 				if (IS_CONST == IS_CONST) {
 					function_name = RT_CONSTANT(opline, opline->op2);
 				}
+				/* Scalar extension methods: fallback on what is otherwise an
+				 * unconditional error path. The receiver rides in the frame's
+				 * This slot (call-info bits preserved) only until the body's
+				 * ZEND_RECV_RECEIVER moves it into the declared variable. */
+				if (Z_TYPE_P(object) >= IS_FALSE && Z_TYPE_P(object) <= IS_ARRAY) {
+					zend_function *scalar_fbc = zend_extension_methods_get_scalar(object,
+						Z_STR_P(function_name),
+						(IS_CONST == IS_CONST) ? Z_STR_P(RT_CONSTANT(opline, opline->op2) + 1) : NULL);
+					if (UNEXPECTED(scalar_fbc != NULL)) {
+						uint32_t this_call_info;
+
+						if (EXPECTED(scalar_fbc->type == ZEND_USER_FUNCTION)
+						 && UNEXPECTED(!RUN_TIME_CACHE(&scalar_fbc->op_array))) {
+							init_func_run_time_cache(&scalar_fbc->op_array);
+						}
+						call = zend_vm_stack_push_call_frame(
+							ZEND_CALL_NESTED_FUNCTION | ZEND_CALL_HAS_THIS | ZEND_CALL_RELEASE_THIS,
+							scalar_fbc, opline->extended_value, scalar_fbc->common.scope);
+						this_call_info = Z_TYPE_INFO(call->This) & ~0xffffu;
+						ZVAL_COPY(&call->This, object);
+						Z_TYPE_INFO(call->This) = (Z_TYPE_INFO(call->This) & 0xffffu) | this_call_info;
+						call->prev_execute_data = EX(call);
+						EX(call) = call;
+						if (IS_CONST != IS_CONST) {
+
+
+						}
+
+
+						ZEND_VM_NEXT_OPCODE();
+					}
+					/* The scalar lookup may have run the class autoloader for
+					 * imported-but-unloaded extensions; if the autoloader
+					 * threw, propagate instead of raising on top of it. */
+					if (UNEXPECTED(EG(exception))) {
+
+
+
+
+						HANDLE_EXCEPTION();
+					}
+				}
 				zend_invalid_method_call(object, function_name);
 
 
@@ -61540,6 +62236,27 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_CCONV ZEND_CALLABLE_CONVERT_P
 	SAVE_OPLINE();
 
 	zend_execute_data *call = EX(call);
+
+	if (UNEXPECTED(Z_TYPE(call->This) >= IS_FALSE && Z_TYPE(call->This) <= IS_ARRAY)) {
+		/* Partial applications cannot yet carry a by-value scalar receiver
+		 * (the same limitation as first-class callables): unwind the
+		 * pending call frame before zend_partial_create() would read the
+		 * non-object This slot as a class entry. */
+		zend_throw_error(NULL,
+			"Cannot create a partial application from a scalar extension method");
+		zend_vm_stack_free_args(call);
+		if (ZEND_CALL_INFO(call) & ZEND_CALL_HAS_EXTRA_NAMED_PARAMS) {
+			zend_free_extra_named_params(call->extra_named_params);
+		}
+		if (ZEND_CALL_INFO(call) & ZEND_CALL_RELEASE_THIS) {
+			zend_vm_release_call_frame_this(call);
+		}
+		EX(call) = call->prev_execute_data;
+		zend_vm_stack_free_call_frame(call);
+		ZVAL_UNDEF(EX_VAR(opline->result.var));
+		HANDLE_EXCEPTION();
+	}
+
 	void **cache_slot = CACHE_ADDR(opline->extended_value & ~ZEND_PARTIAL_FLAGS);
 	zval *named_positions = RT_CONSTANT(opline, opline->op2);
 	zend_string *pfa_name = Z_STR_P(RT_CONSTANT(opline, opline->op1));
@@ -61569,7 +62286,7 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_CCONV ZEND_CALLABLE_CONVERT_P
 	}
 
 	if (ZEND_CALL_INFO(call) & ZEND_CALL_RELEASE_THIS) {
-		OBJ_RELEASE(Z_OBJ(call->This));
+		zend_vm_release_call_frame_this(call);
 	} else if (ZEND_CALL_INFO(call) & ZEND_CALL_CLOSURE) {
 		OBJ_RELEASE(ZEND_CLOSURE_OBJECT(call->func));
 	}
@@ -63107,6 +63824,46 @@ static ZEND_VM_COLD ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_CCONV ZEND_INIT_
 				}
 				if (IS_TMP_VAR == IS_CONST) {
 					function_name = _get_zval_ptr_tmp(opline->op2.var EXECUTE_DATA_CC);
+				}
+				/* Scalar extension methods: fallback on what is otherwise an
+				 * unconditional error path. The receiver rides in the frame's
+				 * This slot (call-info bits preserved) only until the body's
+				 * ZEND_RECV_RECEIVER moves it into the declared variable. */
+				if (Z_TYPE_P(object) >= IS_FALSE && Z_TYPE_P(object) <= IS_ARRAY) {
+					zend_function *scalar_fbc = zend_extension_methods_get_scalar(object,
+						Z_STR_P(function_name),
+						(IS_TMP_VAR == IS_CONST) ? Z_STR_P(RT_CONSTANT(opline, opline->op2) + 1) : NULL);
+					if (UNEXPECTED(scalar_fbc != NULL)) {
+						uint32_t this_call_info;
+
+						if (EXPECTED(scalar_fbc->type == ZEND_USER_FUNCTION)
+						 && UNEXPECTED(!RUN_TIME_CACHE(&scalar_fbc->op_array))) {
+							init_func_run_time_cache(&scalar_fbc->op_array);
+						}
+						call = zend_vm_stack_push_call_frame(
+							ZEND_CALL_NESTED_FUNCTION | ZEND_CALL_HAS_THIS | ZEND_CALL_RELEASE_THIS,
+							scalar_fbc, opline->extended_value, scalar_fbc->common.scope);
+						this_call_info = Z_TYPE_INFO(call->This) & ~0xffffu;
+						ZVAL_COPY(&call->This, object);
+						Z_TYPE_INFO(call->This) = (Z_TYPE_INFO(call->This) & 0xffffu) | this_call_info;
+						call->prev_execute_data = EX(call);
+						EX(call) = call;
+						if (IS_TMP_VAR != IS_CONST) {
+							zval_ptr_dtor_nogc(EX_VAR(opline->op2.var));
+						}
+
+
+						ZEND_VM_NEXT_OPCODE();
+					}
+					/* The scalar lookup may have run the class autoloader for
+					 * imported-but-unloaded extensions; if the autoloader
+					 * threw, propagate instead of raising on top of it. */
+					if (UNEXPECTED(EG(exception))) {
+						zval_ptr_dtor_nogc(EX_VAR(opline->op2.var));
+
+
+						HANDLE_EXCEPTION();
+					}
 				}
 				zend_invalid_method_call(object, function_name);
 				zval_ptr_dtor_nogc(EX_VAR(opline->op2.var));
@@ -64811,6 +65568,27 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_CCONV ZEND_CALLABLE_CONVERT_P
 	SAVE_OPLINE();
 
 	zend_execute_data *call = EX(call);
+
+	if (UNEXPECTED(Z_TYPE(call->This) >= IS_FALSE && Z_TYPE(call->This) <= IS_ARRAY)) {
+		/* Partial applications cannot yet carry a by-value scalar receiver
+		 * (the same limitation as first-class callables): unwind the
+		 * pending call frame before zend_partial_create() would read the
+		 * non-object This slot as a class entry. */
+		zend_throw_error(NULL,
+			"Cannot create a partial application from a scalar extension method");
+		zend_vm_stack_free_args(call);
+		if (ZEND_CALL_INFO(call) & ZEND_CALL_HAS_EXTRA_NAMED_PARAMS) {
+			zend_free_extra_named_params(call->extra_named_params);
+		}
+		if (ZEND_CALL_INFO(call) & ZEND_CALL_RELEASE_THIS) {
+			zend_vm_release_call_frame_this(call);
+		}
+		EX(call) = call->prev_execute_data;
+		zend_vm_stack_free_call_frame(call);
+		ZVAL_UNDEF(EX_VAR(opline->result.var));
+		HANDLE_EXCEPTION();
+	}
+
 	void **cache_slot = CACHE_ADDR(opline->extended_value & ~ZEND_PARTIAL_FLAGS);
 	zval *named_positions = NULL;
 	zend_string *pfa_name = Z_STR_P(RT_CONSTANT(opline, opline->op1));
@@ -64840,7 +65618,7 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_CCONV ZEND_CALLABLE_CONVERT_P
 	}
 
 	if (ZEND_CALL_INFO(call) & ZEND_CALL_RELEASE_THIS) {
-		OBJ_RELEASE(Z_OBJ(call->This));
+		zend_vm_release_call_frame_this(call);
 	} else if (ZEND_CALL_INFO(call) & ZEND_CALL_CLOSURE) {
 		OBJ_RELEASE(ZEND_CLOSURE_OBJECT(call->func));
 	}
@@ -65661,6 +66439,48 @@ static ZEND_VM_COLD ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_CCONV ZEND_INIT_
 				}
 				if (IS_CV == IS_CONST) {
 					function_name = EX_VAR(opline->op2.var);
+				}
+				/* Scalar extension methods: fallback on what is otherwise an
+				 * unconditional error path. The receiver rides in the frame's
+				 * This slot (call-info bits preserved) only until the body's
+				 * ZEND_RECV_RECEIVER moves it into the declared variable. */
+				if (Z_TYPE_P(object) >= IS_FALSE && Z_TYPE_P(object) <= IS_ARRAY) {
+					zend_function *scalar_fbc = zend_extension_methods_get_scalar(object,
+						Z_STR_P(function_name),
+						(IS_CV == IS_CONST) ? Z_STR_P(RT_CONSTANT(opline, opline->op2) + 1) : NULL);
+					if (UNEXPECTED(scalar_fbc != NULL)) {
+						uint32_t this_call_info;
+
+						if (EXPECTED(scalar_fbc->type == ZEND_USER_FUNCTION)
+						 && UNEXPECTED(!RUN_TIME_CACHE(&scalar_fbc->op_array))) {
+							init_func_run_time_cache(&scalar_fbc->op_array);
+						}
+						call = zend_vm_stack_push_call_frame(
+							ZEND_CALL_NESTED_FUNCTION | ZEND_CALL_HAS_THIS | ZEND_CALL_RELEASE_THIS,
+							scalar_fbc, opline->extended_value, scalar_fbc->common.scope);
+						this_call_info = Z_TYPE_INFO(call->This) & ~0xffffu;
+						ZVAL_COPY(&call->This, object);
+						Z_TYPE_INFO(call->This) = (Z_TYPE_INFO(call->This) & 0xffffu) | this_call_info;
+						call->prev_execute_data = EX(call);
+						EX(call) = call;
+						if (IS_CV != IS_CONST) {
+
+
+						}
+
+
+						ZEND_VM_NEXT_OPCODE();
+					}
+					/* The scalar lookup may have run the class autoloader for
+					 * imported-but-unloaded extensions; if the autoloader
+					 * threw, propagate instead of raising on top of it. */
+					if (UNEXPECTED(EG(exception))) {
+
+
+
+
+						HANDLE_EXCEPTION();
+					}
 				}
 				zend_invalid_method_call(object, function_name);
 
@@ -72047,6 +72867,46 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_CCONV ZEND_INIT_METHOD_CALL_S
 				if (IS_CONST == IS_CONST) {
 					function_name = RT_CONSTANT(opline, opline->op2);
 				}
+				/* Scalar extension methods: fallback on what is otherwise an
+				 * unconditional error path. The receiver rides in the frame's
+				 * This slot (call-info bits preserved) only until the body's
+				 * ZEND_RECV_RECEIVER moves it into the declared variable. */
+				if (Z_TYPE_P(object) >= IS_FALSE && Z_TYPE_P(object) <= IS_ARRAY) {
+					zend_function *scalar_fbc = zend_extension_methods_get_scalar(object,
+						Z_STR_P(function_name),
+						(IS_CONST == IS_CONST) ? Z_STR_P(RT_CONSTANT(opline, opline->op2) + 1) : NULL);
+					if (UNEXPECTED(scalar_fbc != NULL)) {
+						uint32_t this_call_info;
+
+						if (EXPECTED(scalar_fbc->type == ZEND_USER_FUNCTION)
+						 && UNEXPECTED(!RUN_TIME_CACHE(&scalar_fbc->op_array))) {
+							init_func_run_time_cache(&scalar_fbc->op_array);
+						}
+						call = zend_vm_stack_push_call_frame(
+							ZEND_CALL_NESTED_FUNCTION | ZEND_CALL_HAS_THIS | ZEND_CALL_RELEASE_THIS,
+							scalar_fbc, opline->extended_value, scalar_fbc->common.scope);
+						this_call_info = Z_TYPE_INFO(call->This) & ~0xffffu;
+						ZVAL_COPY(&call->This, object);
+						Z_TYPE_INFO(call->This) = (Z_TYPE_INFO(call->This) & 0xffffu) | this_call_info;
+						call->prev_execute_data = EX(call);
+						EX(call) = call;
+						if (IS_CONST != IS_CONST) {
+
+
+						}
+						zval_ptr_dtor_nogc(EX_VAR(opline->op1.var));
+						ZEND_VM_NEXT_OPCODE();
+					}
+					/* The scalar lookup may have run the class autoloader for
+					 * imported-but-unloaded extensions; if the autoloader
+					 * threw, propagate instead of raising on top of it. */
+					if (UNEXPECTED(EG(exception))) {
+
+
+						zval_ptr_dtor_nogc(EX_VAR(opline->op1.var));
+						HANDLE_EXCEPTION();
+					}
+				}
 				zend_invalid_method_call(object, function_name);
 
 
@@ -73624,6 +74484,44 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_CCONV ZEND_INIT_METHOD_CALL_S
 				}
 				if (IS_TMP_VAR == IS_CONST) {
 					function_name = _get_zval_ptr_tmp(opline->op2.var EXECUTE_DATA_CC);
+				}
+				/* Scalar extension methods: fallback on what is otherwise an
+				 * unconditional error path. The receiver rides in the frame's
+				 * This slot (call-info bits preserved) only until the body's
+				 * ZEND_RECV_RECEIVER moves it into the declared variable. */
+				if (Z_TYPE_P(object) >= IS_FALSE && Z_TYPE_P(object) <= IS_ARRAY) {
+					zend_function *scalar_fbc = zend_extension_methods_get_scalar(object,
+						Z_STR_P(function_name),
+						(IS_TMP_VAR == IS_CONST) ? Z_STR_P(RT_CONSTANT(opline, opline->op2) + 1) : NULL);
+					if (UNEXPECTED(scalar_fbc != NULL)) {
+						uint32_t this_call_info;
+
+						if (EXPECTED(scalar_fbc->type == ZEND_USER_FUNCTION)
+						 && UNEXPECTED(!RUN_TIME_CACHE(&scalar_fbc->op_array))) {
+							init_func_run_time_cache(&scalar_fbc->op_array);
+						}
+						call = zend_vm_stack_push_call_frame(
+							ZEND_CALL_NESTED_FUNCTION | ZEND_CALL_HAS_THIS | ZEND_CALL_RELEASE_THIS,
+							scalar_fbc, opline->extended_value, scalar_fbc->common.scope);
+						this_call_info = Z_TYPE_INFO(call->This) & ~0xffffu;
+						ZVAL_COPY(&call->This, object);
+						Z_TYPE_INFO(call->This) = (Z_TYPE_INFO(call->This) & 0xffffu) | this_call_info;
+						call->prev_execute_data = EX(call);
+						EX(call) = call;
+						if (IS_TMP_VAR != IS_CONST) {
+							zval_ptr_dtor_nogc(EX_VAR(opline->op2.var));
+						}
+						zval_ptr_dtor_nogc(EX_VAR(opline->op1.var));
+						ZEND_VM_NEXT_OPCODE();
+					}
+					/* The scalar lookup may have run the class autoloader for
+					 * imported-but-unloaded extensions; if the autoloader
+					 * threw, propagate instead of raising on top of it. */
+					if (UNEXPECTED(EG(exception))) {
+						zval_ptr_dtor_nogc(EX_VAR(opline->op2.var));
+						zval_ptr_dtor_nogc(EX_VAR(opline->op1.var));
+						HANDLE_EXCEPTION();
+					}
 				}
 				zend_invalid_method_call(object, function_name);
 				zval_ptr_dtor_nogc(EX_VAR(opline->op2.var));
@@ -75385,6 +76283,46 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_CCONV ZEND_INIT_METHOD_CALL_S
 				}
 				if (IS_CV == IS_CONST) {
 					function_name = EX_VAR(opline->op2.var);
+				}
+				/* Scalar extension methods: fallback on what is otherwise an
+				 * unconditional error path. The receiver rides in the frame's
+				 * This slot (call-info bits preserved) only until the body's
+				 * ZEND_RECV_RECEIVER moves it into the declared variable. */
+				if (Z_TYPE_P(object) >= IS_FALSE && Z_TYPE_P(object) <= IS_ARRAY) {
+					zend_function *scalar_fbc = zend_extension_methods_get_scalar(object,
+						Z_STR_P(function_name),
+						(IS_CV == IS_CONST) ? Z_STR_P(RT_CONSTANT(opline, opline->op2) + 1) : NULL);
+					if (UNEXPECTED(scalar_fbc != NULL)) {
+						uint32_t this_call_info;
+
+						if (EXPECTED(scalar_fbc->type == ZEND_USER_FUNCTION)
+						 && UNEXPECTED(!RUN_TIME_CACHE(&scalar_fbc->op_array))) {
+							init_func_run_time_cache(&scalar_fbc->op_array);
+						}
+						call = zend_vm_stack_push_call_frame(
+							ZEND_CALL_NESTED_FUNCTION | ZEND_CALL_HAS_THIS | ZEND_CALL_RELEASE_THIS,
+							scalar_fbc, opline->extended_value, scalar_fbc->common.scope);
+						this_call_info = Z_TYPE_INFO(call->This) & ~0xffffu;
+						ZVAL_COPY(&call->This, object);
+						Z_TYPE_INFO(call->This) = (Z_TYPE_INFO(call->This) & 0xffffu) | this_call_info;
+						call->prev_execute_data = EX(call);
+						EX(call) = call;
+						if (IS_CV != IS_CONST) {
+
+
+						}
+						zval_ptr_dtor_nogc(EX_VAR(opline->op1.var));
+						ZEND_VM_NEXT_OPCODE();
+					}
+					/* The scalar lookup may have run the class autoloader for
+					 * imported-but-unloaded extensions; if the autoloader
+					 * threw, propagate instead of raising on top of it. */
+					if (UNEXPECTED(EG(exception))) {
+
+
+						zval_ptr_dtor_nogc(EX_VAR(opline->op1.var));
+						HANDLE_EXCEPTION();
+					}
 				}
 				zend_invalid_method_call(object, function_name);
 
@@ -78287,6 +79225,49 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_CCONV ZEND_ASSIGN_OBJ_REF_SPE
 }
 
 /* No specialization for op_types (CONST|TMPVAR|CV, UNUSED|CONST|TMP) */
+static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_CCONV ZEND_BIND_EXTENSION_SPEC_VAR_CONST_TAILCALL_HANDLER(ZEND_OPCODE_HANDLER_ARGS)
+{
+	USE_OPLINE
+	zend_class_entry *ce;
+	zend_string *ext_name_lc = NULL;
+
+	SAVE_OPLINE();
+	ce = Z_CE_P(EX_VAR(opline->op1.var));
+	/* extended_value flags the named form (`extension Name on Target`); the
+	 * lc extension name is then the literal following the target name. */
+	if (opline->extended_value) {
+		zval *existing;
+
+		ext_name_lc = Z_STR_P(RT_CONSTANT(opline, opline->op2) + 1);
+		/* A named extension is a class-table symbol under its own name: this
+		 * is what makes it visible to class_exists() and — decisively — to
+		 * the class autoloader (an imported-but-unloaded extension is
+		 * resolved through zend_lookup_class_ex at first use). Extension
+		 * names therefore share the class namespace, and collide like
+		 * classes do. */
+		existing = zend_hash_find(EG(class_table), ext_name_lc);
+		if (existing) {
+			if (UNEXPECTED(Z_CE_P(existing) != ce)) {
+				zend_error_noreturn(E_COMPILE_ERROR,
+					"Cannot declare extension %s, because the name is already in use",
+					ZSTR_VAL(ce->name));
+			}
+			/* Same CE re-bound (declaring file included again): the registry
+			 * registration below is idempotent (first-wins per method). */
+		} else {
+			zval zv;
+			/* Alias-typed entry: the anonymous-key entry made by
+			 * DECLARE_ANON_CLASS owns the CE's lifetime; destroy_zend_class
+			 * skips IS_ALIAS_PTR buckets, so no refcount juggling is needed
+			 * for mutable and immutable (opcache SHM) CEs alike. */
+			ZVAL_ALIAS_PTR(&zv, ce);
+			zend_hash_add_new(EG(class_table), ext_name_lc, &zv);
+		}
+	}
+	zend_extension_methods_register(Z_STR_P(RT_CONSTANT(opline, opline->op2)), ce, ext_name_lc);
+	ZEND_VM_NEXT_OPCODE_CHECK_EXCEPTION();
+}
+
 static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_CCONV ZEND_INIT_STATIC_METHOD_CALL_SPEC_VAR_CONST_TAILCALL_HANDLER(ZEND_OPCODE_HANDLER_ARGS)
 {
 	USE_OPLINE
@@ -87030,6 +88011,48 @@ static ZEND_VM_HOT ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_CCONV ZEND_INIT_M
 				if (IS_CONST == IS_CONST) {
 					function_name = RT_CONSTANT(opline, opline->op2);
 				}
+				/* Scalar extension methods: fallback on what is otherwise an
+				 * unconditional error path. The receiver rides in the frame's
+				 * This slot (call-info bits preserved) only until the body's
+				 * ZEND_RECV_RECEIVER moves it into the declared variable. */
+				if (Z_TYPE_P(object) >= IS_FALSE && Z_TYPE_P(object) <= IS_ARRAY) {
+					zend_function *scalar_fbc = zend_extension_methods_get_scalar(object,
+						Z_STR_P(function_name),
+						(IS_CONST == IS_CONST) ? Z_STR_P(RT_CONSTANT(opline, opline->op2) + 1) : NULL);
+					if (UNEXPECTED(scalar_fbc != NULL)) {
+						uint32_t this_call_info;
+
+						if (EXPECTED(scalar_fbc->type == ZEND_USER_FUNCTION)
+						 && UNEXPECTED(!RUN_TIME_CACHE(&scalar_fbc->op_array))) {
+							init_func_run_time_cache(&scalar_fbc->op_array);
+						}
+						call = zend_vm_stack_push_call_frame(
+							ZEND_CALL_NESTED_FUNCTION | ZEND_CALL_HAS_THIS | ZEND_CALL_RELEASE_THIS,
+							scalar_fbc, opline->extended_value, scalar_fbc->common.scope);
+						this_call_info = Z_TYPE_INFO(call->This) & ~0xffffu;
+						ZVAL_COPY(&call->This, object);
+						Z_TYPE_INFO(call->This) = (Z_TYPE_INFO(call->This) & 0xffffu) | this_call_info;
+						call->prev_execute_data = EX(call);
+						EX(call) = call;
+						if (IS_CONST != IS_CONST) {
+
+
+						}
+
+
+						ZEND_VM_NEXT_OPCODE();
+					}
+					/* The scalar lookup may have run the class autoloader for
+					 * imported-but-unloaded extensions; if the autoloader
+					 * threw, propagate instead of raising on top of it. */
+					if (UNEXPECTED(EG(exception))) {
+
+
+
+
+						HANDLE_EXCEPTION();
+					}
+				}
 				zend_invalid_method_call(object, function_name);
 
 
@@ -89144,6 +90167,46 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_CCONV ZEND_INIT_METHOD_CALL_S
 				if (IS_TMP_VAR == IS_CONST) {
 					function_name = _get_zval_ptr_tmp(opline->op2.var EXECUTE_DATA_CC);
 				}
+				/* Scalar extension methods: fallback on what is otherwise an
+				 * unconditional error path. The receiver rides in the frame's
+				 * This slot (call-info bits preserved) only until the body's
+				 * ZEND_RECV_RECEIVER moves it into the declared variable. */
+				if (Z_TYPE_P(object) >= IS_FALSE && Z_TYPE_P(object) <= IS_ARRAY) {
+					zend_function *scalar_fbc = zend_extension_methods_get_scalar(object,
+						Z_STR_P(function_name),
+						(IS_TMP_VAR == IS_CONST) ? Z_STR_P(RT_CONSTANT(opline, opline->op2) + 1) : NULL);
+					if (UNEXPECTED(scalar_fbc != NULL)) {
+						uint32_t this_call_info;
+
+						if (EXPECTED(scalar_fbc->type == ZEND_USER_FUNCTION)
+						 && UNEXPECTED(!RUN_TIME_CACHE(&scalar_fbc->op_array))) {
+							init_func_run_time_cache(&scalar_fbc->op_array);
+						}
+						call = zend_vm_stack_push_call_frame(
+							ZEND_CALL_NESTED_FUNCTION | ZEND_CALL_HAS_THIS | ZEND_CALL_RELEASE_THIS,
+							scalar_fbc, opline->extended_value, scalar_fbc->common.scope);
+						this_call_info = Z_TYPE_INFO(call->This) & ~0xffffu;
+						ZVAL_COPY(&call->This, object);
+						Z_TYPE_INFO(call->This) = (Z_TYPE_INFO(call->This) & 0xffffu) | this_call_info;
+						call->prev_execute_data = EX(call);
+						EX(call) = call;
+						if (IS_TMP_VAR != IS_CONST) {
+							zval_ptr_dtor_nogc(EX_VAR(opline->op2.var));
+						}
+
+
+						ZEND_VM_NEXT_OPCODE();
+					}
+					/* The scalar lookup may have run the class autoloader for
+					 * imported-but-unloaded extensions; if the autoloader
+					 * threw, propagate instead of raising on top of it. */
+					if (UNEXPECTED(EG(exception))) {
+						zval_ptr_dtor_nogc(EX_VAR(opline->op2.var));
+
+
+						HANDLE_EXCEPTION();
+					}
+				}
 				zend_invalid_method_call(object, function_name);
 				zval_ptr_dtor_nogc(EX_VAR(opline->op2.var));
 
@@ -90256,6 +91319,9 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_CCONV ZEND_GET_CALLED_CLASS_S
 
 	if (Z_TYPE(EX(This)) == IS_OBJECT) {
 		ZVAL_STR_COPY(EX_VAR(opline->result.var), Z_OBJCE(EX(This))->name);
+	} else if (UNEXPECTED(Z_CE(EX(This)) == NULL) && EX(func)->common.scope) {
+		/* Neutralized scalar-extension frame: report the declaring scope. */
+		ZVAL_STR_COPY(EX_VAR(opline->result.var), EX(func)->common.scope->name);
 	} else if (Z_CE(EX(This))) {
 		ZVAL_STR_COPY(EX_VAR(opline->result.var), Z_CE(EX(This))->name);
 	} else {
@@ -90358,6 +91424,20 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_CCONV ZEND_CALLABLE_CONVERT_S
 	USE_OPLINE
 	zend_execute_data *call = EX(call);
 
+	if (UNEXPECTED(Z_TYPE(call->This) >= IS_FALSE && Z_TYPE(call->This) <= IS_ARRAY)) {
+		/* Closures cannot yet carry a by-value scalar receiver. */
+		SAVE_OPLINE();
+		zend_throw_error(NULL,
+			"Cannot create a first-class callable from a scalar extension method");
+		if (ZEND_CALL_INFO(call) & ZEND_CALL_RELEASE_THIS) {
+			zend_vm_release_call_frame_this(call);
+		}
+		EX(call) = call->prev_execute_data;
+		zend_vm_stack_free_call_frame(call);
+		ZVAL_UNDEF(EX_VAR(opline->result.var));
+		HANDLE_EXCEPTION();
+	}
+
 	if (opline->extended_value != (uint32_t)-1) {
 		zend_object *closure = CACHED_PTR(opline->extended_value);
 		if (closure) {
@@ -90381,7 +91461,7 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_CCONV ZEND_CALLABLE_CONVERT_S
 	}
 
 	if (ZEND_CALL_INFO(call) & ZEND_CALL_RELEASE_THIS) {
-		OBJ_RELEASE(Z_OBJ(call->This));
+		zend_vm_release_call_frame_this(call);
 	}
 
 	EX(call) = call->prev_execute_data;
@@ -91749,6 +92829,48 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_CCONV ZEND_INIT_METHOD_CALL_S
 				}
 				if (IS_CV == IS_CONST) {
 					function_name = EX_VAR(opline->op2.var);
+				}
+				/* Scalar extension methods: fallback on what is otherwise an
+				 * unconditional error path. The receiver rides in the frame's
+				 * This slot (call-info bits preserved) only until the body's
+				 * ZEND_RECV_RECEIVER moves it into the declared variable. */
+				if (Z_TYPE_P(object) >= IS_FALSE && Z_TYPE_P(object) <= IS_ARRAY) {
+					zend_function *scalar_fbc = zend_extension_methods_get_scalar(object,
+						Z_STR_P(function_name),
+						(IS_CV == IS_CONST) ? Z_STR_P(RT_CONSTANT(opline, opline->op2) + 1) : NULL);
+					if (UNEXPECTED(scalar_fbc != NULL)) {
+						uint32_t this_call_info;
+
+						if (EXPECTED(scalar_fbc->type == ZEND_USER_FUNCTION)
+						 && UNEXPECTED(!RUN_TIME_CACHE(&scalar_fbc->op_array))) {
+							init_func_run_time_cache(&scalar_fbc->op_array);
+						}
+						call = zend_vm_stack_push_call_frame(
+							ZEND_CALL_NESTED_FUNCTION | ZEND_CALL_HAS_THIS | ZEND_CALL_RELEASE_THIS,
+							scalar_fbc, opline->extended_value, scalar_fbc->common.scope);
+						this_call_info = Z_TYPE_INFO(call->This) & ~0xffffu;
+						ZVAL_COPY(&call->This, object);
+						Z_TYPE_INFO(call->This) = (Z_TYPE_INFO(call->This) & 0xffffu) | this_call_info;
+						call->prev_execute_data = EX(call);
+						EX(call) = call;
+						if (IS_CV != IS_CONST) {
+
+
+						}
+
+
+						ZEND_VM_NEXT_OPCODE();
+					}
+					/* The scalar lookup may have run the class autoloader for
+					 * imported-but-unloaded extensions; if the autoloader
+					 * threw, propagate instead of raising on top of it. */
+					if (UNEXPECTED(EG(exception))) {
+
+
+
+
+						HANDLE_EXCEPTION();
+					}
 				}
 				zend_invalid_method_call(object, function_name);
 
@@ -96704,6 +97826,48 @@ static ZEND_VM_HOT ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_CCONV ZEND_INIT_M
 				if (IS_CONST == IS_CONST) {
 					function_name = RT_CONSTANT(opline, opline->op2);
 				}
+				/* Scalar extension methods: fallback on what is otherwise an
+				 * unconditional error path. The receiver rides in the frame's
+				 * This slot (call-info bits preserved) only until the body's
+				 * ZEND_RECV_RECEIVER moves it into the declared variable. */
+				if (Z_TYPE_P(object) >= IS_FALSE && Z_TYPE_P(object) <= IS_ARRAY) {
+					zend_function *scalar_fbc = zend_extension_methods_get_scalar(object,
+						Z_STR_P(function_name),
+						(IS_CONST == IS_CONST) ? Z_STR_P(RT_CONSTANT(opline, opline->op2) + 1) : NULL);
+					if (UNEXPECTED(scalar_fbc != NULL)) {
+						uint32_t this_call_info;
+
+						if (EXPECTED(scalar_fbc->type == ZEND_USER_FUNCTION)
+						 && UNEXPECTED(!RUN_TIME_CACHE(&scalar_fbc->op_array))) {
+							init_func_run_time_cache(&scalar_fbc->op_array);
+						}
+						call = zend_vm_stack_push_call_frame(
+							ZEND_CALL_NESTED_FUNCTION | ZEND_CALL_HAS_THIS | ZEND_CALL_RELEASE_THIS,
+							scalar_fbc, opline->extended_value, scalar_fbc->common.scope);
+						this_call_info = Z_TYPE_INFO(call->This) & ~0xffffu;
+						ZVAL_COPY(&call->This, object);
+						Z_TYPE_INFO(call->This) = (Z_TYPE_INFO(call->This) & 0xffffu) | this_call_info;
+						call->prev_execute_data = EX(call);
+						EX(call) = call;
+						if (IS_CONST != IS_CONST) {
+
+
+						}
+
+
+						ZEND_VM_NEXT_OPCODE();
+					}
+					/* The scalar lookup may have run the class autoloader for
+					 * imported-but-unloaded extensions; if the autoloader
+					 * threw, propagate instead of raising on top of it. */
+					if (UNEXPECTED(EG(exception))) {
+
+
+
+
+						HANDLE_EXCEPTION();
+					}
+				}
 				zend_invalid_method_call(object, function_name);
 
 
@@ -100515,6 +101679,46 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_CCONV ZEND_INIT_METHOD_CALL_S
 				}
 				if (IS_TMP_VAR == IS_CONST) {
 					function_name = _get_zval_ptr_tmp(opline->op2.var EXECUTE_DATA_CC);
+				}
+				/* Scalar extension methods: fallback on what is otherwise an
+				 * unconditional error path. The receiver rides in the frame's
+				 * This slot (call-info bits preserved) only until the body's
+				 * ZEND_RECV_RECEIVER moves it into the declared variable. */
+				if (Z_TYPE_P(object) >= IS_FALSE && Z_TYPE_P(object) <= IS_ARRAY) {
+					zend_function *scalar_fbc = zend_extension_methods_get_scalar(object,
+						Z_STR_P(function_name),
+						(IS_TMP_VAR == IS_CONST) ? Z_STR_P(RT_CONSTANT(opline, opline->op2) + 1) : NULL);
+					if (UNEXPECTED(scalar_fbc != NULL)) {
+						uint32_t this_call_info;
+
+						if (EXPECTED(scalar_fbc->type == ZEND_USER_FUNCTION)
+						 && UNEXPECTED(!RUN_TIME_CACHE(&scalar_fbc->op_array))) {
+							init_func_run_time_cache(&scalar_fbc->op_array);
+						}
+						call = zend_vm_stack_push_call_frame(
+							ZEND_CALL_NESTED_FUNCTION | ZEND_CALL_HAS_THIS | ZEND_CALL_RELEASE_THIS,
+							scalar_fbc, opline->extended_value, scalar_fbc->common.scope);
+						this_call_info = Z_TYPE_INFO(call->This) & ~0xffffu;
+						ZVAL_COPY(&call->This, object);
+						Z_TYPE_INFO(call->This) = (Z_TYPE_INFO(call->This) & 0xffffu) | this_call_info;
+						call->prev_execute_data = EX(call);
+						EX(call) = call;
+						if (IS_TMP_VAR != IS_CONST) {
+							zval_ptr_dtor_nogc(EX_VAR(opline->op2.var));
+						}
+
+
+						ZEND_VM_NEXT_OPCODE();
+					}
+					/* The scalar lookup may have run the class autoloader for
+					 * imported-but-unloaded extensions; if the autoloader
+					 * threw, propagate instead of raising on top of it. */
+					if (UNEXPECTED(EG(exception))) {
+						zval_ptr_dtor_nogc(EX_VAR(opline->op2.var));
+
+
+						HANDLE_EXCEPTION();
+					}
 				}
 				zend_invalid_method_call(object, function_name);
 				zval_ptr_dtor_nogc(EX_VAR(opline->op2.var));
@@ -105584,6 +106788,48 @@ static ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_CCONV ZEND_INIT_METHOD_CALL_S
 				if (IS_CV == IS_CONST) {
 					function_name = EX_VAR(opline->op2.var);
 				}
+				/* Scalar extension methods: fallback on what is otherwise an
+				 * unconditional error path. The receiver rides in the frame's
+				 * This slot (call-info bits preserved) only until the body's
+				 * ZEND_RECV_RECEIVER moves it into the declared variable. */
+				if (Z_TYPE_P(object) >= IS_FALSE && Z_TYPE_P(object) <= IS_ARRAY) {
+					zend_function *scalar_fbc = zend_extension_methods_get_scalar(object,
+						Z_STR_P(function_name),
+						(IS_CV == IS_CONST) ? Z_STR_P(RT_CONSTANT(opline, opline->op2) + 1) : NULL);
+					if (UNEXPECTED(scalar_fbc != NULL)) {
+						uint32_t this_call_info;
+
+						if (EXPECTED(scalar_fbc->type == ZEND_USER_FUNCTION)
+						 && UNEXPECTED(!RUN_TIME_CACHE(&scalar_fbc->op_array))) {
+							init_func_run_time_cache(&scalar_fbc->op_array);
+						}
+						call = zend_vm_stack_push_call_frame(
+							ZEND_CALL_NESTED_FUNCTION | ZEND_CALL_HAS_THIS | ZEND_CALL_RELEASE_THIS,
+							scalar_fbc, opline->extended_value, scalar_fbc->common.scope);
+						this_call_info = Z_TYPE_INFO(call->This) & ~0xffffu;
+						ZVAL_COPY(&call->This, object);
+						Z_TYPE_INFO(call->This) = (Z_TYPE_INFO(call->This) & 0xffffu) | this_call_info;
+						call->prev_execute_data = EX(call);
+						EX(call) = call;
+						if (IS_CV != IS_CONST) {
+
+
+						}
+
+
+						ZEND_VM_NEXT_OPCODE();
+					}
+					/* The scalar lookup may have run the class autoloader for
+					 * imported-but-unloaded extensions; if the autoloader
+					 * threw, propagate instead of raising on top of it. */
+					if (UNEXPECTED(EG(exception))) {
+
+
+
+
+						HANDLE_EXCEPTION();
+					}
+				}
 				zend_invalid_method_call(object, function_name);
 
 
@@ -109662,6 +110908,8 @@ ZEND_API void execute_ex(zend_execute_data *ex)
 			(void*)&&ZEND_NULL_LABEL,
 			(void*)&&ZEND_SEND_PLACEHOLDER_SPEC_UNUSED_UNUSED_LABEL,
 			(void*)&&ZEND_NULL_LABEL,
+			(void*)&&ZEND_BIND_EXTENSION_SPEC_VAR_CONST_LABEL,
+			(void*)&&ZEND_RECV_RECEIVER_SPEC_LABEL,
 			(void*)&&ZEND_INIT_FCALL_OFFSET_SPEC_CONST_LABEL,
 			(void*)&&ZEND_RECV_NOTYPE_SPEC_LABEL,
 			(void*)&&ZEND_NULL_LABEL,
@@ -110701,7 +111949,7 @@ zend_leave_helper_SPEC_LABEL:
 		call_info = EX_CALL_INFO();
 #endif
 		if (UNEXPECTED(call_info & ZEND_CALL_RELEASE_THIS)) {
-			OBJ_RELEASE(Z_OBJ(execute_data->This));
+			zend_vm_release_call_frame_this(execute_data);
 		} else if (UNEXPECTED(call_info & ZEND_CALL_CLOSURE)) {
 			OBJ_RELEASE(ZEND_CLOSURE_OBJECT(EX(func)));
 		}
@@ -110735,7 +111983,7 @@ zend_leave_helper_SPEC_LABEL:
 		zend_vm_stack_free_extra_args_ex(call_info, execute_data);
 
 		if (UNEXPECTED(call_info & ZEND_CALL_RELEASE_THIS)) {
-			OBJ_RELEASE(Z_OBJ(execute_data->This));
+			zend_vm_release_call_frame_this(execute_data);
 		} else if (UNEXPECTED(call_info & ZEND_CALL_CLOSURE)) {
 			OBJ_RELEASE(ZEND_CLOSURE_OBJECT(EX(func)));
 		}
@@ -110830,6 +112078,11 @@ zend_leave_helper_SPEC_LABEL:
 				VM_TRACE(ZEND_JMP_SPEC)
 				ZEND_JMP_SPEC_HANDLER(ZEND_OPCODE_HANDLER_ARGS_PASSTHRU);
 				VM_TRACE_OP_END(ZEND_JMP_SPEC)
+				HYBRID_BREAK();
+			HYBRID_CASE(ZEND_RECV_RECEIVER_SPEC):
+				VM_TRACE(ZEND_RECV_RECEIVER_SPEC)
+				ZEND_RECV_RECEIVER_SPEC_HANDLER(ZEND_OPCODE_HANDLER_ARGS_PASSTHRU);
+				VM_TRACE_OP_END(ZEND_RECV_RECEIVER_SPEC)
 				HYBRID_BREAK();
 			HYBRID_CASE(ZEND_DO_ICALL_SPEC_RETVAL_UNUSED):
 				VM_TRACE(ZEND_DO_ICALL_SPEC_RETVAL_UNUSED)
@@ -113693,6 +114946,11 @@ zend_leave_helper_SPEC_LABEL:
 				VM_TRACE(ZEND_ASSIGN_OBJ_REF_SPEC_VAR_CONST_OP_DATA_CV)
 				ZEND_ASSIGN_OBJ_REF_SPEC_VAR_CONST_OP_DATA_CV_HANDLER(ZEND_OPCODE_HANDLER_ARGS_PASSTHRU);
 				VM_TRACE_OP_END(ZEND_ASSIGN_OBJ_REF_SPEC_VAR_CONST_OP_DATA_CV)
+				HYBRID_BREAK();
+			HYBRID_CASE(ZEND_BIND_EXTENSION_SPEC_VAR_CONST):
+				VM_TRACE(ZEND_BIND_EXTENSION_SPEC_VAR_CONST)
+				ZEND_BIND_EXTENSION_SPEC_VAR_CONST_HANDLER(ZEND_OPCODE_HANDLER_ARGS_PASSTHRU);
+				VM_TRACE_OP_END(ZEND_BIND_EXTENSION_SPEC_VAR_CONST)
 				HYBRID_BREAK();
 			HYBRID_CASE(ZEND_INIT_STATIC_METHOD_CALL_SPEC_VAR_CONST):
 				VM_TRACE(ZEND_INIT_STATIC_METHOD_CALL_SPEC_VAR_CONST)
@@ -118630,6 +119888,8 @@ void zend_vm_init(void)
 		ZEND_NULL_HANDLER,
 		ZEND_SEND_PLACEHOLDER_SPEC_UNUSED_UNUSED_HANDLER,
 		ZEND_NULL_HANDLER,
+		ZEND_BIND_EXTENSION_SPEC_VAR_CONST_HANDLER,
+		ZEND_RECV_RECEIVER_SPEC_HANDLER,
 		ZEND_INIT_FCALL_OFFSET_SPEC_CONST_HANDLER,
 		ZEND_RECV_NOTYPE_SPEC_HANDLER,
 		ZEND_NULL_HANDLER,
@@ -122118,6 +123378,8 @@ void zend_vm_init(void)
 		ZEND_NULL_TAILCALL_HANDLER,
 		ZEND_SEND_PLACEHOLDER_SPEC_UNUSED_UNUSED_TAILCALL_HANDLER,
 		ZEND_NULL_TAILCALL_HANDLER,
+		ZEND_BIND_EXTENSION_SPEC_VAR_CONST_TAILCALL_HANDLER,
+		ZEND_RECV_RECEIVER_SPEC_TAILCALL_HANDLER,
 		ZEND_INIT_FCALL_OFFSET_SPEC_CONST_TAILCALL_HANDLER,
 		ZEND_RECV_NOTYPE_SPEC_TAILCALL_HANDLER,
 		ZEND_NULL_TAILCALL_HANDLER,
@@ -123086,7 +124348,7 @@ void zend_vm_init(void)
 		1255,
 		1256 | SPEC_RULE_OP1,
 		1261 | SPEC_RULE_OP1,
-		3484,
+		3486,
 		1266 | SPEC_RULE_OP1,
 		1271 | SPEC_RULE_OP1,
 		1276 | SPEC_RULE_OP2,
@@ -123120,7 +124382,7 @@ void zend_vm_init(void)
 		1559 | SPEC_RULE_OP1 | SPEC_RULE_OP2,
 		1584 | SPEC_RULE_OP1,
 		1589,
-		3484,
+		3486,
 		1590 | SPEC_RULE_OP1,
 		1595 | SPEC_RULE_OP1 | SPEC_RULE_OP2,
 		1620 | SPEC_RULE_OP1 | SPEC_RULE_OP2,
@@ -123255,48 +124517,48 @@ void zend_vm_init(void)
 		2558,
 		2559 | SPEC_RULE_OP2,
 		2564 | SPEC_RULE_OP2,
-		3484,
-		3484,
-		3484,
-		3484,
-		3484,
-		3484,
-		3484,
-		3484,
-		3484,
-		3484,
-		3484,
-		3484,
-		3484,
-		3484,
-		3484,
-		3484,
-		3484,
-		3484,
-		3484,
-		3484,
-		3484,
-		3484,
-		3484,
-		3484,
-		3484,
-		3484,
-		3484,
-		3484,
-		3484,
-		3484,
-		3484,
-		3484,
-		3484,
-		3484,
-		3484,
-		3484,
-		3484,
-		3484,
-		3484,
-		3484,
-		3484,
-		3484,
+		3486,
+		3486,
+		2569,
+		2570,
+		3486,
+		3486,
+		3486,
+		3486,
+		3486,
+		3486,
+		3486,
+		3486,
+		3486,
+		3486,
+		3486,
+		3486,
+		3486,
+		3486,
+		3486,
+		3486,
+		3486,
+		3486,
+		3486,
+		3486,
+		3486,
+		3486,
+		3486,
+		3486,
+		3486,
+		3486,
+		3486,
+		3486,
+		3486,
+		3486,
+		3486,
+		3486,
+		3486,
+		3486,
+		3486,
+		3486,
+		3486,
+		3486,
 	};
 #if 0
 #elif (ZEND_VM_KIND == ZEND_VM_KIND_HYBRID)
@@ -123489,7 +124751,7 @@ ZEND_API void ZEND_FASTCALL zend_vm_set_opcode_handler_ex(zend_op* op, uint32_t 
 				if (op->op1_type == IS_CONST && op->op2_type == IS_CONST) {
 					break;
 				}
-				spec = 2577 | SPEC_RULE_OP1 | SPEC_RULE_OP2 | SPEC_RULE_COMMUTATIVE;
+				spec = 2579 | SPEC_RULE_OP1 | SPEC_RULE_OP2 | SPEC_RULE_COMMUTATIVE;
 				if (op->op1_type < op->op2_type) {
 					zend_swap_operands(op);
 				}
@@ -123497,7 +124759,7 @@ ZEND_API void ZEND_FASTCALL zend_vm_set_opcode_handler_ex(zend_op* op, uint32_t 
 				if (op->op1_type == IS_CONST && op->op2_type == IS_CONST) {
 					break;
 				}
-				spec = 2602 | SPEC_RULE_OP1 | SPEC_RULE_OP2 | SPEC_RULE_COMMUTATIVE;
+				spec = 2604 | SPEC_RULE_OP1 | SPEC_RULE_OP2 | SPEC_RULE_COMMUTATIVE;
 				if (op->op1_type < op->op2_type) {
 					zend_swap_operands(op);
 				}
@@ -123505,7 +124767,7 @@ ZEND_API void ZEND_FASTCALL zend_vm_set_opcode_handler_ex(zend_op* op, uint32_t 
 				if (op->op1_type == IS_CONST && op->op2_type == IS_CONST) {
 					break;
 				}
-				spec = 2627 | SPEC_RULE_OP1 | SPEC_RULE_OP2 | SPEC_RULE_COMMUTATIVE;
+				spec = 2629 | SPEC_RULE_OP1 | SPEC_RULE_OP2 | SPEC_RULE_COMMUTATIVE;
 				if (op->op1_type < op->op2_type) {
 					zend_swap_operands(op);
 				}
@@ -123516,17 +124778,17 @@ ZEND_API void ZEND_FASTCALL zend_vm_set_opcode_handler_ex(zend_op* op, uint32_t 
 				if (op->op1_type == IS_CONST && op->op2_type == IS_CONST) {
 					break;
 				}
-				spec = 2652 | SPEC_RULE_OP1 | SPEC_RULE_OP2;
+				spec = 2654 | SPEC_RULE_OP1 | SPEC_RULE_OP2;
 			} else if (op1_info == MAY_BE_LONG && op2_info == MAY_BE_LONG) {
 				if (op->op1_type == IS_CONST && op->op2_type == IS_CONST) {
 					break;
 				}
-				spec = 2677 | SPEC_RULE_OP1 | SPEC_RULE_OP2;
+				spec = 2679 | SPEC_RULE_OP1 | SPEC_RULE_OP2;
 			} else if (op1_info == MAY_BE_DOUBLE && op2_info == MAY_BE_DOUBLE) {
 				if (op->op1_type == IS_CONST && op->op2_type == IS_CONST) {
 					break;
 				}
-				spec = 2702 | SPEC_RULE_OP1 | SPEC_RULE_OP2;
+				spec = 2704 | SPEC_RULE_OP1 | SPEC_RULE_OP2;
 			}
 			break;
 		case ZEND_MUL:
@@ -123537,17 +124799,17 @@ ZEND_API void ZEND_FASTCALL zend_vm_set_opcode_handler_ex(zend_op* op, uint32_t 
 				if (op->op1_type == IS_CONST && op->op2_type == IS_CONST) {
 					break;
 				}
-				spec = 2727 | SPEC_RULE_OP1 | SPEC_RULE_OP2 | SPEC_RULE_COMMUTATIVE;
+				spec = 2729 | SPEC_RULE_OP1 | SPEC_RULE_OP2 | SPEC_RULE_COMMUTATIVE;
 			} else if (op1_info == MAY_BE_LONG && op2_info == MAY_BE_LONG) {
 				if (op->op1_type == IS_CONST && op->op2_type == IS_CONST) {
 					break;
 				}
-				spec = 2752 | SPEC_RULE_OP1 | SPEC_RULE_OP2 | SPEC_RULE_COMMUTATIVE;
+				spec = 2754 | SPEC_RULE_OP1 | SPEC_RULE_OP2 | SPEC_RULE_COMMUTATIVE;
 			} else if (op1_info == MAY_BE_DOUBLE && op2_info == MAY_BE_DOUBLE) {
 				if (op->op1_type == IS_CONST && op->op2_type == IS_CONST) {
 					break;
 				}
-				spec = 2777 | SPEC_RULE_OP1 | SPEC_RULE_OP2 | SPEC_RULE_COMMUTATIVE;
+				spec = 2779 | SPEC_RULE_OP1 | SPEC_RULE_OP2 | SPEC_RULE_COMMUTATIVE;
 			}
 			break;
 		case ZEND_IS_IDENTICAL:
@@ -123558,19 +124820,19 @@ ZEND_API void ZEND_FASTCALL zend_vm_set_opcode_handler_ex(zend_op* op, uint32_t 
 				if (op->op1_type == IS_CONST && op->op2_type == IS_CONST) {
 					break;
 				}
-				spec = 2802 | SPEC_RULE_OP1 | SPEC_RULE_OP2 | SPEC_RULE_SMART_BRANCH | SPEC_RULE_COMMUTATIVE;
+				spec = 2804 | SPEC_RULE_OP1 | SPEC_RULE_OP2 | SPEC_RULE_SMART_BRANCH | SPEC_RULE_COMMUTATIVE;
 			} else if (op1_info == MAY_BE_DOUBLE && op2_info == MAY_BE_DOUBLE) {
 				if (op->op1_type == IS_CONST && op->op2_type == IS_CONST) {
 					break;
 				}
-				spec = 2877 | SPEC_RULE_OP1 | SPEC_RULE_OP2 | SPEC_RULE_SMART_BRANCH | SPEC_RULE_COMMUTATIVE;
+				spec = 2879 | SPEC_RULE_OP1 | SPEC_RULE_OP2 | SPEC_RULE_SMART_BRANCH | SPEC_RULE_COMMUTATIVE;
 			} else if (op->op2_type == IS_CONST && (Z_TYPE_P(RT_CONSTANT(op, op->op2)) == IS_ARRAY && zend_hash_num_elements(Z_ARR_P(RT_CONSTANT(op, op->op2))) == 0)) {
 				if (op->op1_type == IS_CONST && op->op2_type == IS_CONST) {
 					break;
 				}
-				spec = 3102 | SPEC_RULE_SMART_BRANCH | SPEC_RULE_COMMUTATIVE;
+				spec = 3104 | SPEC_RULE_SMART_BRANCH | SPEC_RULE_COMMUTATIVE;
 			} else if (op->op1_type == IS_CV && (op->op2_type & (IS_CONST|IS_CV)) && !(op1_info & (MAY_BE_UNDEF|MAY_BE_REF)) && !(op2_info & (MAY_BE_UNDEF|MAY_BE_REF)) && !((op1_info & op2_info) & MAY_BE_ARRAY_OF_ARRAY)) {
-				spec = 3108 | SPEC_RULE_OP2 | SPEC_RULE_COMMUTATIVE;
+				spec = 3110 | SPEC_RULE_OP2 | SPEC_RULE_COMMUTATIVE;
 			}
 			break;
 		case ZEND_IS_NOT_IDENTICAL:
@@ -123581,19 +124843,19 @@ ZEND_API void ZEND_FASTCALL zend_vm_set_opcode_handler_ex(zend_op* op, uint32_t 
 				if (op->op1_type == IS_CONST && op->op2_type == IS_CONST) {
 					break;
 				}
-				spec = 2952 | SPEC_RULE_OP1 | SPEC_RULE_OP2 | SPEC_RULE_SMART_BRANCH | SPEC_RULE_COMMUTATIVE;
+				spec = 2954 | SPEC_RULE_OP1 | SPEC_RULE_OP2 | SPEC_RULE_SMART_BRANCH | SPEC_RULE_COMMUTATIVE;
 			} else if (op1_info == MAY_BE_DOUBLE && op2_info == MAY_BE_DOUBLE) {
 				if (op->op1_type == IS_CONST && op->op2_type == IS_CONST) {
 					break;
 				}
-				spec = 3027 | SPEC_RULE_OP1 | SPEC_RULE_OP2 | SPEC_RULE_SMART_BRANCH | SPEC_RULE_COMMUTATIVE;
+				spec = 3029 | SPEC_RULE_OP1 | SPEC_RULE_OP2 | SPEC_RULE_SMART_BRANCH | SPEC_RULE_COMMUTATIVE;
 			} else if (op->op2_type == IS_CONST && (Z_TYPE_P(RT_CONSTANT(op, op->op2)) == IS_ARRAY && zend_hash_num_elements(Z_ARR_P(RT_CONSTANT(op, op->op2))) == 0)) {
 				if (op->op1_type == IS_CONST && op->op2_type == IS_CONST) {
 					break;
 				}
-				spec = 3105 | SPEC_RULE_SMART_BRANCH | SPEC_RULE_COMMUTATIVE;
+				spec = 3107 | SPEC_RULE_SMART_BRANCH | SPEC_RULE_COMMUTATIVE;
 			} else if (op->op1_type == IS_CV && (op->op2_type & (IS_CONST|IS_CV)) && !(op1_info & (MAY_BE_UNDEF|MAY_BE_REF)) && !(op2_info & (MAY_BE_UNDEF|MAY_BE_REF)) && !((op1_info & op2_info) & MAY_BE_ARRAY_OF_ARRAY)) {
-				spec = 3113 | SPEC_RULE_OP2 | SPEC_RULE_COMMUTATIVE;
+				spec = 3115 | SPEC_RULE_OP2 | SPEC_RULE_COMMUTATIVE;
 			}
 			break;
 		case ZEND_IS_EQUAL:
@@ -123604,12 +124866,12 @@ ZEND_API void ZEND_FASTCALL zend_vm_set_opcode_handler_ex(zend_op* op, uint32_t 
 				if (op->op1_type == IS_CONST && op->op2_type == IS_CONST) {
 					break;
 				}
-				spec = 2802 | SPEC_RULE_OP1 | SPEC_RULE_OP2 | SPEC_RULE_SMART_BRANCH | SPEC_RULE_COMMUTATIVE;
+				spec = 2804 | SPEC_RULE_OP1 | SPEC_RULE_OP2 | SPEC_RULE_SMART_BRANCH | SPEC_RULE_COMMUTATIVE;
 			} else if (op1_info == MAY_BE_DOUBLE && op2_info == MAY_BE_DOUBLE) {
 				if (op->op1_type == IS_CONST && op->op2_type == IS_CONST) {
 					break;
 				}
-				spec = 2877 | SPEC_RULE_OP1 | SPEC_RULE_OP2 | SPEC_RULE_SMART_BRANCH | SPEC_RULE_COMMUTATIVE;
+				spec = 2879 | SPEC_RULE_OP1 | SPEC_RULE_OP2 | SPEC_RULE_SMART_BRANCH | SPEC_RULE_COMMUTATIVE;
 			}
 			break;
 		case ZEND_IS_NOT_EQUAL:
@@ -123620,12 +124882,12 @@ ZEND_API void ZEND_FASTCALL zend_vm_set_opcode_handler_ex(zend_op* op, uint32_t 
 				if (op->op1_type == IS_CONST && op->op2_type == IS_CONST) {
 					break;
 				}
-				spec = 2952 | SPEC_RULE_OP1 | SPEC_RULE_OP2 | SPEC_RULE_SMART_BRANCH | SPEC_RULE_COMMUTATIVE;
+				spec = 2954 | SPEC_RULE_OP1 | SPEC_RULE_OP2 | SPEC_RULE_SMART_BRANCH | SPEC_RULE_COMMUTATIVE;
 			} else if (op1_info == MAY_BE_DOUBLE && op2_info == MAY_BE_DOUBLE) {
 				if (op->op1_type == IS_CONST && op->op2_type == IS_CONST) {
 					break;
 				}
-				spec = 3027 | SPEC_RULE_OP1 | SPEC_RULE_OP2 | SPEC_RULE_SMART_BRANCH | SPEC_RULE_COMMUTATIVE;
+				spec = 3029 | SPEC_RULE_OP1 | SPEC_RULE_OP2 | SPEC_RULE_SMART_BRANCH | SPEC_RULE_COMMUTATIVE;
 			}
 			break;
 		case ZEND_IS_SMALLER:
@@ -123633,12 +124895,12 @@ ZEND_API void ZEND_FASTCALL zend_vm_set_opcode_handler_ex(zend_op* op, uint32_t 
 				if (op->op1_type == IS_CONST && op->op2_type == IS_CONST) {
 					break;
 				}
-				spec = 3118 | SPEC_RULE_OP1 | SPEC_RULE_OP2 | SPEC_RULE_SMART_BRANCH;
+				spec = 3120 | SPEC_RULE_OP1 | SPEC_RULE_OP2 | SPEC_RULE_SMART_BRANCH;
 			} else if (op1_info == MAY_BE_DOUBLE && op2_info == MAY_BE_DOUBLE) {
 				if (op->op1_type == IS_CONST && op->op2_type == IS_CONST) {
 					break;
 				}
-				spec = 3193 | SPEC_RULE_OP1 | SPEC_RULE_OP2 | SPEC_RULE_SMART_BRANCH;
+				spec = 3195 | SPEC_RULE_OP1 | SPEC_RULE_OP2 | SPEC_RULE_SMART_BRANCH;
 			}
 			break;
 		case ZEND_IS_SMALLER_OR_EQUAL:
@@ -123646,79 +124908,79 @@ ZEND_API void ZEND_FASTCALL zend_vm_set_opcode_handler_ex(zend_op* op, uint32_t 
 				if (op->op1_type == IS_CONST && op->op2_type == IS_CONST) {
 					break;
 				}
-				spec = 3268 | SPEC_RULE_OP1 | SPEC_RULE_OP2 | SPEC_RULE_SMART_BRANCH;
+				spec = 3270 | SPEC_RULE_OP1 | SPEC_RULE_OP2 | SPEC_RULE_SMART_BRANCH;
 			} else if (op1_info == MAY_BE_DOUBLE && op2_info == MAY_BE_DOUBLE) {
 				if (op->op1_type == IS_CONST && op->op2_type == IS_CONST) {
 					break;
 				}
-				spec = 3343 | SPEC_RULE_OP1 | SPEC_RULE_OP2 | SPEC_RULE_SMART_BRANCH;
+				spec = 3345 | SPEC_RULE_OP1 | SPEC_RULE_OP2 | SPEC_RULE_SMART_BRANCH;
 			}
 			break;
 		case ZEND_QM_ASSIGN:
 			if (op1_info == MAY_BE_LONG) {
-				spec = 3430 | SPEC_RULE_OP1;
+				spec = 3432 | SPEC_RULE_OP1;
 			} else if (op1_info == MAY_BE_DOUBLE) {
-				spec = 3435 | SPEC_RULE_OP1;
+				spec = 3437 | SPEC_RULE_OP1;
 			} else if ((op->op1_type == IS_CONST) ? !Z_REFCOUNTED_P(RT_CONSTANT(op, op->op1)) : (!(op1_info & ((MAY_BE_ANY|MAY_BE_UNDEF)-(MAY_BE_NULL|MAY_BE_FALSE|MAY_BE_TRUE|MAY_BE_LONG|MAY_BE_DOUBLE))))) {
-				spec = 3440 | SPEC_RULE_OP1;
+				spec = 3442 | SPEC_RULE_OP1;
 			}
 			break;
 		case ZEND_PRE_INC:
 			if (res_info == MAY_BE_LONG && op1_info == MAY_BE_LONG) {
-				spec = 3418 | SPEC_RULE_RETVAL;
-			} else if (op1_info == MAY_BE_LONG) {
 				spec = 3420 | SPEC_RULE_RETVAL;
+			} else if (op1_info == MAY_BE_LONG) {
+				spec = 3422 | SPEC_RULE_RETVAL;
 			}
 			break;
 		case ZEND_PRE_DEC:
 			if (res_info == MAY_BE_LONG && op1_info == MAY_BE_LONG) {
-				spec = 3422 | SPEC_RULE_RETVAL;
-			} else if (op1_info == MAY_BE_LONG) {
 				spec = 3424 | SPEC_RULE_RETVAL;
+			} else if (op1_info == MAY_BE_LONG) {
+				spec = 3426 | SPEC_RULE_RETVAL;
 			}
 			break;
 		case ZEND_POST_INC:
-			if (res_info == MAY_BE_LONG && op1_info == MAY_BE_LONG) {
-				spec = 3426;
-			} else if (op1_info == MAY_BE_LONG) {
-				spec = 3427;
-			}
-			break;
-		case ZEND_POST_DEC:
 			if (res_info == MAY_BE_LONG && op1_info == MAY_BE_LONG) {
 				spec = 3428;
 			} else if (op1_info == MAY_BE_LONG) {
 				spec = 3429;
 			}
 			break;
+		case ZEND_POST_DEC:
+			if (res_info == MAY_BE_LONG && op1_info == MAY_BE_LONG) {
+				spec = 3430;
+			} else if (op1_info == MAY_BE_LONG) {
+				spec = 3431;
+			}
+			break;
 		case ZEND_JMP:
 			if (OP_JMP_ADDR(op, op->op1) > op) {
-				spec = 2576;
+				spec = 2578;
 			}
 			break;
 		case ZEND_INIT_FCALL:
 			if (Z_EXTRA_P(RT_CONSTANT(op, op->op2)) != 0) {
-				spec = 2569;
+				spec = 2571;
 			}
 			break;
 		case ZEND_RECV:
 			if (op->op2.num == MAY_BE_ANY) {
-				spec = 2570;
+				spec = 2572;
 			}
 			break;
 		case ZEND_SEND_VAL:
 			if (op->op1_type == IS_CONST && op->op2_type == IS_UNUSED && !Z_REFCOUNTED_P(RT_CONSTANT(op, op->op1))) {
-				spec = 3480;
+				spec = 3482;
 			}
 			break;
 		case ZEND_SEND_VAR_EX:
 			if (op->op2_type == IS_UNUSED && op->op2.num <= MAX_ARG_FLAG_NUM && (op1_info & (MAY_BE_UNDEF|MAY_BE_REF)) == 0) {
-				spec = 3475 | SPEC_RULE_OP1;
+				spec = 3477 | SPEC_RULE_OP1;
 			}
 			break;
 		case ZEND_FE_FETCH_R:
 			if (op->op2_type == IS_CV && (op1_info & (MAY_BE_ANY|MAY_BE_REF)) == MAY_BE_ARRAY) {
-				spec = 3482 | SPEC_RULE_RETVAL;
+				spec = 3484 | SPEC_RULE_RETVAL;
 			}
 			break;
 		case ZEND_FETCH_DIM_R:
@@ -123726,22 +124988,22 @@ ZEND_API void ZEND_FASTCALL zend_vm_set_opcode_handler_ex(zend_op* op, uint32_t 
 				if (op->op1_type == IS_CONST && op->op2_type == IS_CONST) {
 					break;
 				}
-				spec = 3445 | SPEC_RULE_OP1 | SPEC_RULE_OP2;
+				spec = 3447 | SPEC_RULE_OP1 | SPEC_RULE_OP2;
 			}
 			break;
 		case ZEND_SEND_VAL_EX:
 			if (op->op2_type == IS_UNUSED && op->op2.num <= MAX_ARG_FLAG_NUM && op->op1_type == IS_CONST && !Z_REFCOUNTED_P(RT_CONSTANT(op, op->op1))) {
-				spec = 3481;
+				spec = 3483;
 			}
 			break;
 		case ZEND_SEND_VAR:
 			if (op->op2_type == IS_UNUSED && (op1_info & (MAY_BE_UNDEF|MAY_BE_REF)) == 0) {
-				spec = 3470 | SPEC_RULE_OP1;
+				spec = 3472 | SPEC_RULE_OP1;
 			}
 			break;
 		case ZEND_COUNT:
 			if (op->op1_type != IS_CONST && (op1_info & (MAY_BE_ANY|MAY_BE_UNDEF|MAY_BE_REF)) == MAY_BE_ARRAY) {
-				spec = 2571 | SPEC_RULE_OP1;
+				spec = 2573 | SPEC_RULE_OP1;
 			}
 			break;
 		case ZEND_BW_OR:
