@@ -29,6 +29,7 @@ char *get_token_type_name(int token_type)
 		case T_NAME_FULLY_QUALIFIED: return "T_NAME_FULLY_QUALIFIED";
 		case T_NAME_RELATIVE: return "T_NAME_RELATIVE";
 		case T_NAME_QUALIFIED: return "T_NAME_QUALIFIED";
+		case T_NAME_MODULE: return "T_NAME_MODULE";
 		case T_VARIABLE: return "T_VARIABLE";
 		case T_INLINE_HTML: return "T_INLINE_HTML";
 		case T_ENCAPSED_AND_WHITESPACE: return "T_ENCAPSED_AND_WHITESPACE";
@@ -106,6 +107,8 @@ char *get_token_type_name(int token_type)
 		case T_SURFACE: return "T_SURFACE";
 		case T_ENUM: return "T_ENUM";
 		case T_STRUCT: return "T_STRUCT";
+		case T_MODULE: return "T_MODULE";
+		case T_INTERNAL: return "T_INTERNAL";
 		case T_EXTENDS: return "T_EXTENDS";
 		case T_IMPLEMENTS: return "T_IMPLEMENTS";
 		case T_NAMESPACE: return "T_NAMESPACE";
