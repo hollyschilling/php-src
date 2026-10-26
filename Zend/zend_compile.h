@@ -129,6 +129,11 @@ typedef struct _zend_file_context {
 	HashTable *surface_grants;
 	/* Module imports: prefix -> zend_lang_module* (from `use module`). */
 	HashTable *module_imports;
+	/* Module-member aliases (`use Prefix:>Member as Alias;`): lc-alias ->
+	 * exporting zend_lang_module*. The alias resolves to the plain FQCN via
+	 * FC(imports) like any class import; this table lets acquisition sites
+	 * re-attach the module provenance a bare `Prefix:>Member` would carry. */
+	HashTable *module_gated_imports;
 
 	HashTable seen_symbols;
 } zend_file_context;
