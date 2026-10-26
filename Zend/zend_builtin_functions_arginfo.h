@@ -1,5 +1,5 @@
 /* This is a generated file, edit zend_builtin_functions.stub.php instead.
- * Stub hash: 5d7145b7bc305bb50b45e75c02740206148223b1 */
+ * Stub hash: 43885715031979a24c363a03fe6d0afe816a6e4b */
 
 #include "zend_attributes.h"
 
@@ -99,6 +99,10 @@ ZEND_END_ARG_INFO()
 ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_method_exists, 0, 2, _IS_BOOL, 0)
 	ZEND_ARG_INFO(0, object_or_class)
 	ZEND_ARG_TYPE_INFO(0, method, IS_STRING, 0)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_module_loader_register, 0, 1, IS_VOID, 0)
+	ZEND_ARG_TYPE_INFO(0, callback, IS_CALLABLE, 0)
 ZEND_END_ARG_INFO()
 
 ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_property_exists, 0, 2, _IS_BOOL, 0)
@@ -274,6 +278,7 @@ ZEND_FUNCTION(get_object_vars);
 ZEND_FUNCTION(get_mangled_object_vars);
 ZEND_FUNCTION(get_class_methods);
 ZEND_FUNCTION(method_exists);
+ZEND_FUNCTION(module_loader_register);
 ZEND_FUNCTION(property_exists);
 ZEND_FUNCTION(class_exists);
 ZEND_FUNCTION(interface_exists);
@@ -351,6 +356,7 @@ static const zend_function_entry ext_functions[] = {
 	ZEND_FE(get_mangled_object_vars, arginfo_get_mangled_object_vars)
 	ZEND_FE(get_class_methods, arginfo_get_class_methods)
 	ZEND_FE(method_exists, arginfo_method_exists)
+	ZEND_FE(module_loader_register, arginfo_module_loader_register)
 	ZEND_RAW_FENTRY("property_exists", zif_property_exists, arginfo_property_exists, 0, frameless_function_infos_property_exists, NULL)
 	ZEND_RAW_FENTRY("class_exists", zif_class_exists, arginfo_class_exists, 0, frameless_function_infos_class_exists, NULL)
 	ZEND_FE(interface_exists, arginfo_interface_exists)

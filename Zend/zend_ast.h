@@ -112,6 +112,7 @@ enum _zend_ast_kind {
 	ZEND_AST_BREAK,
 	ZEND_AST_CONTINUE,
 	ZEND_AST_PROPERTY_HOOK_SHORT_BODY,
+	ZEND_AST_MODULE_DECL,
 
 	/* 2 child nodes */
 	ZEND_AST_DIM = 2 << ZEND_AST_NUM_CHILDREN_SHIFT,
@@ -153,6 +154,9 @@ enum _zend_ast_kind {
 	ZEND_AST_MATCH,
 	ZEND_AST_MATCH_ARM,
 	ZEND_AST_NAMED_ARG,
+	ZEND_AST_MODULE_DEF,
+	ZEND_AST_MODULE_EXPORT,
+	ZEND_AST_USE_MODULE,
 	ZEND_AST_PIPE,
 
 	/* Surfaces (RFC prototype): a `surface Name (implements Iface)?;` class
@@ -191,7 +195,10 @@ enum _zend_ast_kind {
 };
 
 typedef uint16_t zend_ast_kind;
-typedef uint16_t zend_ast_attr;
+/* Widened from uint16_t for the module pattern: member-modifier flags ride
+ * ast->attr for constants/properties/promoted params, and
+ * ZEND_ACC_MODULE_INTERNAL is bit 30. */
+typedef uint32_t zend_ast_attr;
 
 struct _zend_ast {
 	zend_ast_kind kind; /* Type of the node (ZEND_AST_* enum constant) */
