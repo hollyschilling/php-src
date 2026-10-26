@@ -223,6 +223,15 @@ struct _zend_class_entry {
 	zend_trait_precedence **trait_precedences;
 	HashTable *attributes;
 
+	/* Surfaces (RFC prototype). surface_decls: the surfaces this class
+	 * itself declares (name -> zval string of the bound interface's resolved
+	 * name, or null zval). surface_members: this class's members that carry
+	 * a surface[...] modifier ("m:"/"p:"/"c:" + member name -> zval packed
+	 * array of surface-name strings). Both are compile-time artifacts,
+	 * NULL if unused; validated at link time and persisted by opcache. */
+	HashTable *surface_decls;
+	HashTable *surface_members;
+
 	uint32_t enum_backing_type;
 	HashTable *backed_enum_table;
 

@@ -545,6 +545,7 @@ static void zend_file_cache_serialize_op_array(zend_op_array            *op_arra
 			SERIALIZE_STR(op_array->doc_comment);
 			SERIALIZE_ATTRIBUTES(op_array->attributes);
 			SERIALIZE_EXTENSION_IMPORTS(op_array->extension_imports);
+			SERIALIZE_EXTENSION_IMPORTS(op_array->surface_grants);
 			SERIALIZE_PTR(op_array->try_catch_array);
 			SERIALIZE_PTR(op_array->prototype);
 			SERIALIZE_PTR(op_array->prop_info);
@@ -731,6 +732,7 @@ static void zend_file_cache_serialize_op_array(zend_op_array            *op_arra
 		SERIALIZE_STR(op_array->doc_comment);
 		SERIALIZE_ATTRIBUTES(op_array->attributes);
 		SERIALIZE_EXTENSION_IMPORTS(op_array->extension_imports);
+		SERIALIZE_EXTENSION_IMPORTS(op_array->surface_grants);
 		SERIALIZE_PTR(op_array->try_catch_array);
 		SERIALIZE_PTR(op_array->prototype);
 		SERIALIZE_PTR(op_array->prop_info);
@@ -865,6 +867,8 @@ static void zend_file_cache_serialize_class(zval                     *zv,
 	SERIALIZE_STR(ce->info.user.filename);
 	SERIALIZE_STR(ce->doc_comment);
 	SERIALIZE_ATTRIBUTES(ce->attributes);
+	SERIALIZE_EXTENSION_IMPORTS(ce->surface_decls);
+	SERIALIZE_EXTENSION_IMPORTS(ce->surface_members);
 	zend_file_cache_serialize_hash(&ce->properties_info, script, info, buf, zend_file_cache_serialize_prop_info);
 
 	if (ce->properties_info_table) {
@@ -1491,6 +1495,7 @@ static void zend_file_cache_unserialize_op_array(zend_op_array           *op_arr
 		UNSERIALIZE_STR(op_array->doc_comment);
 		UNSERIALIZE_ATTRIBUTES(op_array->attributes);
 		UNSERIALIZE_EXTENSION_IMPORTS(op_array->extension_imports);
+		UNSERIALIZE_EXTENSION_IMPORTS(op_array->surface_grants);
 		UNSERIALIZE_PTR(op_array->try_catch_array);
 		UNSERIALIZE_PTR(op_array->prototype);
 		UNSERIALIZE_PTR(op_array->prop_info);
@@ -1642,6 +1647,7 @@ static void zend_file_cache_unserialize_op_array(zend_op_array           *op_arr
 		UNSERIALIZE_STR(op_array->doc_comment);
 		UNSERIALIZE_ATTRIBUTES(op_array->attributes);
 		UNSERIALIZE_EXTENSION_IMPORTS(op_array->extension_imports);
+		UNSERIALIZE_EXTENSION_IMPORTS(op_array->surface_grants);
 		UNSERIALIZE_PTR(op_array->try_catch_array);
 		UNSERIALIZE_PTR(op_array->prototype);
 		UNSERIALIZE_PTR(op_array->prop_info);
@@ -1769,6 +1775,8 @@ static void zend_file_cache_unserialize_class(zval                    *zv,
 	UNSERIALIZE_STR(ce->info.user.filename);
 	UNSERIALIZE_STR(ce->doc_comment);
 	UNSERIALIZE_ATTRIBUTES(ce->attributes);
+	UNSERIALIZE_EXTENSION_IMPORTS(ce->surface_decls);
+	UNSERIALIZE_EXTENSION_IMPORTS(ce->surface_members);
 	zend_file_cache_unserialize_hash(&ce->properties_info,
 			script, buf, zend_file_cache_unserialize_prop_info, NULL);
 
