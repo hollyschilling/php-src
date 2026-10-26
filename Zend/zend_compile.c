@@ -1358,6 +1358,31 @@ static zend_lang_module *zend_gated_import_module(zend_ast *ast)
 	return zend_hash_find_ptr_lc(FC(module_gated_imports), name);
 }
 
+/* Re-attach acquisition provenance to a resolved (mangled) generic
+ * instantiation name whose BASE was named through a module import
+ * (Mod:>Vec<int>) or a gated member alias (`use Mod:>Vec as V;` ... V<int>).
+ * The wrapped FQCN stays the plain mangled name, which stamps and looks up
+ * normally once the marker is stripped in zend_fetch_class_via_module; the
+ * stamped instantiation therefore keeps ONE identity across every spelling. */
+static zend_string *zend_mark_generic_ref_provenance(zend_ast *base_ast, zend_string *resolved)
+{
+	if (base_ast->kind != ZEND_AST_ZVAL) {
+		return resolved;
+	}
+	if (UNEXPECTED(base_ast->attr == ZEND_NAME_MODULE)) {
+		zend_lang_module *m;
+		zend_string *base_fqcn =
+			zend_resolve_module_qualified_name(zend_ast_get_str(base_ast), &m);
+		zend_string_release(base_fqcn);
+		return zend_mark_module_provenance(m, resolved);
+	}
+	zend_lang_module *gm = zend_gated_import_module(base_ast);
+	if (UNEXPECTED(gm != NULL)) {
+		return zend_mark_module_provenance(gm, resolved);
+	}
+	return resolved;
+}
+
 static zend_string *zend_resolve_class_name(zend_string *name, uint32_t type) /* {{{ */
 {
 	const char *compound;
@@ -3222,16 +3247,27 @@ static void zend_append_generic_arg(
 	smart_str *buf, zend_ast *ast, bool allow_params, bool allow_nested_params,
 	bool allow_spread, bool *uses_params, bool *uses_method_params);
 
-/* Build the method-symbol marker "\0" "\x01" SYM: a class reference whose
- * arguments mention METHOD-level type parameters, resolved at run time
- * against the executing method instantiation's binding. Consumes sym. */
-static zend_string *zend_mark_method_symbol(zend_string *sym)
+/* Build the method-symbol marker "\0" "\x01" FQMN "\0" SYM: a class reference
+ * whose arguments mention type parameters, resolved at run time against the
+ * executing binding. FQMN is empty for references without module provenance;
+ * a non-empty FQMN records that the base was named through a module import or
+ * a gated member alias, exactly as "\0" FQMN "\0" FQCN does for concrete
+ * references, so the acquisition gate applies uniformly after substitution.
+ * Consumes sym. */
+static zend_string *zend_mark_method_symbol(zend_string *sym, const zend_lang_module *m)
 {
-	zend_string *marked = zend_string_alloc(2 + ZSTR_LEN(sym), 0);
-	ZSTR_VAL(marked)[0] = '\0';
-	ZSTR_VAL(marked)[1] = '\x01';
-	memcpy(ZSTR_VAL(marked) + 2, ZSTR_VAL(sym), ZSTR_LEN(sym));
-	ZSTR_VAL(marked)[ZSTR_LEN(marked)] = '\0';
+	size_t fqmn_len = m ? ZSTR_LEN(m->fqmn) : 0;
+	zend_string *marked = zend_string_alloc(3 + fqmn_len + ZSTR_LEN(sym), 0);
+	char *p = ZSTR_VAL(marked);
+	*p++ = '\0';
+	*p++ = '\x01';
+	if (fqmn_len) {
+		memcpy(p, ZSTR_VAL(m->fqmn), fqmn_len);
+		p += fqmn_len;
+	}
+	*p++ = '\0';
+	memcpy(p, ZSTR_VAL(sym), ZSTR_LEN(sym));
+	p[ZSTR_LEN(sym)] = '\0';
 	zend_string_release(sym);
 	return marked;
 }
@@ -3251,9 +3287,30 @@ static void zend_compile_class_ref(znode *result, zend_ast *name_ast, uint32_t f
 		if (UNEXPECTED(uses_params || uses_method_params)) {
 			/* "new C<T>()" in a template body / "new Sequence<U>()" in a
 			 * generic method: symbolic until the executing binding is known;
-			 * the marker routes the fetch through runtime substitution. */
-			ZVAL_STR(&result->u.constant, zend_mark_method_symbol(resolved));
+			 * the marker routes the fetch through runtime substitution. A
+			 * module-qualified or gated-alias base records its module in the
+			 * marker so the substituted fetch passes the acquisition gate. */
+			zend_lang_module *m = NULL;
+			zend_ast *base_ast = name_ast->child[0];
+			if (base_ast->kind == ZEND_AST_ZVAL) {
+				if (UNEXPECTED(base_ast->attr == ZEND_NAME_MODULE)) {
+					zend_string *base_fqcn = zend_resolve_module_qualified_name(
+						zend_ast_get_str(base_ast), &m);
+					zend_string_release(base_fqcn);
+				} else {
+					m = zend_gated_import_module(base_ast);
+				}
+			}
+			ZVAL_STR(&result->u.constant, zend_mark_method_symbol(resolved, m));
 			return;
+		}
+		if (!(fetch_flags & (ZEND_FETCH_CLASS_NO_AUTOLOAD|ZEND_FETCH_CLASS_SILENT))) {
+			/* An instantiation named through a module import (Mod:>Vec<int>)
+			 * or a gated member alias (V<int>) carries the same "\0" FQMN "\0"
+			 * FQCN provenance marker as the equivalent non-generic reference,
+			 * so the runtime acquisition gate recognises it. Observation sites
+			 * (instanceof) pass SILENT/NO_AUTOLOAD and keep the plain name. */
+			resolved = zend_mark_generic_ref_provenance(name_ast->child[0], resolved);
 		}
 		ZVAL_STR(&result->u.constant, resolved);
 		return;
@@ -3444,6 +3501,20 @@ static bool is_this_fetch(const zend_ast *ast) /* {{{ */
 					"Cannot use $this in an extension method (use the declared receiver $%s)",
 					ZSTR_VAL(CG(extension_receiver)));
 			}
+			return true;
+		}
+		/* In a mutating extension body the receiver variable is the frame's
+		 * This: compile its property and method accesses through the $this
+		 * forms so receiver writes land in place (bypassing value-class CoW
+		 * separation) and nested mutating calls follow the $this chain rule,
+		 * exactly as in native mutating struct methods. Plain value uses of
+		 * the variable, and uses inside nested closures, stay ordinary CV
+		 * accesses of the same object. */
+		if (UNEXPECTED(CG(extension_receiver) != NULL)
+		 && Z_TYPE_P(name) == IS_STRING
+		 && CG(active_op_array)
+		 && (CG(active_op_array)->fn_flags2 & ZEND_ACC2_MUTATING)
+		 && zend_string_equals(Z_STR_P(name), CG(extension_receiver))) {
 			return true;
 		}
 	}
@@ -9947,7 +10018,11 @@ static zend_string *zend_begin_method_decl(zend_op_array *op_array, zend_string 
 		 * cannot be checked here: whether the consumer is a struct is only
 		 * known at flattening (zend_add_trait_method). */
 		if (!(ce->ce_flags2 & ZEND_ACC2_VALUE_CLASS)
-		 && !(ce->ce_flags & (ZEND_ACC_TRAIT|ZEND_ACC_INTERFACE))) {
+		 && !(ce->ce_flags & (ZEND_ACC_TRAIT|ZEND_ACC_INTERFACE))
+		 && CG(extension_receiver) == NULL) {
+			/* Extension bodies compile against a synthetic CE; whether the
+			 * target is a struct is only known when the extension binds
+			 * (ZEND_BIND_EXTENSION validates it there). */
 			zend_error_noreturn(E_COMPILE_ERROR,
 				"Cannot declare mutating method %s::%s() outside a struct",
 				ZSTR_VAL(ce->name), ZSTR_VAL(name));
@@ -11220,6 +11295,9 @@ static void zend_compile_implements(zend_ast *ast) /* {{{ */
 				deferred[num_deferred++] = name;
 				continue;
 			}
+			/* Concrete-argument generic interface: link-time acquisition,
+			 * provenance as in the non-generic path below. */
+			name = zend_mark_generic_ref_provenance(class_ast->child[0], name);
 		} else {
 			name = zend_resolve_const_class_name_reference(class_ast, "interface name");
 		}
@@ -11401,6 +11479,13 @@ static void zend_compile_extension_decl(zend_ast *ast) /* {{{ */
 	if (is_scalar_target) {
 		zend_function *ext_fn;
 		ZEND_HASH_MAP_FOREACH_PTR(&ext_ce->function_table, ext_fn) {
+			if (UNEXPECTED(ext_fn->common.fn_flags2 & ZEND_ACC2_MUTATING)) {
+				/* Scalars bind by value through the This handoff; there is
+				 * no caller slot to write back to. Deliberately unsupported. */
+				zend_error_noreturn(E_COMPILE_ERROR,
+					"Extension method %s() for scalar target %s cannot be mutating",
+					ZSTR_VAL(ext_fn->common.function_name), ZSTR_VAL(target_name));
+			}
 			ext_fn->common.fn_flags |= ZEND_ACC_NEVER_CACHE;
 			ext_fn->common.fn_flags2 |= ZEND_ACC2_SCALAR_RECEIVER;
 		} ZEND_HASH_FOREACH_END();
@@ -11719,7 +11804,11 @@ static zend_class_entry *zend_compile_class_decl(znode *result, const zend_ast *
 				ZEND_ASSERT(ce->generic_params != NULL);
 				ce->generic_params->deferred_parent = name;
 			} else {
-				ce->parent_name = name;
+				/* Concrete-argument generic parent: link-time acquisition,
+				 * so a module-qualified or gated-alias base carries the same
+				 * provenance as the non-generic path below. */
+				ce->parent_name =
+					zend_mark_generic_ref_provenance(extends_ast->child[0], name);
 			}
 		} else {
 			ce->parent_name = zend_resolve_const_class_name_reference(extends_ast, "class name");
@@ -12497,17 +12586,17 @@ static void zend_compile_module_def(const zend_ast *ast) /* {{{ */
 
 	zend_string *fqmn = zend_new_interned_string(zend_prefix_with_ns(local));
 	zend_array *exports = zend_new_array(list->children);
+	zend_array *extensions = zend_new_array(0);
 
 	for (i = 0; i < list->children; i++) {
 		const zend_ast *export_ast = list->child[i];
 		zend_ast *name_ast = export_ast->child[0];
-		zend_ast *alias_ast = export_ast->child[1];
 		zend_string *fqcn;
-		zend_string *alias;
 		zval zv;
 
 		/* Export entries use use-statement semantics: written names are
-		 * absolute, independent of the current namespace. */
+		 * absolute, independent of the current namespace. Original case is
+		 * preserved — extension autoloading (PSR-4) is case-sensitive. */
 		if (name_ast->attr == ZEND_NAME_FQ) {
 			fqcn = zend_resolve_class_name(zend_ast_get_str(name_ast), ZEND_NAME_FQ);
 		} else if (name_ast->attr == ZEND_NAME_NOT_FQ) {
@@ -12518,6 +12607,17 @@ static void zend_compile_module_def(const zend_ast *ast) /* {{{ */
 		}
 		fqcn = zend_new_interned_string(fqcn);
 
+		if (export_ast->kind == ZEND_AST_MODULE_EXPORT_EXTENSION) {
+			/* Exported named extension: carried as a bare FQN. `use module`
+			 * injects it into the importer's extension import set, so there is
+			 * no alias (extensions are activated, never short-named). */
+			ZVAL_STR(&zv, fqcn);
+			zend_hash_next_index_insert(extensions, &zv);
+			continue;
+		}
+
+		zend_ast *alias_ast = export_ast->child[1];
+		zend_string *alias;
 		if (alias_ast) {
 			alias = zend_string_copy(zend_ast_get_str(alias_ast));
 		} else {
@@ -12534,16 +12634,25 @@ static void zend_compile_module_def(const zend_ast *ast) /* {{{ */
 		zend_string_release_ex(alias, 0);
 	}
 
-	zval fqmn_zv, exports_zv;
-	ZVAL_STR(&fqmn_zv, fqmn);
+	/* op2 packs both surfaces the definition installs: [0] the export map,
+	 * [1] the exported-extension list. See zend_lang_module_register. */
+	zend_array *payload = zend_new_array(2);
+	zval exports_zv, extensions_zv, payload_zv;
 	ZVAL_ARR(&exports_zv, exports);
+	ZVAL_ARR(&extensions_zv, extensions);
+	zend_hash_index_add_new(payload, 0, &exports_zv);
+	zend_hash_index_add_new(payload, 1, &extensions_zv);
+	ZVAL_ARR(&payload_zv, payload);
+
+	zval fqmn_zv;
+	ZVAL_STR(&fqmn_zv, fqmn);
 
 	zend_op *opline = get_next_op();
 	opline->opcode = ZEND_REGISTER_MODULE;
 	opline->op1_type = IS_CONST;
 	opline->op1.constant = zend_add_literal(&fqmn_zv);
 	opline->op2_type = IS_CONST;
-	opline->op2.constant = zend_add_literal(&exports_zv);
+	opline->op2.constant = zend_add_literal(&payload_zv);
 	opline->result_type = IS_UNUSED;
 }
 /* }}} */
@@ -12578,6 +12687,20 @@ static void zend_compile_use_module(const zend_ast *ast) /* {{{ */
 		zend_error_noreturn(E_COMPILE_ERROR,
 			"Module %s is not defined; load its definition file before this file "
 			"or register a loader with module_loader_register()", ZSTR_VAL(fqmn));
+	}
+
+	/* Activate the module's exported extensions: feed each into this file's
+	 * extension import set, exactly as a direct `use extension` would. From
+	 * here dispatch, autoload-on-miss, and conflict resolution are identical
+	 * to a hand-written import (the import set is their only key). */
+	if (m->extensions) {
+		zval *ext_name_zv;
+		ZEND_HASH_FOREACH_VAL(m->extensions, ext_name_zv) {
+			zend_string *ext_name = Z_STR_P(ext_name_zv);
+			zend_string *ext_name_lc = zend_string_tolower(ext_name);
+			zend_extension_imports_add(ext_name, ext_name_lc);
+			zend_string_release(ext_name_lc);
+		} ZEND_HASH_FOREACH_END();
 	}
 
 	if (alias_ast) {

@@ -499,6 +499,25 @@ module_export:
 			  }
 			  zend_ast_destroy($1);
 			  $$ = zend_ast_create(ZEND_AST_MODULE_EXPORT, $2, $4); }
+	|	T_STRING T_EXTENSION name ';'
+			{ if (!zend_string_equals_literal(zend_ast_get_str($1), "export")) {
+			      /* YYERROR from an action skips this rule's RHS destructors. */
+			      zend_ast_destroy($1);
+			      zend_ast_destroy($3);
+			      zend_throw_exception(zend_ce_compile_error,
+			          "Unexpected statement in module definition block, expecting 'export'", 0);
+			      YYERROR;
+			  }
+			  zend_ast_destroy($1);
+			  $$ = zend_ast_create(ZEND_AST_MODULE_EXPORT_EXTENSION, $3); }
+	|	T_STRING T_EXTENSION name T_AS T_STRING ';'
+			{ $$ = NULL;
+			  zend_ast_destroy($1);
+			  zend_ast_destroy($3);
+			  zend_ast_destroy($5);
+			  zend_throw_exception(zend_ce_compile_error,
+			      "Exported extensions cannot be aliased; an extension is activated, not named", 0);
+			  YYERROR; }
 ;
 
 group_use_declaration:
@@ -925,12 +944,12 @@ trait_declaration_statement:
  * ce_flags2. */
 struct_declaration_statement:
 		class_modifiers T_STRUCT { $<num>$ = CG(zend_lineno); if (!zend_validate_struct_modifiers($1)) { YYERROR; } }
-		T_STRING implements_list backup_doc_comment '{' class_statement_list '}'
-			{ $$ = zend_ast_create_decl(ZEND_AST_CLASS, $1|ZEND_ACC_FINAL|ZEND_ACC_NO_DYNAMIC_PROPERTIES, $<num>3, $6, zend_ast_get_str($4), NULL, $5, $8, NULL, NULL);
+		T_STRING generic_params implements_list backup_doc_comment '{' class_statement_list '}'
+			{ $$ = zend_ast_create_decl(ZEND_AST_CLASS, $1|ZEND_ACC_FINAL|ZEND_ACC_NO_DYNAMIC_PROPERTIES, $<num>3, $7, zend_ast_get_str($4), NULL, $6, $9, NULL, $5);
 			  $$->attr = ZEND_CLASS_IS_VALUE_CLASS; }
 	|	T_STRUCT { $<num>$ = CG(zend_lineno); }
-		T_STRING implements_list backup_doc_comment '{' class_statement_list '}'
-			{ $$ = zend_ast_create_decl(ZEND_AST_CLASS, ZEND_ACC_FINAL|ZEND_ACC_NO_DYNAMIC_PROPERTIES, $<num>2, $5, zend_ast_get_str($3), NULL, $4, $7, NULL, NULL);
+		T_STRING generic_params implements_list backup_doc_comment '{' class_statement_list '}'
+			{ $$ = zend_ast_create_decl(ZEND_AST_CLASS, ZEND_ACC_FINAL|ZEND_ACC_NO_DYNAMIC_PROPERTIES, $<num>2, $6, zend_ast_get_str($3), NULL, $5, $8, NULL, $4);
 			  $$->attr = ZEND_CLASS_IS_VALUE_CLASS; }
 ;
 

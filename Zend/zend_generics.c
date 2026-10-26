@@ -23,6 +23,7 @@
 #include "zend_interfaces.h"
 #include "zend_operators.h"
 #include "zend_smart_str.h"
+#include "zend_extension_methods.h"
 #include "zend_exceptions.h"
 
 #ifndef EMPTY_SWITCH_DEFAULT_CASE
@@ -3407,6 +3408,13 @@ ZEND_API zend_function *zend_generics_get_method_instantiation(
 	zend_function *base = zend_hash_str_find_ptr(&ce->function_table,
 		ZSTR_VAL(lc_name), base_slice.len);
 	if (!base) {
+		/* Second source: an extension method active for this receiver type.
+		 * The registry resolves per-calling-file activation itself. */
+		zend_string *lc_base = zend_string_init(ZSTR_VAL(lc_name), base_slice.len, 0);
+		base = zend_extension_methods_get(ce, lc_base);
+		zend_string_release(lc_base);
+	}
+	if (!base) {
 		zend_throw_error(NULL, "Call to undefined method %s::%.*s()",
 			ZSTR_VAL(ce->name), (int) base_slice.len, ZSTR_VAL(method_name));
 		return NULL;
@@ -3417,9 +3425,9 @@ ZEND_API zend_function *zend_generics_get_method_instantiation(
 		return NULL;
 	}
 
-	/* Cache under the RESOLVED base method (not the receiver class), so a
-	 * second dispatch source for the base, if one is ever added, keys its
-	 * own instantiations. */
+	/* Cache under the RESOLVED base (extension dispatch is activation-
+	 * sensitive per calling file: the same receiver and spelling may bind
+	 * different extension methods from different files). */
 	zend_string *cache_key = zend_strpprintf(0, "%p:%s", (void *) base, ZSTR_VAL(lc_name));
 	zval *zv = zend_hash_find(EG(generics_method_cache), cache_key);
 	if (zv) {

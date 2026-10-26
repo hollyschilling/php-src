@@ -2047,17 +2047,34 @@ zend_class_entry *zend_fetch_class_with_scope(
 	return ce;
 }
 
+static zend_always_inline void zend_lang_module_keep_array(zend_array *arr)
+{
+	if (arr && !(GC_FLAGS(arr) & IS_ARRAY_IMMUTABLE)) {
+		GC_ADDREF(arr);
+	}
+}
+
+static zend_always_inline void zend_lang_module_drop_array(zend_array *arr)
+{
+	if (arr && !(GC_FLAGS(arr) & IS_ARRAY_IMMUTABLE)) {
+		zend_array_release(arr);
+	}
+}
+
 static void zend_lang_module_dtor(zval *zv)
 {
 	zend_lang_module *m = Z_PTR_P(zv);
 	zend_string_release_ex(m->fqmn, 0);
-	if (m->exports && !(GC_FLAGS(m->exports) & IS_ARRAY_IMMUTABLE)) {
-		zend_array_release(m->exports);
-	}
+	zend_lang_module_drop_array(m->exports);
+	zend_lang_module_drop_array(m->extensions);
 	efree(m);
 }
 
-ZEND_API zend_result zend_lang_module_register(zend_string *fqmn, zend_array *exports)
+/* The register opcode carries a single const array `payload` packing the two
+ * surfaces a definition installs: payload[0] is the export map (alias -> FQCN),
+ * payload[1] the list of exported named-extension FQNs. Keeping both in one
+ * operand leaves the ZEND_REGISTER_MODULE opcode a plain (CONST, CONST). */
+ZEND_API zend_result zend_lang_module_register(zend_string *fqmn, zend_array *payload)
 {
 	zend_lang_module *m;
 
@@ -2069,12 +2086,15 @@ ZEND_API zend_result zend_lang_module_register(zend_string *fqmn, zend_array *ex
 		return FAILURE;
 	}
 
+	zval *exports_zv = zend_hash_index_find(payload, 0);
+	zval *extensions_zv = zend_hash_index_find(payload, 1);
+
 	m = emalloc(sizeof(zend_lang_module));
 	m->fqmn = zend_string_copy(fqmn);
-	m->exports = exports;
-	if (exports && !(GC_FLAGS(exports) & IS_ARRAY_IMMUTABLE)) {
-		GC_ADDREF(exports);
-	}
+	m->exports = exports_zv ? Z_ARR_P(exports_zv) : NULL;
+	m->extensions = extensions_zv ? Z_ARR_P(extensions_zv) : NULL;
+	zend_lang_module_keep_array(m->exports);
+	zend_lang_module_keep_array(m->extensions);
 	zend_hash_add_new_ptr(EG(lang_modules), m->fqmn, m);
 	return SUCCESS;
 }
@@ -2134,20 +2154,39 @@ zend_class_entry *zend_fetch_class_by_name(zend_string *class_name, zend_string 
 {
 	if (UNEXPECTED(ZSTR_LEN(class_name) > 1 && ZSTR_VAL(class_name)[0] == '\0'
 			&& ZSTR_VAL(class_name)[1] == '\x01')) {
-		/* Symbolic generic marker ("\0\x01" SYM): a class reference whose
-		 * arguments mention type parameters (method-level or the template's
-		 * own); substitute against the executing bindings, then resolve. */
+		/* Symbolic generic marker ("\0\x01" FQMN "\0" SYM): a class reference
+		 * whose arguments mention type parameters (method-level or the
+		 * template's own); substitute against the executing bindings, then
+		 * re-enter the ordinary fetch. A non-empty FQMN re-wraps the
+		 * substituted name as "\0" FQMN "\0" FQCN so the module import the
+		 * marking file made is honoured; an empty FQMN fetches the plain
+		 * name. Either way the acquisition gate applies to symbolic
+		 * references exactly as to concrete ones. */
+		const char *fqmn = ZSTR_VAL(class_name) + 2;
+		const char *sep = memchr(fqmn, '\0', ZSTR_LEN(class_name) - 2);
+		ZEND_ASSERT(sep != NULL && "malformed method-symbol marker");
+		size_t fqmn_len = sep - fqmn;
+		const char *sym = sep + 1;
 		zend_string *resolved = zend_generics_resolve_type_symbol(
-			ZSTR_VAL(class_name) + 2, ZSTR_LEN(class_name) - 2);
+			sym, ZSTR_VAL(class_name) + ZSTR_LEN(class_name) - sym);
 		if (!resolved) {
 			return NULL;
 		}
-		zend_class_entry *marked_ce = zend_lookup_class_ex(resolved, NULL, fetch_type);
-		if (!marked_ce) {
-			report_class_fetch_error(resolved, fetch_type);
+		zend_string *target = resolved;
+		if (fqmn_len) {
+			target = zend_string_alloc(2 + fqmn_len + ZSTR_LEN(resolved), 0);
+			char *p = ZSTR_VAL(target);
+			*p++ = '\0';
+			memcpy(p, fqmn, fqmn_len);
+			p += fqmn_len;
+			*p++ = '\0';
+			memcpy(p, ZSTR_VAL(resolved), ZSTR_LEN(resolved));
+			p[ZSTR_LEN(resolved)] = '\0';
+			zend_string_release(resolved);
 		}
-		zend_string_release(resolved);
-		return marked_ce;
+		zend_class_entry *ce = zend_fetch_class_by_name(target, NULL, fetch_type);
+		zend_string_release(target);
+		return ce;
 	}
 
 	if (UNEXPECTED(ZSTR_LEN(class_name) > 0 && ZSTR_VAL(class_name)[0] == '\0')) {
