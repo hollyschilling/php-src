@@ -257,6 +257,7 @@ static size_t tsrm_tls_offset = -1;
 	_(hybrid_loop_trace_counter,      IR_SKIP_PROLOGUE | IR_START_BR_TARGET) \
 	_(hybrid_generic_func_trace_dispatch, IR_SKIP_PROLOGUE | IR_START_BR_TARGET) \
 	_(hybrid_generic_loop_trace_dispatch, IR_SKIP_PROLOGUE | IR_START_BR_TARGET) \
+	_(hybrid_generic_func_dispatch, IR_SKIP_PROLOGUE | IR_START_BR_TARGET) \
 	_(trace_halt,                     IR_SKIP_PROLOGUE) \
 	_(trace_escape,                   IR_SKIP_PROLOGUE) \
 	_(trace_exit,                     IR_SKIP_PROLOGUE) \
@@ -2523,6 +2524,32 @@ static int zend_jit_hybrid_generic_loop_trace_dispatch_stub(zend_jit_ctx *jit)
 		((ZEND_JIT_COUNTER_INIT + JIT_G(hot_loop) - 1) / JIT_G(hot_loop)));
 }
 
+static int zend_jit_hybrid_generic_func_dispatch_stub(zend_jit_ctx *jit)
+{
+	if (ZEND_VM_KIND != ZEND_VM_KIND_HYBRID) {
+		return 0;
+	}
+	ir_ref func = ir_LOAD_A(jit_EX(func));
+	ir_ref ext = ir_LOAD_A(ir_ADD_OFFSET(func, offsetof(zend_op_array, reserved[zend_func_info_rid])));
+	ir_ref attempted = ir_IF(ir_LOAD_U8(ir_ADD_OFFSET(ext,
+		offsetof(zend_jit_op_array_generic_extension, attempted))));
+	ir_IF_FALSE_cold(attempted);
+	ir_CALL_1(IR_VOID, ir_CONST_FC_FUNC(zend_jit_compile_generic_func), jit_FP(jit));
+	ir_ref merge = ir_END();
+	ir_IF_TRUE(attempted);
+	ir_MERGE_WITH(merge);
+	func = ir_LOAD_A(jit_EX(func));
+	ext = ir_LOAD_A(ir_ADD_OFFSET(func, offsetof(zend_op_array, reserved[zend_func_info_rid])));
+	ir_ref opcodes = ir_LOAD_A(ir_ADD_OFFSET(func, offsetof(zend_op_array, opcodes)));
+	/* Convert the bytecode byte offset to a handler-table byte offset.
+	 * zend_op/pointer sizes differ on x86-32 and inference-debug builds. */
+	ir_ref slot_offset = ir_DIV_A(ir_SUB_A(jit_IP(jit), opcodes),
+		ir_CONST_ADDR(sizeof(zend_op) / sizeof(zend_vm_opcode_handler_t)));
+	ir_ref handlers = ir_ADD_OFFSET(ext, offsetof(zend_jit_op_array_generic_extension, handlers));
+	ir_IJMP(ir_LOAD_A(ir_ADD_A(handlers, slot_offset)));
+	return 1;
+}
+
 static int zend_jit_trace_halt_stub(zend_jit_ctx *jit)
 {
 	if (ZEND_VM_KIND == ZEND_VM_KIND_HYBRID) {
@@ -4190,18 +4217,35 @@ static ir_ref zend_jit_continue_entry(zend_jit_ctx *jit, ir_ref src, unsigned in
 	return ir_END();
 }
 
+static zend_vm_opcode_handler_t zend_jit_function_orig_handler(zend_jit_ctx *jit, const zend_op *opline)
+{
+	if (jit->op_array && zend_jit_op_array_has_generic_types(jit->op_array)) {
+		zend_jit_op_array_generic_extension *ext =
+			(zend_jit_op_array_generic_extension *) ZEND_FUNC_INFO(jit->op_array);
+		return ext->orig_handlers[opline - jit->op_array->opcodes];
+	}
+	return opline->handler;
+}
+
+static zend_vm_opcode_handler_func_t zend_jit_function_orig_handler_func(zend_jit_ctx *jit, const zend_op *opline)
+{
+	zend_op original = *opline;
+	original.handler = zend_jit_function_orig_handler(jit, opline);
+	return (zend_vm_opcode_handler_func_t) zend_get_opcode_handler_func(&original);
+}
+
 static int zend_jit_handler(zend_jit_ctx *jit, const zend_op *opline, int may_throw)
 {
 	zend_jit_set_ip(jit, opline);
 	if (GCC_GLOBAL_REGS) {
-		zend_vm_opcode_handler_func_t handler = (zend_vm_opcode_handler_func_t)zend_get_opcode_handler_func(opline);
+		zend_vm_opcode_handler_func_t handler = zend_jit_function_orig_handler_func(jit, opline);
 		ir_CALL(IR_VOID, ir_CONST_FUNC(handler));
 	} else if (ZEND_VM_KIND == ZEND_VM_KIND_TAILCALL) {
-		zend_vm_opcode_handler_func_t handler = (zend_vm_opcode_handler_func_t)zend_get_opcode_handler_func(opline);
+		zend_vm_opcode_handler_func_t handler = zend_jit_function_orig_handler_func(jit, opline);
 		ir_ref ip = ir_CALL_2(IR_ADDR, ir_CONST_FC_FUNC(handler), jit_FP(jit), jit_IP(jit));
 		jit_STORE_IP(jit, ip);
 	} else {
-		zend_vm_opcode_handler_t handler = opline->handler;
+		zend_vm_opcode_handler_t handler = zend_jit_function_orig_handler(jit, opline);
 		ir_ref ip = ir_CALL_2(IR_ADDR, ir_CONST_FC_FUNC(handler), jit_FP(jit), jit_IP(jit));
 		jit_STORE_IP(jit, ip);
 	}
@@ -4242,16 +4286,16 @@ static int zend_jit_tail_handler(zend_jit_ctx *jit, const zend_op *opline)
 		    opline->opcode == ZEND_RETURN) {
 
 			/* Use inlined HYBRID VM handler */
-			zend_vm_opcode_handler_t handler = opline->handler;
+			zend_vm_opcode_handler_t handler = zend_jit_function_orig_handler(jit, opline);
 			ir_TAILCALL(IR_VOID, ir_CONST_FUNC(handler));
 		} else {
-			zend_vm_opcode_handler_func_t handler = (zend_vm_opcode_handler_func_t)zend_get_opcode_handler_func(opline);
+			zend_vm_opcode_handler_func_t handler = zend_jit_function_orig_handler_func(jit, opline);
 			ir_CALL(IR_VOID, ir_CONST_FUNC(handler));
 			ref = ir_LOAD_A(jit_IP(jit));
 			ir_TAILCALL(IR_VOID, ref);
 		}
 	} else {
-		zend_vm_opcode_handler_t handler = opline->handler;
+		zend_vm_opcode_handler_t handler = zend_jit_function_orig_handler(jit, opline);
 		if (GCC_GLOBAL_REGS || ZEND_VM_KIND == ZEND_VM_KIND_TAILCALL) {
 			zend_jit_tailcall_handler(jit, ir_CONST_OPCODE_HANDLER_FUNC(handler));
 		} else if ((jit->ssa->cfg.flags & ZEND_FUNC_RECURSIVE_DIRECTLY)
@@ -17148,14 +17192,27 @@ static zend_vm_opcode_handler_t zend_jit_finish(zend_jit_ctx *jit)
 					opline++;
 				}
 			}
-			opline->handler = (zend_vm_opcode_handler_t)entry;
+			bool generic = zend_jit_op_array_has_generic_types(op_array);
+			zend_jit_op_array_generic_extension *ext = generic
+				? (zend_jit_op_array_generic_extension *) ZEND_FUNC_INFO(op_array) : NULL;
+			if (generic) {
+				ext->handlers[opline - op_array->opcodes] = (zend_vm_opcode_handler_t) entry;
+				opline->handler = zend_jit_generic_func_dispatch_handler;
+			} else {
+				opline->handler = (zend_vm_opcode_handler_t) entry;
+			}
 
 			if (jit->ctx.entries_count) {
 				/* For all entries */
 				int i = jit->ctx.entries_count;
 				do {
 					ir_insn *insn = &jit->ctx.ir_base[jit->ctx.entries[--i]];
-					op_array->opcodes[insn->op2].handler = (zend_vm_opcode_handler_t)((char*)entry + insn->op3);
+					if (generic) {
+						ext->handlers[insn->op2] = (zend_vm_opcode_handler_t) ((char *) entry + insn->op3);
+						op_array->opcodes[insn->op2].handler = zend_jit_generic_func_dispatch_handler;
+					} else {
+						op_array->opcodes[insn->op2].handler = (zend_vm_opcode_handler_t)((char*)entry + insn->op3);
+					}
 				} while (i != 0);
 			}
 		} else {

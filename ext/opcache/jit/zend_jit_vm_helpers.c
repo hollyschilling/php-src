@@ -494,6 +494,17 @@ static zend_always_inline ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_CCONV zend
 	}
 }
 
+ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_CCONV zend_jit_generic_func_dispatch_helper(ZEND_OPCODE_HANDLER_ARGS)
+{
+	zend_jit_op_array_generic_extension *ext =
+		(zend_jit_op_array_generic_extension *) ZEND_FUNC_INFO(&EX(func)->op_array);
+	if (UNEXPECTED(!ext->attempted)) {
+		zend_jit_compile_generic_func(execute_data);
+	}
+	zend_vm_opcode_handler_t handler = ext->handlers[opline - EX(func)->op_array.opcodes];
+	ZEND_OPCODE_TAIL_CALL(handler);
+}
+
 ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_CCONV zend_jit_func_trace_helper(ZEND_OPCODE_HANDLER_ARGS)
 {
 	zend_jit_op_array_trace_extension *jit_extension =

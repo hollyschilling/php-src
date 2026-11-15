@@ -147,6 +147,8 @@ typedef struct _zend_jit_globals {
 	uint8_t bad_root_cache_stop[ZEND_JIT_TRACE_BAD_ROOT_SLOTS];
 	uint32_t bad_root_slot;
 
+	HashTable *generic_closure_cache; /* request-owned compilation prototypes */
+
 	uint8_t  *exit_counters;
 } zend_jit_globals;
 

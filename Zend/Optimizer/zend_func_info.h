@@ -44,6 +44,8 @@
 	entered through the generic dispatch handlers instead of patched opline
 	handlers (opcodes are shared between all clones of a template) */
 
+#define ZEND_FUNC_GENERIC_FUNCTION         (1<<19) /* per-specialization function JIT */
+
 typedef struct _zend_func_info zend_func_info;
 typedef struct _zend_call_info zend_call_info;
 

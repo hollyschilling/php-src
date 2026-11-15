@@ -30,6 +30,7 @@
 #include "zend_partial.h"
 
 #ifdef HAVE_JIT
+# include "zend_generics.h"
 # include "Optimizer/zend_func_info.h"
 # include "jit/zend_jit.h"
 #endif
@@ -1485,8 +1486,10 @@ static void zend_accel_persist_link_func_info(zend_op_array *op_array, const zen
 	if (op_array->type == ZEND_USER_FUNCTION
 	 && !(op_array->fn_flags & ZEND_ACC_ABSTRACT)) {
 		if ((op_array->scope != ce
+		 || (ce->ce_flags2 & ZEND_ACC2_GENERIC_INSTANCE)
 		 || (op_array->fn_flags & ZEND_ACC_TRAIT_CLONE))
-		  && (JIT_G(trigger) == ZEND_JIT_ON_FIRST_EXEC
+		  && (JIT_G(trigger) == ZEND_JIT_ON_SCRIPT_LOAD
+		  || JIT_G(trigger) == ZEND_JIT_ON_FIRST_EXEC
 		  || JIT_G(trigger) == ZEND_JIT_ON_PROF_REQUEST
 		  || JIT_G(trigger) == ZEND_JIT_ON_HOT_COUNTERS
 		  || JIT_G(trigger) == ZEND_JIT_ON_HOT_TRACE)) {
@@ -1494,6 +1497,13 @@ static void zend_accel_persist_link_func_info(zend_op_array *op_array, const zen
 
 			if (jit_extension) {
 				ZEND_SET_FUNC_INFO(op_array, jit_extension);
+				/* Stamped classes share their template's opcodes, but their
+				 * substituted signatures need independent trace metadata.
+				 * Attach it after persistence, when both headers and opcodes
+				 * have their final shared-memory addresses. */
+				if (zend_generics_jit_clone_hook != NULL) {
+					zend_generics_jit_clone_hook(op_array);
+				}
 			}
 		}
 	}

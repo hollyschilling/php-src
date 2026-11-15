@@ -444,7 +444,7 @@ typedef struct _zend_oparray_context {
 /* template: its per-creation copies carry per-binding    |     |     |     */
 /* substituted signatures, so JIT machine code must not   |     |     |     */
 /* be keyed to the shared persistent definition. Function |     |     |     */
-/* -mode JIT excludes these; the tracing JIT records      |     |     |     */
+/* -mode JIT dispatches per copy; the tracing JIT records |     |     |     */
 /* through them without callee identity (checks run       |     |     |     */
 /* against the executing copy at runtime).                |     |     |     */
 #define ZEND_ACC2_GENERIC_CONTEXT        (1 << 5)  /*     |  X  |     |     */

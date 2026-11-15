@@ -132,6 +132,19 @@ typedef struct _zend_jit_op_array_extension {
 	zend_vm_opcode_handler_t orig_handler;
 } zend_jit_op_array_extension;
 
+/* Generic specializations share opcodes. Function JIT entries belong to the
+ * executing specialization instead of the shared opcode handler slots. */
+typedef struct _zend_jit_op_array_generic_extension {
+	zend_jit_op_array_extension base;
+	bool attempted;
+	/* Borrowed immutable VM handlers in the shared root allocation. */
+	const zend_vm_opcode_handler_t *orig_handlers;
+	/* Mutable native entry points, owned by this specialization. */
+	zend_vm_opcode_handler_t handlers[1];
+} zend_jit_op_array_generic_extension;
+
+void ZEND_FASTCALL zend_jit_compile_generic_func(zend_execute_data *execute_data);
+
 /* Profiler */
 extern zend_ulong zend_jit_profile_counter;
 extern int zend_jit_profile_counter_rid;
@@ -235,6 +248,7 @@ ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_CCONV zend_jit_leave_func_helper_tai
 
 #if ZEND_VM_KIND == ZEND_VM_KIND_CALL || ZEND_VM_KIND == ZEND_VM_KIND_TAILCALL
 ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_CCONV zend_jit_profile_helper(ZEND_OPCODE_HANDLER_ARGS);
+ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_CCONV zend_jit_generic_func_dispatch_helper(ZEND_OPCODE_HANDLER_ARGS);
 
 ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_CCONV zend_jit_func_counter_helper(ZEND_OPCODE_HANDLER_ARGS);
 ZEND_OPCODE_HANDLER_RET ZEND_OPCODE_HANDLER_CCONV zend_jit_loop_counter_helper(ZEND_OPCODE_HANDLER_ARGS);

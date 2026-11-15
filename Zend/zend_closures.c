@@ -226,6 +226,11 @@ ZEND_METHOD(Closure, call)
 			memset(ptr, 0, my_function->op_array.cache_size);
 		}
 
+		/* Closure::call() also copies the header and changes lexical scope.
+		 * Never reuse native property checks compiled for the original scope. */
+		if (ZEND_USER_CODE(my_function->type) && zend_generics_jit_clone_hook != NULL) {
+			zend_generics_jit_clone_hook(&my_function->op_array);
+		}
 		zend_call_function(&fci, &fci_cache);
 
 		if (ZEND_USER_CODE(my_function->type)) {
@@ -923,6 +928,9 @@ static void zend_create_closure_ex(
 	 * If the closure is unscoped or static, it has no bound object. */
 	closure->func.common.scope = scope;
 	closure->called_scope = called_scope;
+	if (func->type == ZEND_USER_FUNCTION && zend_generics_jit_clone_hook != NULL) {
+		zend_generics_jit_clone_hook(&closure->func.op_array);
+	}
 	if (scope) {
 		closure->func.common.fn_flags |= ZEND_ACC_PUBLIC;
 		if (this_ptr && (closure->func.common.fn_flags & ZEND_ACC_STATIC) == 0) {

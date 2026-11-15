@@ -2448,6 +2448,9 @@ static void zend_fixup_trait_method(zend_function *fn, zend_class_entry *ce) /* 
 	if (fn->common.scope->ce_flags & ZEND_ACC_TRAIT) {
 
 		fn->common.scope = ce;
+		if (fn->type == ZEND_USER_FUNCTION && zend_generics_jit_clone_hook != NULL) {
+			zend_generics_jit_clone_hook(&fn->op_array);
+		}
 
 		if (fn->common.fn_flags & ZEND_ACC_ABSTRACT) {
 			ce->ce_flags |= ZEND_ACC_IMPLICIT_ABSTRACT_CLASS;
